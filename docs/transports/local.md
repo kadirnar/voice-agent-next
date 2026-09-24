@@ -8,6 +8,7 @@ Linux, macOS and Windows. It is built on [sounddevice](https://python-sounddevic
 pip install "voice-agent-next[audio]"   # sounddevice + soxr
 van devices                             # list devices, host APIs and the defaults
 van doctor                              # check PortAudio and the audio setup
+van doctor --mic --echo                 # mic level, echo delay/loss, AEC advice
 van run --engine mock                   # talk to the offline mock engine
 ```
 

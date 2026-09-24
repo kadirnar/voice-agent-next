@@ -6,7 +6,7 @@ models, serves engines and runs benchmarks. Every command has `--help`.
 | Command | What it does |
 |---|---|
 | `van version` | Print the installed version |
-| `van doctor` | Check the environment: Python, audio devices and host APIs, ML runtimes, GPUs, API keys |
+| `van doctor [--network] [--mic] [--echo] [--latency] [--json]` | Diagnose the machine: Python, audio host APIs and devices, GPUs, presets, models; opt-in endpoint, microphone, echo and latency probes ([van doctor](../cli/doctor.md)) |
 | `van devices [--json]` | List audio devices: index, host API, channels, default rate, system defaults |
 | `van providers [--kind K] [--json]` | List registered providers and whether they are ready here ([providers](../providers/index.md)) |
 | `van presets [NAME] [--json]` | List presets and what each one still needs; one preset in detail ([presets](../presets.md)) |

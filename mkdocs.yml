@@ -110,6 +110,7 @@ nav:
       - Your first agent: getting-started/first-agent.md
       - Presets: presets.md
       - The van CLI: getting-started/cli.md
+      - van doctor: cli/doctor.md
       - Examples: examples.md
   - Concepts:
       - Architecture: ARCHITECTURE.md
@@ -121,6 +122,7 @@ nav:
       - Preemptive generation: concepts/preemptive-generation.md
       - Tools: concepts/tools.md
       - Failover: concepts/failover.md
+      - Session rotation: concepts/session-rotation.md
       - Observability: concepts/observability.md
       - Audio processing: audio-processing.md
   - Providers:
