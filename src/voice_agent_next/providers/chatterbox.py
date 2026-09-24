@@ -321,5 +321,5 @@ def _quiet_progress_bars() -> None:
         except Exception:
             continue
         if hasattr(module, "tqdm"):
-            module.tqdm = _passthrough
-        module.print = _quiet  # type: ignore[attr-defined]
+            setattr(module, "tqdm", _passthrough)  # noqa: B010
+        setattr(module, "print", _quiet)  # noqa: B010
