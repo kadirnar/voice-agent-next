@@ -57,6 +57,7 @@ import numpy.typing as npt
 from ..audio.frame import SAMPLE_WIDTH, AudioFrame
 from ..audio.resample import StreamResampler
 from ..errors import ConfigurationError, MissingDependencyError, ProviderError, VoiceAgentError
+from ..models import ModelFile, register_model
 from ..registry import register_provider
 from ..stt import STT, STTCapabilities, STTEvent, STTEventType, STTStream, Transcript, WordTiming
 from ..tts import TTS, ChunkedStream
@@ -542,6 +543,37 @@ SHERPA_MODELS: dict[str, SherpaModel] = {m.name: m for m in _CATALOG}
 """The model catalog by short name. The release archive name (without ``.tar.bz2``) works
 as a model name too."""
 _BY_STEM: dict[str, SherpaModel] = {m.stem: m for m in _CATALOG}
+
+
+def _catalog_files(spec: SherpaModel) -> list[ModelFile]:
+    """The downloads :func:`_materialize` makes for a catalog model (for ``van models``)."""
+    size = None if spec.extra_assets else spec.size  # spec.size covers every download
+    if spec.is_archive:
+        required = [rel for rel in spec.files.values() if rel]
+        main = ModelFile.from_archive(
+            spec.url, subdir=_CACHE_SUBDIR, sha256=spec.sha256, size=size, required=required
+        )
+    else:
+        main = ModelFile.from_url(spec.url, subdir=_CACHE_SUBDIR, sha256=spec.sha256, size=size)
+    extras = [
+        ModelFile.from_url(f"{_RELEASES}/{release}/{name}", subdir=_CACHE_SUBDIR, sha256=digest)
+        for _role, release, name, digest in spec.extra_assets
+    ]
+    return [main, *extras]
+
+
+for _spec in _CATALOG:
+    register_model(
+        _PROVIDER,
+        _spec.name,
+        kind=_spec.task,
+        files=_catalog_files(_spec),
+        license=_spec.license,
+        languages=_spec.languages,
+        description=_spec.description,
+        aliases=(_spec.stem,),
+        size=_spec.size,
+    )
 
 DEFAULT_STT_MODEL = "nemo-fastconformer-en-80ms"
 DEFAULT_TTS_MODEL = "piper-en_US-libritts_r-medium"

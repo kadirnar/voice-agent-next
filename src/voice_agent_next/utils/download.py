@@ -23,6 +23,7 @@ import posixpath
 import shutil
 import tarfile
 import tempfile
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import httpx
@@ -34,6 +35,7 @@ from .log import logger
 
 __all__ = [
     "DownloadError",
+    "ProgressCallback",
     "cache_dir",
     "download",
     "download_archive",
@@ -45,6 +47,10 @@ __all__ = [
 _ARCHIVE_SUFFIXES = (".tar.bz2", ".tbz2", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar")
 _ARCHIVE_MARKER = ".van-archive.json"
 """Written into an extracted archive directory once extraction completed."""
+
+
+ProgressCallback = Callable[[int, "int | None"], None]
+"""``progress(downloaded_bytes, total_bytes_or_None)``, called as a download advances."""
 
 
 class DownloadError(VoiceAgentError):
@@ -80,6 +86,7 @@ def download(
     force: bool = False,
     timeout: float = 60.0,
     client: httpx.Client | None = None,
+    progress: ProgressCallback | None = None,
 ) -> Path:
     """Download ``url`` into the cache (if not already there) and return the local path.
 
@@ -90,6 +97,8 @@ def download(
         sha256: expected hex digest; verified after download (and on cache hits).
         force: re-download even if the file exists.
         client: optional ``httpx.Client`` (tests inject a mock transport).
+        progress: optional ``progress(done, total)`` callback (``total`` is ``None`` when
+            the server sends no ``Content-Length``); not called on cache hits.
     """
     name = filename or url.rstrip("/").split("/")[-1].split("?")[0]
     target_dir = cache_dir() / subdir if subdir else cache_dir()
@@ -110,8 +119,14 @@ def download(
         with os.fdopen(fd, "wb") as out, http.stream("GET", url) as resp:
             if resp.status_code != 200:
                 raise DownloadError(f"GET {url} failed with HTTP {resp.status_code}")
+            length = resp.headers.get("content-length")
+            total = int(length) if length and length.isdigit() else None
+            done = 0
             for chunk in resp.iter_bytes(1 << 16):
                 out.write(chunk)
+                if progress is not None:
+                    done += len(chunk)
+                    progress(done, total)
         if sha256 is not None:
             digest = _sha256(tmp)
             if digest != sha256:
@@ -158,6 +173,7 @@ def download_archive(
     force: bool = False,
     timeout: float = 60.0,
     client: httpx.Client | None = None,
+    progress: ProgressCallback | None = None,
 ) -> Path:
     """Download a tar archive, extract it into the cache and return the extracted directory.
 
@@ -176,6 +192,7 @@ def download_archive(
         name: directory name in the cache (default: the archive name without extension).
         force: download and extract again even if the directory exists.
         client: optional ``httpx.Client`` (tests inject a mock transport).
+        progress: optional download progress callback (see :func:`download`).
     """
     filename = url.rstrip("/").split("/")[-1].split("?")[0]
     stem = name or _archive_stem(filename)
@@ -195,6 +212,7 @@ def download_archive(
         force=force,
         timeout=timeout,
         client=client,
+        progress=progress,
     )
     tmp = Path(tempfile.mkdtemp(dir=root, prefix=f".{stem}.", suffix=".tmp"))
     try:
