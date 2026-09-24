@@ -26,7 +26,11 @@ _TRANSPORTS: dict[str, str] = {
     "local": "voice_agent_next.transports.local:LocalAudioTransport",
     "websocket": "voice_agent_next.transports.websocket:WebSocketServerTransport",
     "webrtc": "voice_agent_next.transports.webrtc:WebRTCTransport",
-    "twilio": "voice_agent_next.transports.twilio:TwilioTransport",
+    "telephony": "voice_agent_next.transports.telephony:TelephonyTransport",
+    "twilio": "voice_agent_next.transports.telephony:TwilioTransport",
+    "telnyx": "voice_agent_next.transports.telephony:TelnyxTransport",
+    "vonage": "voice_agent_next.transports.telephony:VonageTransport",
+    "plivo": "voice_agent_next.transports.telephony:PlivoTransport",
 }
 
 

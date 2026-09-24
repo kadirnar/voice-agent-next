@@ -232,7 +232,9 @@ def run(
     turn_detector: Annotated[str | None, typer.Option("--turn", help="Turn detector")] = None,
     instructions: Annotated[str | None, typer.Option(help="System prompt")] = None,
     greeting: Annotated[str | None, typer.Option(help="Spoken greeting")] = None,
-    transport: Annotated[str, typer.Option(help="local|file|websocket|webrtc|twilio")] = "local",
+    transport: Annotated[
+        str, typer.Option(help="local|file|websocket|webrtc|twilio|telnyx|vonage|plivo")
+    ] = "local",
     input_wav: Annotated[
         Path | None, typer.Option("--input", help="Input WAV (file transport)")
     ] = None,
