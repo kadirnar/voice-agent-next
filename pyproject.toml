@@ -84,6 +84,8 @@ chatterbox = [
   "chatterbox-tts>=0.1.7; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
   "torch>=2.6; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
   "torchaudio>=2.6; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
+  # resemble-perth 1.0.1 (its watermarker) imports pkg_resources, gone in setuptools 81
+  "setuptools<81; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
 ]
 # CPU-only torch (see [tool.uv.sources]); no torch wheels for Intel macOS since torch 2.3
 pocket-tts = [

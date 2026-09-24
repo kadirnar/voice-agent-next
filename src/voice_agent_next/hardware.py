@@ -46,12 +46,15 @@ __all__ = [
     "ONNXRUNTIME_CUDA_LIBRARIES",
     "ONNXRUNTIME_GPU_HINT",
     "ONNX_DEVICES",
+    "TORCH_CUDA_HINT",
+    "TORCH_DEVICES",
     "AppleSilicon",
     "Backend",
     "CTranslate2Info",
     "CudaLibrary",
     "NvidiaInfo",
     "OnnxRuntimeInfo",
+    "TorchInfo",
     "clear_cache",
     "ctranslate2_compute_type",
     "ctranslate2_info",
@@ -64,13 +67,20 @@ __all__ = [
     "report",
     "select_ctranslate2_backend",
     "select_onnx_backend",
+    "select_torch_backend",
     "session_providers",
+    "torch_info",
 ]
 
 CUDA_EXTRA_HINT = "pip install 'voice-agent-next[cuda]'"
 """Installs the CUDA libraries CTranslate2 (faster-whisper) needs."""
 ONNXRUNTIME_GPU_HINT = "pip uninstall -y onnxruntime && pip install 'onnxruntime-gpu[cuda,cudnn]'"
 """Swaps the CPU build of ONNX Runtime for the CUDA one (the two cannot be installed together)."""
+TORCH_CUDA_HINT = (
+    "pip install --force-reinstall torch torchaudio "
+    "--index-url https://download.pytorch.org/whl/cu130  (NVIDIA driver >= 580; cu128 for older)"
+)
+"""Replaces a CPU (or too old) PyTorch build with a CUDA 13 one (Blackwell GPUs need >= 2.7)."""
 
 CPU_PROVIDER = "CPUExecutionProvider"
 EXECUTION_PROVIDERS: dict[str, str] = {
@@ -439,6 +449,82 @@ def ctranslate2_compute_type(ct2: Any, device: str, requested: str = "auto") -> 
     return next((ct for ct in _COMPUTE_TYPES.get(device, ()) if ct in supported), "default")
 
 
+@dataclass(frozen=True, slots=True)
+class TorchInfo:
+    """The installed PyTorch build and the devices it can use."""
+
+    version: str
+    cuda_version: str | None = None
+    """CUDA version of a CUDA build (``"13.0"``); ``None`` for CPU builds."""
+    cuda_devices: int = 0
+    arch_list: tuple[str, ...] = ()
+    """GPU architectures compiled into the build (``"sm_120"``, ``"compute_90"``...)."""
+    capabilities: tuple[tuple[int, int], ...] = ()
+    """Compute capability of each CUDA device."""
+    mps: bool = False
+    """Apple Metal (MPS) is usable."""
+
+    def supports(self, capability: tuple[int, int]) -> bool:
+        """Whether this build has kernels for a GPU of this compute capability.
+
+        CUDA binaries run on GPUs of the same major version and a newer or equal minor
+        version; PTX (``compute_XY``) is compiled at load time for any newer GPU. An empty
+        arch list (unknown) counts as supported.
+        """
+        if not self.arch_list:
+            return True
+        major, minor = capability
+        for arch in self.arch_list:
+            kind, _, digits = arch.partition("_")
+            if not digits.isdigit() or len(digits) < 2:
+                continue
+            a_major, a_minor = int(digits[:-1]), int(digits[-1])
+            if kind == "sm" and a_major == major and a_minor <= minor:
+                return True
+            if kind == "compute" and (a_major, a_minor) <= capability:
+                return True
+        return False
+
+
+def torch_info(torch: Any = None) -> TorchInfo | None:
+    """PyTorch's view of the machine (``None`` when it is not installed or broken)."""
+    if torch is None:
+        if not is_installed("torch"):
+            return None
+        try:
+            torch = importlib.import_module("torch")
+        except Exception as exc:
+            logger.debug("hardware: torch does not import: %s", exc)
+            return None
+    cuda_version = getattr(getattr(torch, "version", None), "cuda", None)
+    devices = 0
+    arch_list: tuple[str, ...] = ()
+    capabilities: tuple[tuple[int, int], ...] = ()
+    try:
+        if torch.cuda.is_available():
+            devices = int(torch.cuda.device_count())
+            arch_list = tuple(torch.cuda.get_arch_list())
+            capabilities = tuple(
+                (int(cap[0]), int(cap[1]))
+                for cap in (torch.cuda.get_device_capability(i) for i in range(devices))
+            )
+    except Exception as exc:  # broken drivers
+        logger.debug("hardware: torch.cuda failed: %s", exc)
+        devices = 0
+    try:
+        mps = bool(torch.backends.mps.is_available())
+    except Exception:
+        mps = False
+    return TorchInfo(
+        version=str(getattr(torch, "__version__", "unknown")),
+        cuda_version=cuda_version if isinstance(cuda_version, str) and cuda_version else None,
+        cuda_devices=devices,
+        arch_list=arch_list,
+        capabilities=capabilities,
+        mps=mps,
+    )
+
+
 # --------------------------------------------------------------- CUDA libraries
 @dataclass(frozen=True, slots=True)
 class CudaLibrary:
@@ -799,6 +885,98 @@ def select_onnx_backend(
     return Backend("cpu", providers=(CPU_PROVIDER,), reason=reason)
 
 
+TORCH_DEVICES = ("auto", "cuda", "mps", "cpu")
+"""Valid ``device`` values of PyTorch based providers (``"cuda:1"`` is accepted too)."""
+
+
+def select_torch_backend(
+    device: str = "auto",
+    *,
+    accelerators: Sequence[str] = ("cuda", "mps"),
+    torch: Any = None,
+    info: TorchInfo | None = None,
+) -> Backend:
+    """Where a PyTorch model runs.
+
+    ``"auto"`` picks the first of ``accelerators`` that works: CUDA when PyTorch sees a GPU
+    *and* was compiled for its architecture (a PyTorch build older than the GPU silently
+    fails at the first kernel, e.g. torch < 2.7 on an RTX 50xx), Apple MPS when available;
+    CPU otherwise, saying why and, when a CUDA build of PyTorch would help, how to get it.
+
+    Args:
+        device: ``"auto"``, ``"cuda"`` (or ``"cuda:<index>"``), ``"mps"`` or ``"cpu"``.
+        accelerators: devices that make this model faster, best first (``"auto"`` only).
+        torch: the ``torch`` module (imported when omitted).
+        info: what :func:`torch_info` returned, instead of ``torch``.
+
+    Raises:
+        ConfigurationError: ``device`` is unknown, or explicitly requested and not usable.
+    """
+    base, _, index_text = device.partition(":")
+    if base not in TORCH_DEVICES or (index_text and (base != "cuda" or not index_text.isdigit())):
+        raise ConfigurationError(f"device must be one of {TORCH_DEVICES}, got {device!r}")
+    if device == "cpu":
+        return Backend("cpu", reason="requested")
+    if info is None:
+        info = torch_info(torch)
+    if info is None:
+        raise ConfigurationError("PyTorch is not installed or does not import")
+    index = int(index_text) if index_text else 0
+    if base != "auto":
+        backend = _torch_accelerator(base, info, index)
+        if backend.device == "cpu":
+            fix = f"; {backend.fix}" if backend.fix else ""
+            raise ConfigurationError(f"device={device!r} is not usable: {backend.reason}{fix}")
+        return replace(backend, device=device, reason=f"requested, {backend.reason}")
+    unusable = []
+    for name in accelerators:
+        backend = _torch_accelerator(name, info, 0)
+        if backend.device != "cpu":
+            return backend
+        unusable.append(backend)
+    explained = next((b for b in unusable if b.fix), None)
+    if explained is not None:
+        return explained
+    return Backend("cpu", reason="no accelerator available" if accelerators else "runs on CPU")
+
+
+def _torch_accelerator(device: str, info: TorchInfo, index: int) -> Backend:
+    """``device`` when usable, else a CPU backend saying why not."""
+    if device == "mps":
+        return Backend("mps", reason="Apple MPS") if info.mps else Backend("cpu", reason="no MPS")
+    nvidia = detect_nvidia()
+    build = f"torch {info.version}"
+    if info.cuda_version is None:
+        if nvidia.gpus:
+            return Backend(
+                "cpu",
+                reason=f"{nvidia.gpu_name()} found but {build} is a CPU build",
+                fix=TORCH_CUDA_HINT,
+            )
+        return Backend("cpu", reason="no CUDA GPU")
+    if info.cuda_devices <= index:
+        if not nvidia.gpus:
+            return Backend("cpu", reason="no CUDA GPU")
+        if os.environ.get("CUDA_VISIBLE_DEVICES", "unset").strip() in ("", "-1"):
+            return Backend("cpu", reason=f"{nvidia.gpu_name()} hidden by CUDA_VISIBLE_DEVICES")
+        return Backend(
+            "cpu",
+            reason=f"{nvidia.gpu_name()} found but {build} (CUDA {info.cuda_version}) cannot use "
+            f"it (driver {nvidia.driver_version or 'unknown'} too old?)",
+            fix="update the NVIDIA driver, or install a torch build for an older CUDA version",
+        )
+    gpu = nvidia.gpu_name(index)
+    if index < len(info.capabilities) and not info.supports(info.capabilities[index]):
+        major, minor = info.capabilities[index]
+        return Backend(
+            "cpu",
+            reason=f"{gpu} (sm_{major}{minor}) is not supported by {build} "
+            f"(built for {', '.join(info.arch_list)})",
+            fix=TORCH_CUDA_HINT,
+        )
+    return Backend("cuda", reason=gpu)
+
+
 def _onnx_accelerator(device: str, info: OnnxRuntimeInfo, *, explicit: bool) -> Backend:
     """``device`` when usable, else a CPU backend saying why not.
 
@@ -908,6 +1086,14 @@ def report() -> list[tuple[str, str]]:
             lambda: _describe_backend(
                 select_onnx_backend(accelerators=("cuda", "coreml", "directml"))
             ),
+        )
+    pt = torch_info() if is_installed("torch") else None
+    if pt is not None:
+        cuda = f"CUDA {pt.cuda_version}" if pt.cuda_version else "CPU build"
+        row("torch", lambda: f"{pt.version} ({cuda}, {pt.cuda_devices} CUDA device(s))")
+        row(
+            "torch device=auto (Chatterbox, Qwen3-TTS)",
+            lambda: _describe_backend(select_torch_backend(info=pt)),
         )
     return rows
 
