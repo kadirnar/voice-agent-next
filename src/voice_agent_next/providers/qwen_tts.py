@@ -162,9 +162,9 @@ class QwenTTS(LocalTorchTTS):
         temperature, top_k, top_p, repetition_penalty: sampling of the first codebook
             (default: the model's generation config).
         max_new_tokens: frame cap per sentence (default: from the text length).
-        fast_code_predictor: generate the 15 residual codebooks of each frame with a
-            plain sampling loop instead of Hugging Face ``generate`` (same sampling, several
-            times faster: the difference between faster and slower than real time).
+        cuda_graphs: on CUDA, run the per-frame code predictor (15 tiny decoding steps)
+            as a captured CUDA graph: several times faster, the difference between slower
+            and faster than real time.
         split_sentences: synthesize long texts sentence by sentence.
         word_timings: attach estimated word timings to the audio.
         clean_text: strip markdown/emoji before synthesis.
@@ -192,7 +192,7 @@ class QwenTTS(LocalTorchTTS):
         top_p: float | None = None,
         repetition_penalty: float | None = None,
         max_new_tokens: int | None = None,
-        fast_code_predictor: bool = True,
+        cuda_graphs: bool = True,
         split_sentences: bool = True,
         word_timings: bool = True,
         clean_text: bool = True,
@@ -229,7 +229,7 @@ class QwenTTS(LocalTorchTTS):
         self.chunk_frames = chunk_frames
         self.context_frames = context_frames
         self.max_new_tokens = max_new_tokens
-        self.fast_code_predictor = fast_code_predictor
+        self.cuda_graphs = cuda_graphs
         self._sampling = {
             k: v
             for k, v in (
@@ -278,8 +278,8 @@ class QwenTTS(LocalTorchTTS):
             raise ConfigurationError(f"cannot load Qwen3-TTS model {self.model}: {exc}") from exc
         self.model_type = str(getattr(tts.model, "tts_model_type", "custom_voice"))
         predictor = getattr(getattr(tts.model, "talker", None), "code_predictor", None)
-        if self.fast_code_predictor and predictor is not None:
-            _FastCodePredictor(predictor, torch).install()
+        if self.cuda_graphs and device.startswith("cuda") and predictor is not None:
+            _GraphCodePredictor(predictor, torch).install()
         if self.model_type == "base" and not self.voice:
             logger.warning(
                 "qwen-tts: %s is a voice-cloning model: pass voice=<reference.wav>", self.model
@@ -485,80 +485,129 @@ class _StreamDecoder:
         return wav[0, 0, left * self.upsample :].float().cpu().numpy()
 
 
-class _FastCodePredictor:
-    """Replaces ``code_predictor.generate`` (Hugging Face ``generate``) with a plain
-    sampling loop over the same forward pass.
+class _GraphCodePredictor:
+    """Replays ``code_predictor.generate`` as one CUDA graph per frame.
 
-    For every 80 ms frame the talker calls its code predictor to generate the 15 residual
-    codebooks, i.e. 15 decoding steps of a 5-layer model: small enough that the generic
-    ``generate`` machinery (logits processors, stopping criteria, output bookkeeping)
-    costs more than the model. Same sampling (temperature, top-k, top-p), same result
-    type as far as the talker is concerned (``.sequences``).
+    For every 80 ms frame the talker asks its code predictor for the 15 residual codebooks:
+    15 decoding steps of a 5-layer model. In eager PyTorch with Hugging Face ``generate``
+    that is ~65 ms of Python and kernel-launch overhead per frame (the GPU is mostly idle),
+    which alone makes the model slower than real time. The shapes never change (batch 1,
+    a 2-embedding prompt, 15 tokens), so the whole loop, sampling included, is captured
+    once into a CUDA graph over a static KV cache and replayed (~10 ms on an RTX 5070 Ti).
+    Anything else (other shapes, greedy decoding, a failed capture) falls back to the
+    original ``generate``.
     """
 
     def __init__(self, predictor: Any, torch: Any) -> None:
         self.predictor = predictor
         self.torch = torch
         self.original = predictor.generate
+        self.steps = int(predictor.config.num_code_groups) - 1
+        self.graphs: dict[tuple[Any, ...], Any] = {}
+        self.failed = False
 
     def install(self) -> None:
         self.predictor.generate = self
 
-    def __call__(
-        self,
-        inputs_embeds: Any = None,
-        max_new_tokens: int = 15,
-        do_sample: bool | None = True,
-        top_p: float | None = 1.0,
-        top_k: int | None = 50,
-        temperature: float | None = 1.0,
-        **_kwargs: Any,
-    ) -> Any:
-        torch = self.torch
-        cache_module = require("transformers.cache_utils", extra=_EXTRA)
-        cache = cache_module.DynamicCache()
-        predictor = self.predictor
-        tokens = []
-        with torch.inference_mode():
-            out = predictor(inputs_embeds=inputs_embeds, past_key_values=cache, use_cache=True)
-            for step in range(max_new_tokens):
-                token = self._sample(out.logits[:, -1], do_sample, top_k, top_p, temperature)
-                tokens.append(token)
-                if step + 1 == max_new_tokens:
-                    break
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        embeds = kwargs.get("inputs_embeds")
+        key = (kwargs.get("top_k"), kwargs.get("top_p"))
+        usable = (
+            not self.failed
+            and not args
+            and embeds is not None
+            and tuple(embeds.shape[:2]) == (1, 2)
+            and embeds.is_cuda
+            and kwargs.get("do_sample", True)
+            and kwargs.get("max_new_tokens", self.steps) == self.steps
+        )
+        if not usable:
+            return self.original(*args, **kwargs)
+        graph = self.graphs.get(key)
+        if graph is None:
+            try:
+                graph = self.graphs[key] = _PredictorGraph(self, embeds, *key)
+            except Exception as exc:  # e.g. an op that cannot be captured
+                logger.warning("qwen-tts: no CUDA graph for the code predictor (%s)", exc)
+                self.failed = True
+                return self.original(*args, **kwargs)
+        return graph.run(embeds, kwargs.get("temperature") or 1.0)
+
+
+class _PredictorGraph:
+    def __init__(
+        self, owner: _GraphCodePredictor, embeds: Any, top_k: int | None, top_p: float | None
+    ) -> None:
+        torch = owner.torch
+        cache_utils = require("transformers.cache_utils", extra=_EXTRA)
+        predictor, steps, device = owner.predictor, owner.steps, embeds.device
+        self.torch = torch
+        self.cache = cache_utils.StaticCache(
+            config=predictor.config,
+            max_batch_size=1,
+            max_cache_len=steps + 2,
+            device=device,
+            dtype=embeds.dtype,
+        )
+        self.embeds = torch.zeros_like(embeds)
+        self.temperature = torch.ones(1, 1, device=device)
+        self.tokens = torch.zeros(1, steps, dtype=torch.long, device=device)
+        # the graph reads these tensors by address: they must live as long as it does
+        self.prefill = prefill = torch.arange(2, device=device)
+        self.positions = positions = [torch.tensor([1 + i], device=device) for i in range(steps)]
+
+        def sample(logits: Any) -> Any:
+            logits = logits.float() / self.temperature
+            if top_k and top_k < logits.shape[-1]:
+                kth = torch.topk(logits, top_k, dim=-1).values[..., -1:]
+                logits = logits.masked_fill(logits < kth, float("-inf"))
+            if top_p is not None and top_p < 1.0:
+                ordered, index = torch.sort(logits, descending=True, dim=-1)
+                probs = ordered.softmax(dim=-1)
+                ordered = ordered.masked_fill(probs.cumsum(dim=-1) - probs > top_p, float("-inf"))
+                logits = torch.full_like(logits, float("-inf")).scatter(-1, index, ordered)
+            return torch.multinomial(logits.softmax(dim=-1), 1)
+
+        def loop() -> None:
+            self.cache.reset()
+            out = predictor(
+                inputs_embeds=self.embeds,
+                past_key_values=self.cache,
+                use_cache=True,
+                cache_position=prefill,
+            )
+            token = sample(out.logits[:, -1])
+            tokens = [token]
+            for i in range(1, steps):
                 out = predictor(
-                    input_ids=token[:, None],
-                    past_key_values=cache,
+                    input_ids=token,
+                    past_key_values=self.cache,
                     use_cache=True,
+                    cache_position=positions[i],
                     generation_steps=out.generation_steps,
                 )
-        return _Sequences(torch.stack(tokens, dim=-1))
+                token = sample(out.logits[:, -1])
+                tokens.append(token)
+            self.tokens.copy_(torch.cat(tokens, dim=-1))
 
-    def _sample(
-        self,
-        logits: Any,
-        do_sample: bool | None,
-        top_k: int | None,
-        top_p: float | None,
-        temperature: float | None,
-    ) -> Any:
-        torch = self.torch
-        logits = logits.float()
-        if not do_sample:
-            return logits.argmax(dim=-1)
-        if temperature and temperature != 1.0:
-            logits = logits / temperature
-        if top_k and top_k < logits.shape[-1]:
-            kth = torch.topk(logits, top_k, dim=-1).values[..., -1:]
-            logits = logits.masked_fill(logits < kth, float("-inf"))
-        if top_p is not None and top_p < 1.0:
-            ordered, index = torch.sort(logits, descending=True, dim=-1)
-            cumulative = ordered.softmax(dim=-1).cumsum(dim=-1)
-            drop = cumulative - ordered.softmax(dim=-1) > top_p  # keep the first token
-            ordered = ordered.masked_fill(drop, float("-inf"))
-            logits = torch.full_like(logits, float("-inf")).scatter(-1, index, ordered)
-        probs = logits.softmax(dim=-1)
-        return torch.multinomial(probs, num_samples=1).squeeze(-1)
+        with torch.inference_mode():
+            self.embeds.copy_(embeds)
+            side = torch.cuda.Stream(device=device)
+            side.wait_stream(torch.cuda.current_stream(device))
+            with torch.cuda.stream(side):  # warm-up outside the graph (allocations, autotune)
+                for _ in range(2):
+                    loop()
+            torch.cuda.current_stream(device).wait_stream(side)
+            self.graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(self.graph):
+                loop()
+
+    def run(self, embeds: Any, temperature: float) -> Any:
+        with self.torch.inference_mode():
+            self.embeds.copy_(embeds)
+            self.temperature.fill_(float(temperature))
+            self.graph.replay()
+            return _Sequences(self.tokens.clone())
 
 
 class _Sequences:
