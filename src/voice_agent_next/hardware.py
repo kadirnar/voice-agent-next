@@ -937,7 +937,7 @@ def select_torch_backend(
     explained = next((b for b in unusable if b.fix), None)
     if explained is not None:
         return explained
-    return Backend("cpu", reason="no accelerator available" if accelerators else "runs on CPU")
+    return unusable[0] if unusable else Backend("cpu", reason="runs on CPU")
 
 
 def _torch_accelerator(device: str, info: TorchInfo, index: int) -> Backend:
