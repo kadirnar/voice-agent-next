@@ -340,14 +340,15 @@ async def test_interims_while_speaking_and_a_final_on_flush(backend: Backend) ->
     assert backend.streams[0].closed
 
 
-async def test_updates_follow_update_interval_and_force_flag(backend: Backend) -> None:
-    stt = MoonshineSTT(update_interval=0.5, force_updates=True)
+async def test_updates_follow_update_interval(backend: Backend) -> None:
+    stt = MoonshineSTT(update_interval=0.5)
     stream = stt.stream()
     await feed(stream, synth_speech(2.0, 16_000), pace=0.001)
     stream.end_input()
     [e async for e in stream]
     assert 2 <= len(backend.updates) <= 4  # ~every 0.5 s of audio, not every frame
-    assert set(backend.updates) == {1}  # MOONSHINE_FLAG_FORCE_UPDATE
+    assert set(backend.updates) == {0}
+    assert backend.loads[0]["options"]["transcription_interval"] == "0.5"
     assert backend.loads[0]["update_interval"] >= 1e6  # the package's own cadence is off
     await stream.aclose()
 
@@ -472,6 +473,7 @@ async def test_aclose_mid_stream_closes_the_native_stream(backend: Backend) -> N
 async def test_model_loads_once_lazily_in_a_worker_thread(backend: Backend) -> None:
     stt = MoonshineSTT(
         model="medium-streaming",
+        update_interval=0.2,
         keyterms=["Kubernetes", " Moonshine "],
         cache_dir="model-cache",
         options={"vad_threshold": 0.6, "identify_speakers": False, "return_audio_data": True},
@@ -483,6 +485,7 @@ async def test_model_loads_once_lazily_in_a_worker_thread(backend: Backend) -> N
     assert load["arch"] == 5
     assert load["options"] == {
         "return_audio_data": "true",  # options= wins
+        "transcription_interval": "0.2",
         "keyterms": "Kubernetes,Moonshine",
         "vad_threshold": "0.6",
         "identify_speakers": "false",

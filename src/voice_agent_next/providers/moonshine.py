@@ -101,12 +101,11 @@ class MoonshineSTT(STT):
         language: language code (``"en"`` default; region suffixes are dropped). Other
             languages have separate models, see ``docs/providers/moonshine.md``.
         arch: architecture of a local model directory (one of the model names above).
-        update_interval: seconds of new audio between incremental transcription passes.
-            Each pass encodes the new audio (so a flush has little left to do) and, with
-            ``interim_results``, decodes the current line. The runtime skips passes that
-            come less than ~0.5 s apart unless ``force_updates`` is set.
-        force_updates: run every pass at ``update_interval`` (lower flush latency, about
-            twice the CPU).
+        update_interval: seconds of new audio between incremental transcription passes
+            (also the runtime's ``transcription_interval``). Each pass encodes the new
+            audio, so a flush has little left to do, and with ``interim_results`` decodes
+            the current line. 0.5 s is the runtime's default; 0.2 s makes flushes ~60 ms
+            faster for ~2.5x the CPU (see ``docs/providers/moonshine.md``).
         interim_results: emit interim transcripts; ``False`` only encodes while the
             user speaks and decodes on completion (``decode_incomplete_lines=false``).
         word_timestamps: fill :attr:`Transcript.words` (downloads an extra decoder).
@@ -126,8 +125,7 @@ class MoonshineSTT(STT):
         model: str | None = None,
         language: str | None = None,
         arch: str | None = None,
-        update_interval: float = 0.2,
-        force_updates: bool = False,
+        update_interval: float = 0.5,
         interim_results: bool = True,
         word_timestamps: bool = False,
         keyterms: Sequence[str] | None = None,
@@ -168,7 +166,6 @@ class MoonshineSTT(STT):
         )
         self.arch = arch_name
         self.update_interval = update_interval
-        self.force_updates = force_updates
         self.interim_results = interim_results
         self.word_timestamps = word_timestamps
         self.keyterms = terms
@@ -210,7 +207,10 @@ class MoonshineSTT(STT):
         mv = require("moonshine_voice", extra=_EXTRA, package=_PACKAGE)
         t0 = now()
         path = self._model_dir()
-        options: dict[str, Any] = {"return_audio_data": "false"}
+        options: dict[str, Any] = {
+            "return_audio_data": "false",
+            "transcription_interval": _option_value(self.update_interval),
+        }
         if not self.interim_results:
             options["decode_incomplete_lines"] = "false"
         if self.word_timestamps:
@@ -379,8 +379,7 @@ class _MoonshineStream(STTStream):
                         )
                     native.start()
                 elif self._since_update >= stt.update_interval:
-                    flags = 1 if stt.force_updates else 0  # MOONSHINE_FLAG_FORCE_UPDATE
-                    transcript = native.update_transcription(flags)
+                    transcript = native.update_transcription(0)
                 else:
                     return []
             except VoiceAgentError:
