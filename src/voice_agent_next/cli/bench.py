@@ -773,7 +773,7 @@ def vad_cmd(
     vad: Annotated[
         list[str] | None,
         typer.Option(
-            "--vad", help="VAD spec, repeatable: energy, silero, sherpa-onnx/ten, or a mapping"
+            "--vad", help="VAD spec, repeatable: energy, silero, sherpa-onnx/ten-vad, or a mapping"
         ),
     ] = None,
     dataset: Annotated[
@@ -808,7 +808,7 @@ def vad_cmd(
 
     Examples:
 
-        van bench vad --vad energy --vad silero --vad sherpa-onnx/ten
+        van bench vad --vad energy --vad silero --vad sherpa-onnx/ten-vad
 
         van bench vad --vad silero --condition clean --condition pink@0 --limit 20
     """

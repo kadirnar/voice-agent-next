@@ -39,7 +39,7 @@ van bench asr --stt sherpa-onnx/nemo-fastconformer-en-80ms --mode streaming
 
 # T4: VADs on a labelled corpus (LibriSpeech smoke + noise), turn detectors on eot-bench,
 # and the turn-taking battery on any engine
-van bench vad --vad energy --vad silero --vad sherpa-onnx/ten
+van bench vad --vad energy --vad silero --vad sherpa-onnx/ten-vad
 van bench turns --detector smart_turn
 van bench turn-taking -c agent.yaml -s benchmarks/scenarios/turn-taking-local.yaml
 
@@ -282,7 +282,7 @@ to latency, at three levels.
 ### VAD (`van bench vad`)
 
 ```bash
-van bench vad --vad energy --vad silero --vad sherpa-onnx/ten       # 50 utterances x 6 conditions
+van bench vad --vad energy --vad silero --vad sherpa-onnx/ten-vad       # 50 utterances x 6 conditions
 van bench vad --vad silero --condition clean --condition pink@0 --limit 20
 ```
 
@@ -305,6 +305,11 @@ Audio is streamed through `VAD.stream()` in 20 ms chunks, faster than real time.
 | `missed_utterances` | utterances without any detected speech |
 | `false_alarms_per_min` | `START_OF_SPEECH` outside every utterance (± 100 ms), per minute of the remaining audio |
 | `rtf` | inference time / audio time |
+
+VADs that expose only a yes/no decision (the sherpa-onnx Silero and TEN VAD bindings return
+`is_speech()`, which already includes sherpa's own hangover) get probabilities of 0 or 1:
+their AUC is that of a single operating point, and their frame false alarms include the
+hangover after each utterance. Compare them with each other and on F1 / onset / offset.
 
 ### End of turn (`van bench turns`)
 

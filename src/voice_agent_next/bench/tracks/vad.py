@@ -1,6 +1,6 @@
 """T4 VAD track: frame accuracy and speed of voice activity detectors.
 
-``van bench vad --vad energy --vad silero --vad sherpa-onnx/ten`` runs every VAD over the
+``van bench vad --vad energy --vad silero --vad sherpa-onnx/ten-vad`` runs every VAD over the
 same deterministic, frame-labelled corpus (:mod:`voice_agent_next.bench.vad_corpus`) in
 every noise condition, through the public streaming API (``VAD.stream()``, 20 ms chunks),
 and reports (research note 06, §8.3 T4):
