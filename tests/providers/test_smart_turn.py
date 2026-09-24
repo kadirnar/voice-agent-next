@@ -456,7 +456,7 @@ def jfk() -> AudioFrame:
     """JFK, 1961 (public domain): "And so my fellow Americans, ask not what your country can
     do for you, ask what you can do for your country." 11 s, 16 kHz mono."""
     pytest.importorskip("onnxruntime")
-    return read_wav(download(JFK_URL, subdir="test-data", sha256=JFK_SHA256))
+    return read_wav(download(JFK_URL, subdir="testdata", sha256=JFK_SHA256))  # shared cache
 
 
 def utterances(jfk: AudioFrame) -> dict[str, AudioFrame]:
@@ -488,6 +488,17 @@ async def test_real_model_complete_vs_truncated(model: str, jfk: AudioFrame) -> 
     assert probabilities.pop("complete") >= 0.5 and p_48k >= 0.5
     assert all(p < 0.5 for p in probabilities.values()), probabilities
     await detector.aclose()
+
+
+@pytest.mark.model
+async def test_real_model_works_offline_once_cached(
+    jfk: AudioFrame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await SmartTurnDetector().warmup()  # downloads the model unless it is cached already
+    monkeypatch.setenv("VAN_OFFLINE", "1")
+    detector = SmartTurnDetector()
+    p = await detector.predict_end_of_turn(audio=utterances(jfk)["complete"])
+    assert p >= 0.5
 
 
 @pytest.mark.model

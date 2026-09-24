@@ -41,8 +41,10 @@ from ..chat import ChatContext
 from ..errors import ConfigurationError, ProviderError
 from ..registry import register_provider
 from ..turn import TurnDetector
+from ..utils.clock import now
 from ..utils.deps import require
 from ..utils.download import hf_file
+from ..utils.log import logger
 
 __all__ = [
     "DEFAULT_MODEL",
@@ -293,15 +295,22 @@ class SmartTurnDetector(TurnDetector):
         # idle worker threads must not busy-wait between the (rare) predictions
         opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
         opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
+        t0 = now()
         try:
             session = ort.InferenceSession(
-                str(path), sess_options=opts, providers=list(self.providers)
+                os.fspath(path), sess_options=opts, providers=list(self.providers)
             )
-        except Exception as exc:
+        except Exception as exc:  # onnxruntime errors derive from Exception only
             raise ProviderError(
                 f"failed to load Smart Turn model {path}: {exc}", provider=self.provider
             ) from exc
         self._input_name = session.get_inputs()[0].name
+        logger.debug(
+            "loaded Smart Turn model %s in %.1f ms (providers: %s)",
+            path,
+            (now() - t0) * 1e3,
+            self.providers,
+        )
         return session
 
     def _get_session(self) -> Any:
