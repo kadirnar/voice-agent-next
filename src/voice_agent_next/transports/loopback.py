@@ -197,14 +197,20 @@ class LoopbackTransport(Transport):
         return frame
 
     async def _play_loop(self) -> None:
+        # like a sound card, queued frames play back to back on the sample clock: a late
+        # wake-up (a 15.6 ms timer tick on Windows, a loaded machine) must not make the
+        # device fall behind, only a queue that ran dry, a pause or a clear
+        play_head: float | None = None
         while True:
             if not self._queue or self._paused:
+                play_head = None
                 self._wakeup.clear()
                 await self._wakeup.wait()
                 continue
             frame = self._pop()
             cleared_at_start = self._cleared
-            start = now()
+            start = now() if play_head is None else play_head
+            play_head = None
             self._current_end = start + frame.duration
             self._deliver(frame, start)
             # sleep for the frame duration unless a clear() interrupts playback
@@ -217,4 +223,6 @@ class LoopbackTransport(Transport):
                     await asyncio.wait_for(self._wakeup.wait(), remaining)
                 except TimeoutError:
                     break
+            if self._cleared == cleared_at_start:
+                play_head = self._current_end  # played to the end: the next frame follows
             self._current_end = None
