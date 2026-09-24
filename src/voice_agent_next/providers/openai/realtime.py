@@ -1450,6 +1450,12 @@ class OpenAIRealtimeConnection(EngineConnection):
                 error = str(detail_error.get("message") or detail_error.get("code") or status)
             elif isinstance(details, Mapping) and details.get("reason"):
                 error = str(details["reason"])
+        if status == "failed":
+            provider = self.engine.provider
+            message = f"{provider}: response {rid} failed: {error or 'no details'}"
+            self._emit(
+                EngineErrorEvent(error=ProviderError(message, provider=provider), recoverable=True)
+            )
         self._finish_response(state, status, _parse_usage(response.get("usage")), error)
 
     def _finish_response(

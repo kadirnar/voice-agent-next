@@ -532,6 +532,16 @@ async def test_tool_calls_from_response_done_and_late_events() -> None:
             assert (tool[0].call.call_id, tool[0].call.id) == ("call_9", "fc_1")
             assert not rec.of(ResponseAudio)  # the late delta was dropped
             assert rec.of(ResponseDone)[0].usage is None
+            failed = {"type": "failed", "error": {"type": "server_error", "code": "overloaded",
+                                                  "message": "try again"}}  # fmt: skip
+            await server.push({"type": "response.done",
+                               "response": {"id": "resp_y", "status": "failed",
+                                            "status_details": failed}})  # fmt: skip
+            await rec.wait(lambda: len(rec.of(ResponseDone)) == 2)
+            done = rec.of(ResponseDone)[1]
+            assert (done.status, done.error) == ("failed", "try again")
+            error = rec.of(EngineErrorEvent)[0]
+            assert error.recoverable and "try again" in str(error.error)
 
 
 async def test_barge_in_cancels_and_truncates_to_the_played_audio() -> None:
