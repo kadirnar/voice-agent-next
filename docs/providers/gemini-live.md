@@ -69,7 +69,7 @@ $0.018/min; see the [pricing page](https://ai.google.dev/gemini-api/docs/pricing
 | `max_buffered_audio` | `30` | cap (seconds) on audio buffered while switching connections |
 | `connect_timeout` | `15` | handshake + setup timeout |
 | `max_reconnect_attempts` | `5` | consecutive failed reconnects before the connection fails |
-| `local_vad` | `True` | cheap energy VAD on the sent audio, used only for speech-end estimates and idle detection |
+| `local_vad` | `True` | cheap energy VAD on the sent audio: speech-end estimates, idle detection and the start of manual turns (never automatic end of turn) |
 | `base_url`, `api_version` | Google, `v1beta` | endpoint (proxies, tests) |
 | `extra_setup` | `{}` | extra `setup` fields in API camel case, deep-merged last (`EngineOptions.extra` too) |
 
@@ -96,6 +96,13 @@ Client side: `send_audio` → `realtimeInput.audio`; `send_text` / `create_respo
 `toolResponse`; `commit_input` → `activityEnd` (manual turns) or `audioStreamEnd` (automatic
 VAD: finalize the turn now, e.g. from your own client-side VAD); `update()` → a new `setup`
 on a resumed connection (see below).
+
+**Manual turns** (`EngineOptions(turn_detection=False)`, e.g. push-to-talk): server-side
+activity detection is disabled. When the local VAD hears the user start speaking, the engine
+sends `activityStart` followed by up to 0.5 s of pre-roll audio, and `commit_input()` sends
+`activityEnd`. Audio outside activities is not sent, so a microphone that keeps streaming
+after `commit_input()` does not interrupt the answer. With `local_vad=False`, the activity
+opens on the first audio frame.
 
 Gemini commits user turns implicitly, so the engine recognizes a user turn when the model
 starts answering without the client having asked for a response. If the user's transcript
@@ -131,10 +138,13 @@ conversation to a new connection:
 issued a resumable handle. The switch is make-before-break: the new connection is set up
 while user audio is buffered, then the audio sent since the latest handle (minus speech that
 was already answered) is replayed, so no user audio is lost. A planned rotation that fails
-keeps the current connection and retries later. If the handle is rejected (expired), the
-engine starts a fresh session and re-seeds it with the user/assistant text history
-(`historyConfig.initialHistoryInClientContent`). Tool calls that the new session cannot know
-about are withdrawn with `ToolCallCancelled`.
+keeps the current connection and retries later with backoff. If the handle is rejected
+(expired) or resumption is disabled, the engine starts a fresh session, re-seeds it with the
+user/assistant text history (`historyConfig.initialHistoryInClientContent`) and replays only
+the audio after the last answered turn. Tool calls that the new session cannot know about are
+withdrawn with `ToolCallCancelled`. If the connection keeps dying (more than
+`max_reconnect_attempts` unexpected closes within a minute), the engine gives up with a
+non-recoverable `EngineErrorEvent`.
 
 ## Latency notes
 
@@ -142,9 +152,11 @@ about are withdrawn with `ToolCallCancelled`.
   (`vad={"silence_duration_ms": 600}`) is a good range. Lower values split utterances.
 * For faster endpointing, run a client-side VAD and call `commit_input()` at the end of
   speech (hybrid VAD); the server VAD stays as a fallback.
-* `EngineMetrics.ttfb` is measured from the turn commit (or client request) to the first
-  audio; the session's `TurnMetrics.voice_to_voice` from the end of speech to the first audio
-  handed to the transport.
+* `EngineMetrics.ttfb` runs to the first audio received. For voice turns it starts at the end
+  of the user's speech, because Gemini commits turns implicitly; for client requests
+  (`send_text`, tool results, ...) it starts at the request. The session's
+  `TurnMetrics.voice_to_voice` runs from the end of speech to the first audio handed to the
+  transport.
 
 ## Testing
 
@@ -171,6 +183,7 @@ Real API: `GOOGLE_API_KEY=... uv run pytest -m integration tests/test_gemini_liv
 * `cancel_response()` / `session.interrupt()` stop playback locally only (the API has no
   cancel message; the server stops by itself on user speech or new client content).
 * `clear_input()` is a no-op: audio already sent cannot be withdrawn.
-* Fresh-session re-seeding carries user/assistant text only (no tool calls/results).
+* Fresh-session re-seeding carries user/assistant text only (no tool calls/results), and a
+  response requested just before the connection was lost is not re-requested.
 * A late transcript correction arriving after the final transcript was emitted produces a
   second final `InputTranscript` for the same item (the history message is updated in place).
