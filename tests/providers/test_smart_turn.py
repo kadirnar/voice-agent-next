@@ -157,9 +157,13 @@ def test_log_mel_features_of_silence_is_the_floor() -> None:
     assert np.all(features == -1.5)  # log10(1e-10) = -10 -> (-10 + 4) / 4
 
 
-def test_log_mel_features_requires_a_full_window() -> None:
+def test_log_mel_features_requires_a_full_mono_window() -> None:
     with pytest.raises(ValueError, match="128000"):
         log_mel_features(np.zeros(SR, dtype=np.float32))
+    with pytest.raises(ValueError, match="1-D"):
+        log_mel_features(np.zeros((2, N_SAMPLES // 2), dtype=np.float32))
+    with pytest.raises(ValueError, match="1-D"):
+        prepare_audio(np.zeros((SR, 2), dtype=np.float32))
 
 
 def test_prepare_audio_pads_at_the_start_and_keeps_the_end() -> None:

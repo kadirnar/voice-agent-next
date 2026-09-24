@@ -19,7 +19,7 @@ Model contract (reference: ``inference.py`` and ``audio_utils.py`` in the Smart 
   (``(batch, 1)``) is already a sigmoid probability.
 
 :func:`log_mel_features` reimplements that feature extractor with numpy only (no torch or
-transformers at runtime) and matches ``transformers`` to about 1e-6.
+transformers at runtime) and matches ``transformers`` to about 1e-7 (float32 rounding).
 """
 
 from __future__ import annotations
@@ -76,7 +76,6 @@ N_SAMPLES = SAMPLE_RATE * WINDOW_SECONDS  # 128 000
 N_FFT = 400
 HOP_LENGTH = 160
 N_MELS = 80
-N_FRAMES = N_SAMPLES // HOP_LENGTH  # 800
 
 # ISO 639-1 code -> other spellings seen in the wild (ISO 639-2/3 codes, English names).
 _LANGUAGE_ALIASES: dict[str, tuple[str, ...]] = {
@@ -143,12 +142,22 @@ def _mel_filters() -> npt.NDArray[np.float64]:
     up = slopes[:, 2:] / widths[1:]
     filters = np.maximum(0.0, np.minimum(down, up))
     filters *= 2.0 / (hz[2:] - hz[:-2])  # constant energy per band
+    filters.setflags(write=False)
     return filters
 
 
 @cache
 def _hann_window() -> npt.NDArray[np.float64]:
-    return np.hanning(N_FFT + 1)[:-1]  # periodic, as torch.hann_window
+    window = np.hanning(N_FFT + 1)[:-1]  # periodic, as torch.hann_window
+    window.setflags(write=False)
+    return window
+
+
+def _mono(samples: npt.ArrayLike) -> npt.NDArray[np.float32]:
+    x = np.asarray(samples, dtype=np.float32)
+    if x.ndim != 1:
+        raise ValueError(f"expected 1-D mono samples, got shape {x.shape}")
+    return x
 
 
 def prepare_audio(samples: npt.ArrayLike) -> npt.NDArray[np.float32]:
@@ -157,7 +166,7 @@ def prepare_audio(samples: npt.ArrayLike) -> npt.NDArray[np.float32]:
     Keeps the **last** 8 s of longer clips and zero-pads shorter ones at the **start**, so
     the end of the user's speech is always at the end of the window.
     """
-    x = np.asarray(samples, dtype=np.float32).reshape(-1)
+    x = _mono(samples)
     if x.size >= N_SAMPLES:
         return np.ascontiguousarray(x[x.size - N_SAMPLES :])
     out = np.zeros(N_SAMPLES, dtype=np.float32)
@@ -176,7 +185,7 @@ def log_mel_features(window: npt.ArrayLike) -> npt.NDArray[np.float32]:
         window: exactly 128 000 samples (8 s at 16 kHz) in ``[-1, 1]``; see
             :func:`prepare_audio`.
     """
-    x = np.asarray(window, dtype=np.float32).reshape(-1)
+    x = _mono(window)
     if x.size != N_SAMPLES:
         raise ValueError(f"expected {N_SAMPLES} samples (8 s at 16 kHz), got {x.size}")
     # zero-mean / unit-variance waveform normalization, in float32 like the reference
