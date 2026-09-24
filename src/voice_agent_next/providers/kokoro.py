@@ -392,7 +392,9 @@ class KokoroTTS(TTS):
         if not text:
             return []
         if self.split_sentences:
-            segmenter = SentenceSegmenter(min_chars=10, first_segment_min_chars=4)
+            # Kokoro is weak on very short inputs and rushes very long ones, so short
+            # sentences are merged and run-ons are split at clause boundaries.
+            segmenter = SentenceSegmenter(min_chars=20, max_chars=300)
             parts = segmenter.push(text) + segmenter.flush()
         else:
             parts = [text]
@@ -412,6 +414,7 @@ class KokoroTTS(TTS):
         model_path = _local_file(self._model_path, self._variant.onnx)
         voices_path = _local_file(self._voices_path, self._variant.voices)
         options = ort.SessionOptions()
+        options.log_severity_level = 3  # errors only: fp16 graphs log ~150 folding warnings
         if self.num_threads is not None:
             options.intra_op_num_threads = self.num_threads
         session = self._create_session(ort, model_path, options)
