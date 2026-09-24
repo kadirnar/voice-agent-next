@@ -49,9 +49,9 @@ After that, set `HF_HUB_OFFLINE=1`.
 ```python
 from voice_agent_next import create
 
-tts = create("tts", "pocket-tts")                    # English, voice "alba"
-tts = create("tts", "pocket-tts/marius")             # another predefined voice
-tts = create("tts", "pocket-tts/french")             # French, its default voice "estelle"
+tts = create("tts", "pocket-tts")  # English, voice "alba"
+tts = create("tts", "pocket-tts/marius")  # another predefined voice
+tts = create("tts", "pocket-tts/french")  # French, its default voice "estelle"
 tts = create("tts", "pocket-tts/german/juergen", temperature=0.3)
 await tts.warmup()  # download + load the model and the default voice now
 
@@ -122,7 +122,7 @@ as the voice:
 
 ```python
 tts = create("tts", "pocket-tts", voice="me.wav")
-await tts.load_voice("me.wav")        # optional: encode it now (a few seconds on CPU)
+await tts.load_voice("me.wav")  # optional: encode it now (a few seconds on CPU)
 await tts.export_voice("me.wav", "me.safetensors")  # reusable state, loads in milliseconds
 ```
 
