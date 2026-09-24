@@ -165,7 +165,8 @@ class FakeTTSServer:
     error: dict[str, Any] | None = None
     """Sent (with the context id when ``error_with_context``) instead of audio."""
     error_with_context: bool = True
-    close_after_final: bool = False
+    close_after_final: tuple[int, str] | None = None
+    """Close the socket with this code and reason after a final message."""
     close_on_first_message: tuple[int, str] | None = None
     reject_status: int | None = None
     url: str = ""
@@ -282,8 +283,8 @@ class FakeTTSServer:
             await ws.send(json.dumps({"isFinal": True, "contextId": cid}))
         self.finals.append(cid)
         self.open_now -= 1
-        if self.close_after_final:
-            await ws.close()
+        if self.close_after_final is not None:
+            await ws.close(*self.close_after_final)
 
     async def _generate(
         self, ws: ServerConnection, cid: str, state: _FakeContext, text: str, rate: int
@@ -786,8 +787,9 @@ async def test_policy_closes_are_mapped(
     await tts.aclose()
 
 
+@pytest.mark.parametrize("close", [(1000, ""), (1008, "Inactivity timeout reached")])
 async def test_connection_is_reopened_after_the_server_closes_it(
-    tts_server: FakeTTSServer,
+    tts_server: FakeTTSServer, close: tuple[int, str]
 ) -> None:
     tts = make_tts(tts_server)
     for text in ("First. ", "Second. "):
@@ -797,7 +799,7 @@ async def test_connection_is_reopened_after_the_server_closes_it(
         assert audio_of(await collect_tts(stream)).duration == pytest.approx(WORD)
     assert tts_server.handshakes == 1
 
-    tts_server.close_after_final = True  # e.g. the inactivity timeout of an idle socket
+    tts_server.close_after_final = close  # e.g. the inactivity timeout of an idle socket
     for text in ("Third. ", "Fourth. "):
         stream = tts.stream()
         stream.push_text(text)
@@ -805,6 +807,28 @@ async def test_connection_is_reopened_after_the_server_closes_it(
         assert audio_of(await collect_tts(stream)).duration == pytest.approx(WORD)
         await wait_until(lambda: all(c.closed for c in tts._conns.values()))
     assert tts_server.handshakes == 2
+    await tts.aclose()
+
+
+@pytest.mark.parametrize(
+    ("close", "error_type"),
+    [
+        ((1008, "Invalid API key"), AuthenticationError),
+        ((1008, "Inactivity timeout reached"), ProviderConnectionError),
+    ],
+)
+async def test_sends_on_a_closed_socket_report_the_reason(
+    tts_server: FakeTTSServer, close: tuple[int, str], error_type: type[ProviderError]
+) -> None:
+    """A rejection must not look like a dropped socket (which streams reconnect after)."""
+    tts_server.close_on_first_message = close
+    tts = make_tts(tts_server)
+    conn = await tts._connection(DEFAULT_VOICE)
+    await conn.send({"text": " ", "context_id": "ctx_1"})
+    await wait_until(lambda: conn.closed and conn.error is not None)
+    with pytest.raises(error_type) as info:
+        await conn.send({"text": "Hello ", "context_id": "ctx_1"})
+    assert type(info.value) is error_type and info.value.status_code == 1008
     await tts.aclose()
 
 

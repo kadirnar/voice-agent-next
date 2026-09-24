@@ -185,6 +185,7 @@ _AUTH_HINTS = ("api key", "api_key", "unauthori", "authenticat", "auth_error", "
                "forbidden", "unaccepted_terms")  # fmt: skip
 _LIMIT_HINTS = ("quota", "rate limit", "rate_limit", "too many", "too_many", "concurrent",
                 "busy", "credits", "throttl", "queue_overflow", "resource_exhausted")  # fmt: skip
+_IDLE_HINTS = ("timeout", "timed out", "inactiv", "idle", "not received")
 
 
 def _hinted_error(text: str, hints: str, *, status_code: int | None) -> ProviderError | None:
@@ -286,6 +287,8 @@ def _close_error(code: int | None, reason: str, what: str) -> ProviderError:
     hinted = _hinted_error(text, reason, status_code=code)
     if hinted is not None:
         return hinted
+    if any(h in reason.lower() for h in _IDLE_HINTS):  # an idle socket: just reconnect
+        return ProviderConnectionError(text, provider=_PROVIDER, status_code=code)
     if code in (1003, 1007, 1008, 1009):  # rejected input / policy violation / too big
         return ProviderError(text, provider=_PROVIDER, status_code=code)
     return ProviderConnectionError(text, provider=_PROVIDER, status_code=code)
@@ -957,8 +960,9 @@ class _Connection:
         self.loop = asyncio.get_running_loop()
         self.closed = False
         self._contexts: dict[str, _Context] = {}
-        self._failure: ProviderError | None = None
-        """An error not tied to a context: the server usually closes right after it."""
+        self.error: ProviderError | None = None
+        """Why the connection failed: an error not tied to a context (the server closes
+        right after it) or the close itself."""
         self._slot_freed = asyncio.Event()
         self._reader = asyncio.create_task(self._read_loop(), name="elevenlabs-tts-reader")
         self._keeper = asyncio.create_task(
@@ -1005,15 +1009,16 @@ class _Connection:
         from websockets.exceptions import ConnectionClosed
 
         if self.closed:
-            raise ProviderConnectionError("ElevenLabs TTS WebSocket closed", provider=_PROVIDER)
+            # a ProviderConnectionError makes the stream reconnect; a rejection (1008
+            # "invalid API key"...) is reported as such and not retried
+            raise self.error or ProviderConnectionError(
+                "ElevenLabs TTS WebSocket closed", provider=_PROVIDER
+            )
         try:
             await self.ws.send(json.dumps(msg))
         except ConnectionClosed as exc:
             self.closed = True
-            # the reader reports the server's reason; a sender only needs to reconnect
-            raise ProviderConnectionError(
-                f"ElevenLabs TTS WebSocket closed: {exc}", provider=_PROVIDER
-            ) from exc
+            raise _closed(exc, "TTS") from exc
 
     async def _keepalive_loop(self, interval: float) -> None:
         """Keep contexts that wait for more text (a slow LLM, a long tool call) alive."""
@@ -1053,10 +1058,11 @@ class _Connection:
             )
         finally:
             self.closed = True
-            if self._failure is not None:  # the server explained itself before closing
-                error = self._failure
+            if self.error is not None:  # the server explained itself before closing
+                error = self.error
             elif error is None:  # a clean close
                 error = _close_error(self.ws.close_code, self.ws.close_reason or "", "TTS")
+            self.error = error
             contexts, self._contexts = list(self._contexts.values()), {}
             for ctx in contexts:
                 ctx.deliver(error)
@@ -1071,7 +1077,7 @@ class _Connection:
                 ctx.deliver(error)
             elif ctx_id is None:  # not tied to a context: fail every open one...
                 logger.warning("%s", error)
-                self._failure = error
+                self.error = error
                 self.closed = True  # ...and let the next stream reconnect
                 for c in list(self._contexts.values()):
                     c.deliver(error)
