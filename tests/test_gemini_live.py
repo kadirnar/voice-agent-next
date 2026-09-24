@@ -8,25 +8,20 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import pytest
 
-from voice_agent_next import Agent, AgentSession, AgentState, ChatMessage, function_tool
+from voice_agent_next import function_tool
 from voice_agent_next.audio import AudioFrame
 from voice_agent_next.chat import FunctionCallOutput
 from voice_agent_next.engine import EngineOptions
 from voice_agent_next.errors import (
-    AuthenticationError,
     ConfigurationError,
-    ProviderConnectionError,
-    RateLimitError,
 )
 from voice_agent_next.events import (
     EngineEvent,
-    EngineStatus,
     InputCommitted,
     InputSpeechStarted,
     InputSpeechStopped,
@@ -38,11 +33,10 @@ from voice_agent_next.events import (
     ResponseToolCall,
     ToolCallCancelled,
 )
-from voice_agent_next.metrics import EngineMetrics, TurnMetrics
+from voice_agent_next.metrics import EngineMetrics
 from voice_agent_next.providers.google.live import GeminiLiveConnection, GeminiLiveEngine
 from voice_agent_next.providers.mock import synth_speech
 from voice_agent_next.testing.gemini_live import FakeGeminiLiveServer, FakeReply, FakeToolCall
-from voice_agent_next.transports import LoopbackTransport
 
 KEY = "fake-gemini-key"
 
@@ -240,3 +234,183 @@ async def test_audio_turn_event_sequence(fake: Callable[..., Any]) -> None:
     assert conn.chat_ctx.messages()[-1].text == "Hi! Nice to meet you."
     # the user audio reached the server untouched (16 kHz PCM)
     assert len(server.connections[0].audio) == round(1.7 * 16_000) * 2
+
+
+async def test_late_input_transcript_still_precedes_the_answer(fake: Callable[..., Any]) -> None:
+    server = await fake(replies=["Sure thing."], transcripts=["book a table"], late_transcription=True)  # fmt: skip
+    conn, events = await connect(server)
+    await say(conn)
+    await events.wait(lambda: bool(events.of(ResponseDone)))
+    await conn.aclose()
+
+    kinds = events.kinds()
+    finals = [e.text for e in events.of(InputTranscript) if e.is_final]
+    assert finals == ["book a table"]  # accumulated while the answer's text was held back
+    assert kinds.index("InputCommitted") < kinds.index("ResponseStarted")
+    assert kinds.index("InputTranscript") < kinds.index("ResponseText")
+    assert "".join(e.delta for e in events.of(ResponseText)) == "Sure thing."
+
+
+async def test_without_voice_activity_the_speech_end_is_estimated_locally(
+    fake: Callable[..., Any],
+) -> None:
+    server = await fake(replies=["Okay."], transcripts=["hello gemini"], voice_activity=False)
+    conn, events = await connect(server)
+    await say(conn)
+    await events.wait(lambda: bool(events.of(ResponseDone)))
+    await conn.aclose()
+
+    assert not events.of(InputSpeechStarted)  # the server never signalled speech start
+    kinds = events.kinds()
+    assert kinds[:2] == ["InputTranscript", "InputTranscript"]  # partials
+    (stopped,) = events.of(InputSpeechStopped)
+    assert stopped.audio_time == pytest.approx(1.1, abs=0.1)
+    assert kinds.index("InputSpeechStopped") < kinds.index("InputCommitted")
+
+
+async def test_text_input_and_requested_responses(fake: Callable[..., Any]) -> None:
+    server = await fake(replies=["Paris.", "Hello there."])
+    conn, events = await connect(server)
+    await conn.send_text("What is the capital of France?")
+    await events.wait(lambda: len(events.of(ResponseDone)) == 1)
+    await conn.say("Welcome aboard.")
+    await events.wait(lambda: len(events.of(ResponseDone)) == 2)
+    await conn.send_text("Remember my name is Ada.", respond=False)
+    await conn.create_response()
+    await events.wait(lambda: len(events.of(ResponseDone)) == 3)
+    await conn.aclose()
+
+    assert not events.of(InputCommitted)  # client-requested responses are not user turns
+    texts = ["".join(e.delta for e in events.of(ResponseText) if e.response_id == d.response_id)
+             for d in events.of(ResponseDone)]  # fmt: skip
+    assert texts == ["Paris.", "Welcome aboard.", "Hello there."]
+    contents = server.connection.client_contents
+    assert contents[0] == {
+        "turns": [{"role": "user", "parts": [{"text": "What is the capital of France?"}]}],
+        "turnComplete": True,
+    }
+    assert "verbatim" in contents[1]["turns"][0]["parts"][0]["text"]
+    assert contents[2]["turnComplete"] is False
+    assert contents[3] == {"turns": [], "turnComplete": True}
+
+
+# --------------------------------------------------------------------------- tools
+@function_tool
+async def get_weather(city: str) -> str:
+    """Look up the weather in a city."""
+    return f"sunny in {city}"
+
+
+@function_tool
+async def lookup(q: str) -> str:
+    """Search the knowledge base."""
+    return "found"
+
+
+TOOLS = EngineOptions(tools=[get_weather, lookup])
+
+
+async def test_non_blocking_tool_call_round_trip(fake: Callable[..., Any]) -> None:
+    server = await fake(
+        replies=[FakeReply("Let me check.", [FakeToolCall("get_weather", {"city": "Paris"})]),
+                 "It is sunny in Paris."],
+    )  # fmt: skip
+    conn, events = await connect(server, TOOLS)
+    await say(conn)
+    await events.wait(lambda: bool(events.of(ResponseToolCall)))
+    (call_ev,) = events.of(ResponseToolCall)
+    assert call_ev.call.name == "get_weather" and json.loads(call_ev.call.arguments) == {"city": "Paris"}  # fmt: skip
+    # the response ends with the tool call so the tools can run right away
+    kinds = events.kinds()
+    assert kinds[kinds.index("ResponseToolCall") + 1] == "ResponseDone"
+    output = FunctionCallOutput(call_id=call_ev.call.call_id, output='{"sky": "clear"}', name="get_weather")  # fmt: skip
+    await conn.send_tool_output(output)
+    await events.wait(lambda: any("sunny" in e.delta for e in events.of(ResponseText)))
+    await events.wait(lambda: len(events.of(ResponseDone)) == 3)
+    await conn.aclose()
+
+    (response,) = server.connection.tool_responses
+    assert response == {"id": call_ev.call.call_id, "name": "get_weather",
+                        "response": {"result": {"sky": "clear"}}, "scheduling": "WHEN_IDLE"}  # fmt: skip
+    assert len(events.of(InputCommitted)) == 1  # the follow-up answer is not a user turn
+    spoken = ["".join(e.delta for e in events.of(ResponseText) if e.response_id == d.response_id)
+              for d in events.of(ResponseDone)]  # fmt: skip
+    assert spoken == ["", "Let me check.", "It is sunny in Paris."]
+
+
+async def test_silent_tool_output_and_errors(fake: Callable[..., Any]) -> None:
+    server = await fake(replies=[FakeToolCall("lookup", {"q": "x"})])
+    conn, events = await connect(server, TOOLS)
+    await say(conn)
+    await events.wait(lambda: bool(events.of(ResponseToolCall)))
+    call = events.of(ResponseToolCall)[0].call
+    await conn.send_tool_output(FunctionCallOutput(call_id=call.call_id, output="boom", is_error=True), respond=False)  # fmt: skip
+    await asyncio.sleep(0.2)
+    await conn.aclose()
+    (response,) = server.connection.tool_responses
+    assert response["response"] == {"error": "boom"} and response["name"] == "lookup"
+    assert response["scheduling"] == "SILENT"
+    assert len(events.of(ResponseStarted)) == 1  # SILENT: no follow-up response
+
+
+async def test_blocking_tools(fake: Callable[..., Any]) -> None:
+    server = await fake(replies=[FakeToolCall("get_time"), "It is noon."])
+
+    @function_tool
+    async def get_time() -> str:
+        """Current time."""
+        return "12:00"
+
+    conn, events = await connect(server, EngineOptions(tools=[get_time]), tool_behavior="blocking")
+    assert conn.capabilities.tool_mode == "blocking"
+    await say(conn)
+    await events.wait(lambda: bool(events.of(ResponseToolCall)))
+    call = events.of(ResponseToolCall)[0].call
+    await events.wait(lambda: bool(events.of(ResponseDone)))  # ends with the call (no deadlock)
+    await conn.send_tool_output(FunctionCallOutput(call_id=call.call_id, output="12:00"))
+    await events.wait(lambda: any("noon" in e.delta for e in events.of(ResponseText)))
+    await events.wait(lambda: len(events.of(ResponseDone)) == 2)
+    await conn.aclose()
+
+    (decl,) = server.setups[0]["tools"][0]["functionDeclarations"]
+    assert "behavior" not in decl and "parametersJsonSchema" not in decl  # no-arg tool
+    (response,) = server.connection.tool_responses
+    assert "scheduling" not in response  # only meaningful for NON_BLOCKING calls
+    assert len(events.of(InputCommitted)) == 1
+
+
+async def test_barge_in_cancels_pending_tool_calls(fake: Callable[..., Any]) -> None:
+    filler = "Let me look that up for you, this could take a little while, please hold on."
+    server = await fake(
+        replies=[FakeReply(filler, [FakeToolCall("lookup", {"q": "x"})])], realtime_factor=1.0
+    )
+    conn, events = await connect(server, TOOLS)
+    await say(conn)
+    await events.wait(lambda: len(events.of(ResponseAudio)) > 5)  # the filler is streaming
+    call = events.of(ResponseToolCall)[0].call
+    await push(conn, synth_speech(0.4, 16_000))  # the user talks over the model
+    await events.wait(lambda: bool(events.of(ToolCallCancelled)))
+    await conn.aclose()
+
+    assert events.of(ToolCallCancelled)[0].call_ids == [call.call_id]
+    assert server.connection.interruptions == 1
+    starts = events.of(InputSpeechStarted)
+    assert len(starts) == 2  # the first turn + the barge-in (server VAD)
+    assert events.of(ResponseDone)[-1].status == "cancelled"
+    assert conn.chat_ctx.messages()[-1].interrupted  # the filler was cut off
+
+
+async def test_server_side_interruption_without_voice_activity(fake: Callable[..., Any]) -> None:
+    server = await fake(replies=["A fairly long answer that goes on and on for a while."],
+                        realtime_factor=1.0, voice_activity=False)  # fmt: skip
+    conn, events = await connect(server)
+    await say(conn)
+    await events.wait(lambda: len(events.of(ResponseAudio)) > 5)
+    await push(conn, synth_speech(0.4, 16_000))
+    await events.wait(lambda: events.of(ResponseDone) != [])
+    await conn.aclose()
+
+    (started,) = events.of(InputSpeechStarted)  # only `interrupted` signals the barge-in
+    kinds = events.kinds()
+    assert kinds.index("InputSpeechStarted") < kinds.index("ResponseDone")
+    assert events.of(ResponseDone)[0].status == "cancelled"

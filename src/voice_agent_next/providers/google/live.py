@@ -544,6 +544,7 @@ class GeminiLiveConnection(EngineConnection):
         self._requested_at: float | None = None
         self._held: list[ResponseText] = []
         self._hold_until: float | None = None
+        self._held_user: _UserItem | None = None
         # ---- user state
         self._user: _UserItem | None = None
         self._user_speaking = False
@@ -950,7 +951,7 @@ class GeminiLiveConnection(EngineConnection):
         while not self._closed:
             await asyncio.sleep(_MONITOR_INTERVAL)
             if self._hold_until is not None and now() >= self._hold_until:
-                self._release_held()
+                self._end_hold()
             self._check_rotation()
 
     # --------------------------------------------------------------- audio input
@@ -1070,7 +1071,7 @@ class GeminiLiveConnection(EngineConnection):
     # ----------------------------------------------------------- server messages
     def _on_message(self, msg: dict[str, Any]) -> None:
         if self._hold_until is not None and now() >= self._hold_until:
-            self._release_held()
+            self._end_hold()
         usage = msg.get("usageMetadata")
         if isinstance(usage, Mapping):
             self._on_usage(usage)
@@ -1167,6 +1168,8 @@ class GeminiLiveConnection(EngineConnection):
     def _on_input_transcription(self, t: Mapping[str, Any], *, interim: bool) -> None:
         text = str(t.get("text") or "")
         if not text:
+            if t.get("finished") and self._held_user is not None and not interim:
+                self._end_hold()  # the (late) transcript is complete
             return
         t_now = now()
         self._last_input_transcript_at = t_now
@@ -1189,7 +1192,10 @@ class GeminiLiveConnection(EngineConnection):
             user.final += text
             user.interim = ""
         if user.committed:
-            self._emit_user_final(user)
+            if self._held_user is not user:
+                self._emit_user_final(user)  # a late correction: update the final transcript
+            elif t.get("finished"):
+                self._end_hold()
         else:
             self._emit(
                 InputTranscript(
@@ -1364,7 +1370,10 @@ class GeminiLiveConnection(EngineConnection):
         if user.text:
             self._emit_user_final(user)
         elif self._e.input_transcription:
-            self._hold_until = now() + _TEXT_HOLD  # let the user's transcript go first
+            # the transcript lags behind: hold the answer's text back briefly so that the
+            # user's final transcript (accumulated meanwhile) comes first
+            self._hold_until = now() + _TEXT_HOLD
+            self._held_user = user
 
     def _emit_user_final(self, user: _UserItem) -> None:
         text = user.text
@@ -1379,7 +1388,6 @@ class GeminiLiveConnection(EngineConnection):
             msg.content = [text]
         else:
             self.chat_ctx.add_message("user", text, id=user.item_id)
-        self._release_held()
 
     def _local_end_estimate(self) -> float | None:
         end = self._local_speech_end
@@ -1387,8 +1395,12 @@ class GeminiLiveConnection(EngineConnection):
             return None
         return end
 
-    def _release_held(self) -> None:
+    def _end_hold(self) -> None:
+        """Emit the held user transcript, then the agent text deltas held behind it."""
         self._hold_until = None
+        user, self._held_user = self._held_user, None
+        if user is not None:
+            self._emit_user_final(user)
         held, self._held = self._held, []
         for ev in held:
             self._emit(ev)
@@ -1400,7 +1412,7 @@ class GeminiLiveConnection(EngineConnection):
         gen.ended_at = now()
         if self._gen is gen:
             self._gen = None
-        self._release_held()  # transcript deltas always precede ResponseDone
+        self._end_hold()  # transcript deltas always precede ResponseDone
         self._sync_assistant(gen)
         usage = self._turn_usage
         self._emit(ResponseDone(response_id=gen.response_id, status=status, usage=usage))
@@ -1417,7 +1429,7 @@ class GeminiLiveConnection(EngineConnection):
         msg.interrupted = gen.status == "cancelled"
 
     def _end_server_turn(self) -> None:
-        self._release_held()
+        self._end_hold()
         gens = [g for g in self._turn_gens if not g.metrics_sent]
         for i, gen in enumerate(gens):
             last = i == len(gens) - 1
