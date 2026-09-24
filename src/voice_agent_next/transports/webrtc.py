@@ -260,8 +260,8 @@ def _outbound_track_class() -> Any:
                     self._start = now() - self._pts / OPUS_RATE
             if self.readyState != "live":
                 raise MediaStreamError
-            frame = av.AudioFrame(format="s16", layout="mono", samples=_FRAME_SAMPLES)
-            frame.planes[0].update(self._playout.pull(_FRAME_SAMPLES))
+            pcm = np.frombuffer(self._playout.pull(_FRAME_SAMPLES), dtype="<i2").reshape(1, -1)
+            frame = av.AudioFrame.from_ndarray(pcm, format="s16", layout="mono")
             frame.sample_rate = OPUS_RATE
             frame.pts = self._pts
             frame.time_base = time_base

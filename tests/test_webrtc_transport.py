@@ -452,8 +452,24 @@ async def test_http_errors_cors_and_index_page() -> None:
         assert wrong.status_code == 400
         full = await client.post("/offer", json={"type": "offer", "sdp": "m=audio 9"})
         assert full.status_code == 503 and full.json()["error"] == "too many sessions"
-        huge = await client.post("/offer", content=b"x" * 300_000)
-        assert huge.status_code == 413
+        # raw requests: the server answers from the headers, before reading a body
+        assert (await raw_request(server, "POST /offer", "Content-Length: 300000")).startswith(
+            b"HTTP/1.1 413 "
+        )
+        chunked = await raw_request(server, "POST /offer", "Transfer-Encoding: chunked")
+        assert chunked.startswith(b"HTTP/1.1 411 ")
+        assert (await raw_request(server, "GARBAGE")).startswith(b"HTTP/1.1 400 ")
+
+
+async def raw_request(server: WebRTCAgentServer, line: str, *headers: str) -> bytes:
+    reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+    try:
+        head = "\r\n".join([f"{line} HTTP/1.1" if " " in line else line, *headers])
+        writer.write(head.encode() + b"\r\n\r\n")
+        await writer.drain()
+        return await asyncio.wait_for(reader.read(), 10)
+    finally:
+        writer.close()
 
 
 async def test_mounting_handle_offer_without_http(peers: list[Peer]) -> None:
