@@ -44,7 +44,7 @@ from .llm import LLM, ChatChunk, LLMCapabilities, LLMStream
 from .registry import create, list_providers, register_provider
 from .session import Agent, AgentSession, AgentState, SessionOptions, UserState
 from .stt import STT, StreamAdapter, STTCapabilities, STTEvent, STTEventType, STTStream, Transcript
-from .tools import FunctionTool, ToolContext, function_tool
+from .tools import FunctionTool, ToolContext, ToolScheduling, function_tool
 from .tts import TTS, ChunkedStream, SynthesizedAudio, SynthesizeStream, TTSCapabilities
 from .turn import TurnDetector
 from .vad import VAD, VADEvent, VADEventType, VADOptions
@@ -100,6 +100,7 @@ __all__ = [
     "SynthesizedAudio",
     "TTSCapabilities",
     "ToolContext",
+    "ToolScheduling",
     "Transcript",
     "TurnDetector",
     "UserState",

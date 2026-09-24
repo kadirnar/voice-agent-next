@@ -62,9 +62,7 @@ ToolScheduling: TypeAlias = Literal["interrupt", "when_idle", "silent"]
 right away, ``when_idle`` waits until the agent has finished speaking and then answers,
 ``silent`` only adds the result to the context (the model uses it later)."""
 
-FillerSpec: TypeAlias = (
-    bool | str | Sequence[str] | Callable[[FunctionCall], str | None] | None
-)
+FillerSpec: TypeAlias = bool | str | Sequence[str] | Callable[[FunctionCall], str | None] | None
 """What a slow tool says while it runs (see :func:`function_tool`): ``None``/``True`` = the
 session's default fillers, ``False`` = never, a phrase, a list of phrases (picked without
 repeating) or a callable ``(call) -> phrase | None``."""
