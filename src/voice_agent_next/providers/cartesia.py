@@ -251,7 +251,8 @@ class CartesiaTTS(TTS):
     one ``context_id``; each text delta is sent with ``continue: true`` so prosody carries
     across sentences, and the flush sends an empty ``continue: false`` input. Segments are
     played in order even when their generation overlaps. Closing a stream (interruption)
-    cancels its unfinished contexts.
+    cancels its unfinished contexts. A segment's full text is reported on its final
+    (``is_final``) item, since it is only known once the segment is flushed.
 
     With ``word_timestamps=True`` the stream also yields items with an empty ``frame``
     whose ``words`` carry :class:`~voice_agent_next.stt.WordTiming` in seconds **from the

@@ -19,7 +19,7 @@ uv run van providers --kind tts        # "cartesia ... ready"
 Every request pins the API version. It sends the `Cartesia-Version: 2026-08-14` header; WebSocket URLs also carry the `cartesia_version` query parameter. Override the version with `api_version="..."`. The API key goes in the `Authorization: Bearer` and `X-API-Key` headers and never in URLs.
 
 ```python
-from voice_agent_next import Agent, AgentSession
+from voice_agent_next import AgentSession
 
 session = AgentSession(
     stt="cartesia/ink-2",  # Ink decides when the user's turn ends: no VAD needed
