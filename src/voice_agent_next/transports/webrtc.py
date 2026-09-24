@@ -327,6 +327,7 @@ class WebRTCTransport(Transport):
             input_format=AudioFormat(input_sample_rate, 1),
             output_format=AudioFormat(output_sample_rate, 1),
         )
+        _aiortc()  # fail fast with an install hint when the `webrtc` extra is missing
         if not 0 <= playout_delay <= _MAX_PLAYOUT_DELAY:
             raise ValueError(f"playout_delay must be in [0, {_MAX_PLAYOUT_DELAY}] s")
         self.host = host
