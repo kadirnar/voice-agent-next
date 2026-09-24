@@ -12,10 +12,12 @@ positives for VAD-only barge-in. :class:`~voice_agent_next.session.AgentSession`
     response and truncate the agent's turn to what the user heard;
 ``RESUME``
     a false interruption — the user went quiet for ``false_interruption_timeout`` seconds
-    without saying anything meaningful, or only said backchannels: resume the paused
-    speech where it stopped.
+    without saying anything meaningful, or the final transcript of what they said is only
+    backchannels: resume the paused speech where it stopped.
 
-After a confirmed interruption the overlap keeps watching: if the user then stays quiet
+If the user keeps making sound without words (noise, a TV) the agent is held at most
+``false_interruption_timeout`` seconds (``UNPAUSE``) while the overlap keeps watching.
+After a confirmed interruption it keeps watching as well: if the user then stays quiet
 without meaningful words, the verdict is ``FALSE_INTERRUPTION`` (reported to the app,
 which may continue the conversation); otherwise ``SETTLED``.
 
@@ -235,6 +237,8 @@ class Verdict(StrEnum):
     """A real barge-in: stop, cancel and truncate."""
     RESUME = "resume"
     """A false interruption: resume the paused speech."""
+    UNPAUSE = "unpause"
+    """The user keeps making sound without words: stop holding the agent, keep watching."""
     FALSE_INTERRUPTION = "false_interruption"
     """After a confirmed interruption the user said nothing meaningful (nothing to resume)."""
     SETTLED = "settled"
@@ -250,51 +254,59 @@ _EPS = 1e-3
 class Overlap:
     """Evidence about one stretch of user speech over the agent.
 
-    Every time is a :func:`~voice_agent_next.utils.now` timestamp. Speech is measured
-    from where it started to where it ended; while the engine still reports speech the
-    ongoing segment counts up to ``t`` (so it includes the VAD's trailing-silence
-    hangover, as in LiveKit). ``quiet_since`` is when the engine reported the user quiet.
+    Every time is a :func:`~voice_agent_next.utils.now` timestamp. The duration rule is
+    per speech segment (a pause starts a new one), measured from where speech started to
+    where it ended; while the engine still reports speech the ongoing segment counts up to
+    ``t``, so it includes the VAD's trailing-silence hangover (as in LiveKit).
+    ``quiet_since`` is when the engine reported the user quiet.
     """
 
     policy: InterruptionPolicy
     started_at: float
     speech: float = 0.0
-    """Seconds of speech in finished segments."""
+    """Seconds of speech in finished segments (all of them)."""
+    longest: float = 0.0
+    """The longest finished segment."""
     speaking_since: float | None = None
     """Start of the ongoing speech segment (``None`` while the user is quiet)."""
     quiet_since: float | None = None
     confirmed: bool = False
     """The interruption was confirmed (the agent's speech is over)."""
-    heard_after_quiet: bool = False
-    """A transcript arrived after the user went quiet (covers the whole utterance)."""
+    held: bool = False
+    """The agent is paused while the verdict is pending."""
+    final_after_quiet: bool = False
+    """A final transcript arrived after the user went quiet: it covers the whole utterance."""
     texts: dict[str, str] = field(default_factory=dict)
     """Latest transcript per input item."""
     _words: tuple[str, tuple[str, ...]] = field(default=("", ()), init=False, repr=False)
 
     @classmethod
-    def begin(cls, policy: InterruptionPolicy, start: float) -> Overlap:
+    def begin(cls, policy: InterruptionPolicy, start: float, *, held: bool = False) -> Overlap:
         """User speech started at ``start`` while the agent was talking."""
-        return cls(policy, started_at=start, speaking_since=start)
+        return cls(policy, started_at=start, speaking_since=start, held=held)
 
     # -------------------------------------------------------------------- evidence
     def speech_started(self, start: float) -> None:
         if self.speaking_since is None:
             self.speaking_since = start
         self.quiet_since = None
-        self.heard_after_quiet = False
+        self.final_after_quiet = False
 
     def speech_stopped(self, speech_end: float, t: float) -> None:
         """Speech ended at ``speech_end``; the engine reported it at ``t``."""
         if self.speaking_since is None:
             return
-        self.speech += max(0.0, speech_end - self.speaking_since)
+        segment = max(0.0, speech_end - self.speaking_since)
+        self.speech += segment
+        self.longest = max(self.longest, segment)
         self.speaking_since = None
         self.quiet_since = t
 
-    def add_transcript(self, item_id: str, text: str) -> None:
+    def add_transcript(self, item_id: str, text: str, *, final: bool = False) -> None:
+        """Interim (``final=False``) or final transcript of what the user said."""
         self.texts[item_id] = text
-        if self.speaking_since is None:
-            self.heard_after_quiet = True
+        if final and self.speaking_since is None:
+            self.final_after_quiet = True
 
     # --------------------------------------------------------------------- queries
     @property
@@ -313,8 +325,25 @@ class Overlap:
         return list(self._words[1])
 
     def speech_duration(self, t: float) -> float:
+        """Seconds of speech in the whole overlap (all segments)."""
         ongoing = 0.0 if self.speaking_since is None else max(0.0, t - self.speaking_since)
         return self.speech + ongoing
+
+    def segment_duration(self, t: float) -> float:
+        """The longest speech segment so far (the duration rule is per segment)."""
+        ongoing = 0.0 if self.speaking_since is None else max(0.0, t - self.speaking_since)
+        return max(self.longest, ongoing)
+
+    def not_a_turn(self) -> bool:
+        """The user went quiet and the final transcript of what they said is not a turn
+        (only backchannels, or fewer words than needed): the engine should drop it."""
+        return (
+            not self.confirmed
+            and self.speaking_since is None
+            and self.final_after_quiet
+            and bool(self.transcript)
+            and len(self.meaningful_words()) < self.policy.words_needed
+        )
 
     def reason(self) -> FalseInterruptionReason:
         """Why the overlap was not an interruption."""
@@ -330,36 +359,39 @@ class Overlap:
     def verdict(self, t: float) -> Verdict | None:
         """The decision at time ``t`` (``None`` = wait for more evidence)."""
         p = self.policy
+        timeout = p.false_interruption_timeout
         words = len(self.meaningful_words())
         quiet_for = self._quiet_for(t)
-        timed_out = (
-            quiet_for is not None
-            and p.false_interruption_timeout is not None
-            and quiet_for >= p.false_interruption_timeout - _EPS
-        )
+        timed_out = quiet_for is not None and timeout is not None and quiet_for >= timeout - _EPS
         if self.confirmed:
             if timed_out:
                 return Verdict.SETTLED if words else Verdict.FALSE_INTERRUPTION
             return None
-        if self.speech_duration(t) >= p.min_duration - _EPS and words >= p.min_words:
+        if self.segment_duration(t) >= p.min_duration - _EPS and words >= p.min_words:
             return Verdict.INTERRUPT
-        if quiet_for is not None and self.heard_after_quiet and self.transcript and not words:
+        if quiet_for is not None and self.final_after_quiet and self.transcript and not words:
             return Verdict.RESUME  # only backchannels: no reason to keep the agent waiting
         if timed_out:
             return Verdict.INTERRUPT if words >= p.words_needed else Verdict.RESUME
+        if (
+            self.held
+            and self.speaking_since is not None
+            and timeout is not None
+            and t - self.started_at >= timeout - _EPS
+        ):
+            return Verdict.UNPAUSE  # sound without words for too long (noise, a TV...)
         return None
 
     def deadline(self) -> float | None:
         """When :meth:`verdict` may change without new evidence (``None`` = only on events)."""
         p = self.policy
-        times: list[float] = []
-        if (
-            not self.confirmed
-            and self.speaking_since is not None
-            and len(self.meaningful_words()) >= p.min_words
-        ):
-            times.append(self.speaking_since + max(0.0, p.min_duration - self.speech))
         timeout = p.false_interruption_timeout
+        times: list[float] = []
+        if not self.confirmed and self.speaking_since is not None:
+            if len(self.meaningful_words()) >= p.min_words and self.longest < p.min_duration:
+                times.append(self.speaking_since + p.min_duration)
+            if self.held and timeout is not None:
+                times.append(self.started_at + timeout)
         if timeout is not None and self.quiet_since is not None and self.speaking_since is None:
             times.append(self.quiet_since + timeout)
         return min(times) if times else None

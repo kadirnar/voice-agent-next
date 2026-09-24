@@ -45,6 +45,7 @@ from voice_agent_next.session.interruptions import (
 )
 from voice_agent_next.transports import LoopbackTransport
 from voice_agent_next.utils import now
+from voice_agent_next.vad import VADOptions
 
 ANSWER = "Here is a fairly long answer that the user is going to talk over at some point."
 SR = 16_000
@@ -113,12 +114,20 @@ def test_overlap_long_speech_interrupts() -> None:
     ov = Overlap.begin(InterruptionPolicy(), 0.0)
     assert ov.verdict(0.45) is None
     assert ov.verdict(0.5) == Verdict.INTERRUPT
-    # speech is counted over several segments of the same overlap
+
+
+def test_overlap_duration_is_per_segment() -> None:
+    """Short sounds do not add up: each speech segment must be long enough on its own."""
     ov = Overlap.begin(InterruptionPolicy(), 0.0)
-    ov.speech_stopped(0.3, 0.55)
-    ov.speech_started(1.0)
-    assert ov.verdict(1.1) is None and ov.deadline() == pytest.approx(1.2)
-    assert ov.verdict(1.2) == Verdict.INTERRUPT
+    ov.speech_stopped(0.3, 0.55)  # a cough
+    ov.speech_started(1.0)  # another one, within the false-interruption timeout
+    assert ov.deadline() == pytest.approx(1.5)
+    assert ov.verdict(1.45) is None
+    ov.speech_stopped(1.3, 1.55)
+    assert ov.speech_duration(2.0) == pytest.approx(0.6)  # both count in the total...
+    assert ov.segment_duration(2.0) == pytest.approx(0.3)  # ...but not for the rule
+    assert ov.verdict(2.0) is None
+    assert ov.verdict(3.55) == Verdict.RESUME
 
 
 def test_overlap_backchannel_resumes_once_the_whole_utterance_is_transcribed() -> None:
@@ -126,8 +135,28 @@ def test_overlap_backchannel_resumes_once_the_whole_utterance_is_transcribed() -
     ov.add_transcript("item", "uh")  # interim while the user speaks: not conclusive
     ov.speech_stopped(0.35, 0.6)
     assert ov.verdict(0.6) is None
-    ov.add_transcript("item", "Uh-huh.")  # transcript of the whole utterance
+    ov.add_transcript("item", "Uh-huh")  # a late interim: the final may still say more
+    assert ov.verdict(0.65) is None and not ov.not_a_turn()
+    ov.add_transcript("item", "Uh-huh.", final=True)  # the whole utterance
+    assert ov.not_a_turn()  # the engine should drop it rather than answer it
     assert ov.verdict(0.7) == Verdict.RESUME and ov.reason() == "backchannel"
+    # a final with a real word is a turn
+    turn = Overlap.begin(InterruptionPolicy(), 0.0)
+    turn.speech_stopped(0.35, 0.6)
+    turn.add_transcript("item", "okay stop", final=True)
+    assert not turn.not_a_turn() and turn.verdict(0.7) is None
+
+
+def test_overlap_wordless_sound_holds_the_agent_at_most_the_timeout() -> None:
+    ov = Overlap.begin(InterruptionPolicy(min_words=1, false_interruption_timeout=2.0), 0.0,
+                       held=True)  # fmt: skip
+    assert ov.deadline() == pytest.approx(2.0)  # long noise: no words, the user never stops
+    assert ov.verdict(1.9) is None
+    assert ov.verdict(2.0) == Verdict.UNPAUSE
+    ov.held = False  # the session resumed the agent; the overlap keeps watching
+    assert ov.verdict(3.0) is None and ov.deadline() is None
+    ov.add_transcript("item", "hey")
+    assert ov.verdict(3.1) == Verdict.INTERRUPT  # words after all: a real barge-in
 
 
 def test_overlap_short_but_meaningful_speech_interrupts_at_timeout() -> None:
@@ -477,6 +506,58 @@ async def test_engine_side_cancellation_falls_back_to_interrupt() -> None:
     assert first.interrupted and second.text == "Sure." and not second.interrupted
 
 
+async def test_a_late_verdict_never_cancels_the_engines_next_response() -> None:
+    """Engine events reach the session late (as over a network): when the duration rule
+    fires, the engine may already be answering the user's committed turn. The complete,
+    paused response is only truncated, so that answer survives."""
+
+    class Laggy(MockEngineConnection):
+        def _emit(self, event: EngineEvent) -> None:
+            asyncio.get_running_loop().call_later(0.06, super()._emit, event)
+
+    class LaggyEngine(MockEngine):
+        async def connect(self, options: EngineOptions) -> EngineConnection:
+            conn = Laggy(self, options)
+            self.connections.append(conn)
+            return conn
+
+    engine = LaggyEngine(
+        responses=[ANSWER, "Sure, the second answer."], transcripts=["no"], response_delay=0.2,
+        vad_options=VADOptions(min_speech_duration=0.1, min_silence_duration=0.3),
+    )  # fmt: skip
+    session = AgentSession(engine)
+    transport = LoopbackTransport(realtime_playout=True)
+    await agent_speaking(session, transport)
+    await transport.play_user_audio(synth_speech(0.15, SR))  # a short "no", in real time
+    await transport.play_user_audio(AudioFrame.silence(0.6, SR))
+    await wait_for(lambda: len(assistant_messages(session)) == 2, 4)
+    await wait_for(lambda: session.agent_state == AgentState.LISTENING, 4)
+    await session.aclose()
+    first, second = assistant_messages(session)
+    assert first.interrupted
+    assert second.text == "Sure, the second answer." and not second.interrupted
+
+
+async def test_wordless_noise_does_not_hold_the_agent_forever() -> None:
+    session = cascade([""], min_interruption_words=1, false_interruption_timeout=0.8)
+    rec = Recorder(session)
+    transport = LoopbackTransport(realtime_playout=True)
+    await agent_speaking(session, transport)
+    t0 = now()
+    noise = asyncio.create_task(transport.play_user_audio(synth_speech(1.6, SR)))  # a fan...
+    await wait_for(lambda: bool(transport.resume_times), 3)
+    resumed = transport.resume_times[0] - t0
+    assert not noise.done()  # the agent resumed while the noise went on
+    await noise
+    await transport.play_user_audio(AudioFrame.silence(0.4, SR), realtime=False)
+    await wait_for(lambda: bool(rec.false_interruptions()), 3)
+    await session.aclose()
+    assert resumed == pytest.approx(0.8, abs=0.3)  # held at most false_interruption_timeout
+    ev = rec.false_interruptions()[0]
+    assert ev.resumed and ev.reason == "noise" and ev.paused == pytest.approx(0.8, abs=0.3)
+    assert not rec.interrupted()
+
+
 # ------------------------------------------------------------ session: other options
 
 
@@ -531,3 +612,27 @@ async def test_uninterruptible_say_discards_user_audio() -> None:
     await burst(transport, 0.6, silence=0.6)  # once it is done, the user is heard again
     await wait_for(lambda: len(assistant_messages(session)) == 2, 4)
     await session.aclose()
+
+
+async def test_uninterruptible_say_started_mid_utterance_is_not_cancelled() -> None:
+    notice = "This call may be recorded for quality purposes."
+    engine = MockEngine(responses=["Got it."], transcripts=["hello are you"],
+                        realtime_factor=1.0, chars_per_second=30.0)  # fmt: skip
+    session = AgentSession(engine)
+    transport = LoopbackTransport(realtime_playout=True)
+    await session.start(Agent("x"), transport)
+    user = asyncio.create_task(transport.play_user_audio(synth_speech(1.2, SR)))
+    await wait_for(lambda: session.user_state == UserState.SPEAKING)
+    await session.say(notice, allow_interruptions=False)  # while the user is talking
+    await user
+    await transport.play_user_audio(AudioFrame.silence(0.6, SR))
+    await wait_for(lambda: session.agent_state == AgentState.LISTENING, 4)
+    await session.aclose()
+    # silence would have ended the utterance and the engine would have answered the
+    # fragment, cancelling the notice: the session dropped the fragment instead
+    conn: Any = session.connection
+    assert conn.responses_started == 1
+    [said] = assistant_messages(session)
+    assert said.text == notice and not said.interrupted
+    expected = MockTTS(chars_per_second=30.0).audio_duration_for(notice)
+    assert played(transport) == pytest.approx(expected, abs=0.1)

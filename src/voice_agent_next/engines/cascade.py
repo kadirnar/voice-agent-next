@@ -325,6 +325,7 @@ class CascadeConnection(EngineConnection):
                                 text=self._turn_text(),
                                 is_final=False,
                                 language=ev.transcript.language if ev.transcript else None,
+                                segment_final=True,
                             )
                         )
                     self._turn_interim = ""

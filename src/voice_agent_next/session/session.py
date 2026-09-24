@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -80,6 +80,8 @@ _MAX_ONSET_LAG = 0.5
 """Upper bound (s) on how long after its onset an engine reports user speech."""
 _SAY_REQUEST_TTL = 10.0
 """A ``say()`` whose response has not started within this many seconds is forgotten."""
+_RECHECK_DELAY = 0.01
+"""Re-check an overlap this soon when engine events are still waiting to be handled."""
 
 
 @dataclass(slots=True)
@@ -190,6 +192,8 @@ class _BargeIn:
     """Input items committed before the overlap: their late transcripts are not evidence."""
     paused_at: float | None = None
     """When this overlap paused playback (``None`` = not paused)."""
+    paused_total: float = 0.0
+    """Seconds of pauses that already ended."""
     input_cleared: bool = False
     """The engine's pending input was cleared during the current silence."""
 
@@ -280,7 +284,8 @@ class AgentSession(EventEmitter):
         self._clock_running = asyncio.Event()
         self._clock_running.set()
         self._transport_paused = False
-        self._pause_seq = 0
+        self._pause_seq = 0  # bumped whenever the playback timeline pauses or moves
+        self._engine_events: AsyncIterator[EngineEvent] | None = None
         self.engine.on("metrics", self._on_metrics)
 
     # ---------------------------------------------------------------- properties
@@ -425,11 +430,22 @@ class AgentSession(EventEmitter):
     # ------------------------------------------------------------------- loops
     async def _input_loop(self) -> None:
         transport, conn = self.transport, self.connection
+        discarding = False
         try:
             async for frame in transport.audio_input():
                 if self._processors is not None:
                     frame = self._processors.process_capture(frame)
-                if self._discard_input():
+                discard = self._discard_input()
+                if discard and not discarding and self.user_state == UserState.SPEAKING:
+                    # the user is mid-utterance: silence would end it and the engine would
+                    # answer the fragment (cancelling the uninterruptible speech): drop it
+                    try:
+                        await conn.clear_input()
+                    except Exception as exc:
+                        logger.warning("engine clear_input failed: %s", exc)
+                    self._set_user_state(UserState.LISTENING)
+                discarding = discard
+                if discard:
                     # uninterruptible speech is playing: the engine must not hear the user
                     frame = AudioFrame(
                         bytes(len(frame.data)), frame.sample_rate, frame.channels, frame.timestamp
@@ -442,7 +458,8 @@ class AgentSession(EventEmitter):
             self._schedule_close("user_disconnected")
 
     async def _event_loop(self) -> None:
-        async for ev in self.connection.events():
+        self._engine_events = events = self.connection.events()
+        async for ev in events:
             try:
                 await self._handle(ev)
             except Exception as exc:
@@ -734,7 +751,8 @@ class AgentSession(EventEmitter):
             return
         language = self._agent.language if self._agent is not None else None
         policy = InterruptionPolicy.from_options(opts, language=language)
-        barge = _BargeIn(Overlap.begin(policy, start), resp, frozenset(self._committed_items))
+        overlap = Overlap.begin(policy, start, held=policy.pauses)
+        barge = _BargeIn(overlap, resp, frozenset(self._committed_items))
         self._barge = barge
         if policy.pauses:
             await self._pause_playback(barge)
@@ -749,22 +767,8 @@ class AgentSession(EventEmitter):
         barge = self._barge
         if barge is None or ev.item_id in barge.ignore_items:
             return
-        overlap = barge.overlap
-        overlap.add_transcript(ev.item_id, ev.text)
-        if (
-            not overlap.confirmed
-            and not overlap.speaking
-            and not barge.input_cleared
-            and overlap.transcript
-            and len(overlap.meaningful_words()) < overlap.policy.words_needed
-        ):
-            # not a turn: keep the engine from committing it (and answering it, which
-            # would cancel the paused speech)
-            barge.input_cleared = True
-            try:
-                await self.connection.clear_input()
-            except Exception as exc:
-                logger.warning("engine clear_input failed: %s", exc)
+        final = ev.is_final or ev.segment_final
+        barge.overlap.add_transcript(ev.item_id, ev.text, final=final)
         await self._evaluate_barge_in()
 
     async def _on_barge_in_committed(self) -> None:
@@ -797,13 +801,39 @@ class AgentSession(EventEmitter):
         barge = self._barge
         if barge is None:
             return
-        verdict = barge.overlap.verdict(now())
+        if self._engine_events_pending():
+            # decide on everything the engine already reported: e.g. a queued InputCommitted
+            # means it took the user's turn, and a cancel would hit the response it started
+            self._schedule_barge_in_check(barge, delay=_RECHECK_DELAY)
+            return
+        overlap = barge.overlap
+        if overlap.not_a_turn() and not barge.input_cleared:
+            # keep the engine from committing it (and answering it, which would cancel the
+            # paused speech)
+            barge.input_cleared = True
+            try:
+                await self.connection.clear_input()
+            except Exception as exc:
+                logger.warning("engine clear_input failed: %s", exc)
+            if self._barge is not barge:
+                return
+        verdict = overlap.verdict(now())
         if verdict is None:
             self._schedule_barge_in_check(barge)
         elif verdict == Verdict.INTERRUPT:
-            barge.overlap.confirmed = True
-            await self._interrupt(barge.response)
+            overlap.confirmed = True
+            # only a response still being generated needs cancelling; a complete one is just
+            # truncated (a cancel might hit a response the engine started meanwhile)
+            await self._interrupt(barge.response, cancel=not barge.response.done)
             self._watch_aftermath(barge)
+        elif verdict == Verdict.UNPAUSE:
+            overlap.held = False
+            if barge.paused_at is not None:
+                barge.paused_total += now() - barge.paused_at
+                barge.paused_at = None
+                await self._resume_playback()
+            if self._barge is barge:
+                self._schedule_barge_in_check(barge)
         elif verdict == Verdict.RESUME:
             await self._resume_after_false_interruption(barge)
         else:
@@ -811,6 +841,11 @@ class AgentSession(EventEmitter):
             if verdict == Verdict.FALSE_INTERRUPTION:
                 self._emit_false_interruption(barge, resumed=False, paused=0.0)
         await self._ensure_playback()
+
+    def _engine_events_pending(self) -> bool:
+        """Engine events are queued but not handled yet (known for the base :class:`Chan`)."""
+        events = self._engine_events
+        return isinstance(events, Chan) and not events.empty()
 
     async def _ensure_playback(self) -> None:
         """Invariant: audio is only held back while an overlap has playback paused."""
@@ -829,16 +864,12 @@ class AgentSession(EventEmitter):
 
     async def _resume_after_false_interruption(self, barge: _BargeIn) -> None:
         self._end_barge_in(barge)
-        if barge.paused_at is None:
-            return  # the agent never stopped talking: nothing to resume or report
-        paused = now() - barge.paused_at
-        barge.paused_at = None
-        await self._resume_playback()
-        resp = barge.response
-        if self._current is resp and not (resp.finished or resp.interrupted):
-            speaking = resp.first_audio_at is not None
-            self._set_agent_state(AgentState.SPEAKING if speaking else AgentState.THINKING)
-        self._emit_false_interruption(barge, resumed=True, paused=paused)
+        if barge.paused_at is not None:
+            barge.paused_total += now() - barge.paused_at
+            barge.paused_at = None
+            await self._resume_playback()
+        if barge.paused_total > 0:  # else the agent never stopped talking: nothing to report
+            self._emit_false_interruption(barge, resumed=True, paused=barge.paused_total)
 
     async def _release_barge_in(self, resp: _Response) -> None:
         """``resp`` finished playing while its overlap was pending: nothing to decide."""
@@ -864,13 +895,18 @@ class AgentSession(EventEmitter):
             self._barge = None
             self._cancel_barge_in_timer()
 
-    def _schedule_barge_in_check(self, barge: _BargeIn) -> None:
+    def _schedule_barge_in_check(self, barge: _BargeIn, *, delay: float | None = None) -> None:
+        """Re-evaluate ``barge`` at its next deadline (or after ``delay`` seconds)."""
         self._cancel_barge_in_timer()
-        deadline = barge.overlap.deadline()
-        if deadline is None or self._closing:
+        if self._closing:
             return
+        if delay is None:
+            deadline = barge.overlap.deadline()
+            if deadline is None:
+                return
+            delay = max(0.0, deadline - now())
         self._barge_timer = asyncio.get_running_loop().call_later(
-            max(0.0, deadline - now()), self._on_barge_in_timer, barge
+            delay, self._on_barge_in_timer, barge
         )
 
     def _on_barge_in_timer(self, barge: _BargeIn) -> None:
@@ -925,6 +961,7 @@ class AgentSession(EventEmitter):
         if paused_at is not None:
             self._shift_timeline(paused_at, now() - paused_at)
             self._unfreeze_clock()
+            self._pause_seq += 1  # the timeline moved: pending waits must re-check it
         transport_paused, self._transport_paused = self._transport_paused, False
         self._send_gate.set()
         if transport_paused:
