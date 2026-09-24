@@ -137,6 +137,8 @@ _STATUSES: Final[Mapping[str, ResponseStatus]] = {
 _MAX_MESSAGE_SIZE: Final = 32 * 2**20
 _MAX_TRACKED_ITEMS: Final = 256
 _RECONNECT_WINDOW: Final = 60.0
+_CANCEL_TIMEOUT: Final = 2.0
+_FINISH_TIMEOUT: Final = 10.0
 _UNSET: Final[Any] = object()
 
 
@@ -512,7 +514,9 @@ class OpenAIRealtimeEngine(S2SEngine):
         query: extra URL query parameters (e.g. vLLM-Omni ``{"duplex": "1"}``).
         input_sample_rate / output_sample_rate: override the profile's PCM rates.
         connect_timeout: handshake + session configuration timeout (seconds).
-        max_reconnect_attempts: reconnects after a transient connection failure (0 = off).
+        max_reconnect_attempts: connection attempts after a transient failure (0 = never
+            reconnect); also the maximum number of reconnects per minute.
+        reconnect_backoff: delay before the first attempt (doubles per attempt, max 10 s).
         expiry_warning: emit ``EngineStatus("expiring")`` this many seconds before the
             provider session limit.
         refine_speech_end: locate the real speech end from the sent audio levels (see the
@@ -744,12 +748,13 @@ class OpenAIRealtimeConnection(EngineConnection):
             return
         self._closing = True
         await self._tasks.cancel_all()
+        # stop the supervisor first so that no reconnect can open a new socket behind us
+        if self._supervisor is not None and self._supervisor is not asyncio.current_task():
+            await cancel_and_wait(self._supervisor)
         ws, self._ws = self._ws, None
         if ws is not None:
             with contextlib.suppress(Exception):
                 await ws.close()
-        if self._supervisor is not None and self._supervisor is not asyncio.current_task():
-            await cancel_and_wait(self._supervisor)
         self.engine._connections.discard(self)
         await super().aclose()
 
@@ -830,16 +835,17 @@ class OpenAIRealtimeConnection(EngineConnection):
         t = now()
         while self._reconnect_times and self._reconnect_times[0] < t - _RECONNECT_WINDOW:
             self._reconnect_times.popleft()
-        if len(self._reconnect_times) >= engine.max_reconnect_attempts and last is None:
+        attempts = engine.max_reconnect_attempts
+        if last is None and attempts > 0 and len(self._reconnect_times) >= attempts:
             last = ProviderConnectionError(  # a server that keeps dropping us: stop looping
                 f"{engine.provider}: realtime connection {reason} "
                 f"({len(self._reconnect_times)} reconnects in {_RECONNECT_WINDOW:.0f}s)",
                 provider=engine.provider,
             )
-        if last is None and engine.max_reconnect_attempts > 0:
+        if last is None and attempts > 0:
             logger.warning("%s: realtime connection %s; reconnecting", engine.provider, reason)
             self._emit(EngineStatus(status="reconnecting", detail=reason))
-            for attempt in range(engine.max_reconnect_attempts):
+            for attempt in range(attempts):
                 await asyncio.sleep(min(engine.reconnect_backoff * 2**attempt, 10.0))
                 try:
                     ws = await self._open_socket()
@@ -852,6 +858,10 @@ class OpenAIRealtimeConnection(EngineConnection):
                         "%s: reconnect attempt %d failed: %s", engine.provider, attempt + 1, exc
                     )
                     continue
+                if self._closing:
+                    with contextlib.suppress(Exception):
+                        await ws.close()
+                    return False
                 self._ws = ws
                 self._reconnecting = False
                 self._reconnect_times.append(now())
@@ -1087,15 +1097,18 @@ class OpenAIRealtimeConnection(EngineConnection):
             event["response_id"] = response_id
         await self._send(event)
 
-    async def _cancel_active_and_wait(self, timeout: float = 2.0) -> None:
-        rid = self._active
-        if rid is None or not self._profile.supports_cancel:
+    async def _cancel_active_and_wait(self) -> None:
+        """Servers reject ``response.create`` while a response is in progress."""
+        state = self._responses.get(self._active) if self._active is not None else None
+        if state is None:
             return
-        state = self._responses.get(rid)
-        await self._send_cancel(rid)
-        if state is not None:
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(state.done.wait(), timeout)
+        if self._profile.supports_cancel:
+            await self._send_cancel(state.response_id)
+            timeout = _CANCEL_TIMEOUT
+        else:
+            timeout = _FINISH_TIMEOUT  # cannot be cancelled: let it finish
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(state.done.wait(), timeout)
 
     async def truncate(self, item_id: str, audio_end_ms: int) -> str | None:
         """Truncate the assistant audio to what was played (``content_index`` tracked).
@@ -1229,7 +1242,7 @@ class OpenAIRealtimeConnection(EngineConnection):
         fatal = isinstance(exc, AuthenticationError)
         if fatal:
             self._fatal = exc
-        if not self._ready.is_set():
+        if not self._started and not self._ready.is_set():  # rejected session configuration
             self._startup_error = exc
             self._ready.set()
             return

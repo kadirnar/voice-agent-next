@@ -797,9 +797,9 @@ async def test_xai_profile_cumulative_transcripts_and_force_message() -> None:
 
 
 async def test_speaches_profile_without_cancel_or_truncate() -> None:
-    long_answer = "A slow local pipeline keeps talking for several seconds in this test. " * 2
+    answer = "A slow local pipeline keeps on talking for a while."  # 3.4 s of audio
     server = FakeRealtimeServer(dialect="beta", supports_cancel=False, supports_truncate=False,
-                                replies=[long_answer], realtime_factor=0.25)  # fmt: skip
+                                replies=[answer, "Done."], realtime_factor=0.25)  # fmt: skip
     async with server:
         engine = SpeachesRealtimeEngine(base_url=server.url)  # no API key needed
         assert not engine.capabilities.truncation
@@ -810,10 +810,14 @@ async def test_speaches_profile_without_cancel_or_truncate() -> None:
             await conn.create_response()
             await rec.wait(lambda: rec.of(ResponseAudio))
             await conn.interrupt(rec.of(ResponseAudio)[0].item_id, 500)
-            await asyncio.sleep(0.1)
+            # a new response waits for the uncancellable one instead of being rejected
+            await conn.create_response()
+            await rec.wait(lambda: len(rec.of(ResponseDone)) == 2)
+            assert [d.status for d in rec.of(ResponseDone)] == ["completed", "completed"]
+            assert spoken(rec, rec.of(ResponseDone)[1].response_id) == "Done."
             assert not server.events("response.cancel")
             assert not server.events("conversation.item.truncate")
-        assert not rec.of(EngineErrorEvent)
+        assert not server.sent_events("error") and not rec.of(EngineErrorEvent)
 
 
 async def test_azure_openai_url_auth_and_deployment() -> None:
