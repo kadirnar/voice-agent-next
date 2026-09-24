@@ -19,6 +19,7 @@ from voice_agent_next import (
     SessionOptions,
     function_tool,
 )
+from voice_agent_next.audio.frame import AudioFormat
 from voice_agent_next.chat import AudioContent
 from voice_agent_next.errors import ConfigurationError
 from voice_agent_next.metrics import TurnMetrics
@@ -140,6 +141,27 @@ async def test_greeting_then_turn_then_close_on_hangup(kind: str) -> None:
     assert rec.of("close")[0].reason == "user_disconnected"
     played = sum(p.frame.duration for p in transport.played_log)
     assert played > 1.0  # greeting + answer were played
+
+
+async def test_resampled_responses_are_played_to_the_end() -> None:
+    """24 kHz engine audio on an 8 kHz line: the resampler's filter delay must not hold back
+    the end of a response (soxr keeps 44 ms) until the next one starts."""
+    engine = MockEngine(transcripts=["hello"], responses=["Hi! Nice to meet you."])
+    session = AgentSession(engine)
+    transport = LoopbackTransport(output_format=AudioFormat(8_000, 1))
+    await session.start(Agent("x", greeting="Welcome."), transport)
+
+    def samples() -> int:
+        return sum(len(p.frame.data) // 2 for p in transport.played_log)
+
+    await wait_for(lambda: session.agent_state == AgentState.LISTENING and samples() > 0)
+    greeting = samples()
+    assert greeting == pytest.approx(len("Welcome.") / 15 * 8_000, abs=2)
+    await speak(transport)
+    await wait_for(lambda: len(session.history.messages()) == 3)
+    await wait_for(lambda: session.agent_state == AgentState.LISTENING)
+    assert samples() - greeting == pytest.approx(len("Hi! Nice to meet you.") / 15 * 8_000, abs=2)
+    await session.aclose()
 
 
 @pytest.mark.parametrize("kind", ENGINES)
