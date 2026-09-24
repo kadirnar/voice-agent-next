@@ -170,6 +170,24 @@ async def _close_ws(ws: ClientConnection) -> None:
         await asyncio.wait_for(ws.close(), 2.0)
 
 
+async def _raise_task_error(
+    reader: asyncio.Task[Any], writer: asyncio.Task[Any], *, grace: float = 0.5
+) -> None:
+    """Raise the error of ``reader`` or else ``writer`` (both are retrieved).
+
+    When the writer fails because the server hung up, the reader usually receives the
+    server's explanation (an ``error`` message) right after: give it ``grace`` seconds so
+    users see "invalid model" rather than "connection closed".
+    """
+    writer_failed = writer.done() and not writer.cancelled() and writer.exception() is not None
+    if writer_failed and not reader.done():
+        await asyncio.wait((reader,), timeout=grace)
+    errors = [t.exception() for t in (reader, writer) if t.done() and not t.cancelled()]
+    for error in errors:
+        if error is not None:
+            raise error
+
+
 def _closed_error(what: str, exc: BaseException | None = None) -> ProviderConnectionError:
     detail = f": {exc}" if exc is not None else ""
     return ProviderConnectionError(f"Cartesia {what} WebSocket closed{detail}", provider=_PROVIDER)
@@ -565,10 +583,7 @@ class _CartesiaSynthesizeStream(SynthesizeStream):
         player = asyncio.create_task(self._play(segments), name="cartesia-tts-play")
         try:
             await asyncio.wait((feeder, player), return_when=asyncio.FIRST_EXCEPTION)
-            for task in (player, feeder):
-                exc = task.exception() if task.done() and not task.cancelled() else None
-                if exc is not None:
-                    raise exc
+            await _raise_task_error(player, feeder)
         finally:
             segments.close()
             await cancel_and_wait(feeder, player)
@@ -587,8 +602,8 @@ class _CartesiaSynthesizeStream(SynthesizeStream):
             else:
                 assert isinstance(item, str)
                 await self._push_segment_text(segment, item)
-        if segment is not None:
-            await self._close_segment(segment)
+        # end_input() flushes before closing, so an open segment here means aclose():
+        # don't finish its context gracefully, _cancel_contexts() cancels it
         segments.close()
 
     async def _push_segment_text(self, segment: _Segment, text: str) -> None:
@@ -640,35 +655,38 @@ class _CartesiaSynthesizeStream(SynthesizeStream):
             self._end_segment()
 
     async def _play_context(self, ctx: _TTSContext) -> None:
+        """Emit a context's audio and words until ``done``.
+
+        Only a completed context is released here: on errors, timeouts and cancellation
+        :meth:`_cancel_contexts` releases it and cancels it if it may still be generating.
+        """
         tts: CartesiaTTS = self._tts  # type: ignore[assignment]
         offset = self._audio_duration  # Cartesia's timestamps restart at 0 in every context
-        try:
-            while True:
-                msg = await self._next_message(ctx, tts.receive_timeout)
-                if isinstance(msg, ProviderError):
-                    raise msg
-                kind = msg.get("type")
-                if kind == "chunk":
-                    data = msg.get("data")
-                    if data:
-                        self._push_audio(base64.b64decode(data))
-                    if msg.get("done") is True:
-                        return
-                elif kind == "timestamps":
-                    words = _tts_words(msg.get("word_timestamps"), offset)
-                    if words:
-                        empty = AudioFrame.empty(tts.sample_rate, tts.channels)
-                        self._send(
-                            SynthesizedAudio(empty, self._request_id, self._segment_id, words=words)
-                        )
-                elif kind == "done":
-                    return
-                elif kind == "error":
-                    raise _api_error(msg)
-                # flush_done / phoneme_timestamps / anything new: nothing to do
-        finally:
-            ctx.finished = True
-            ctx.conn.release(ctx)
+        while True:
+            msg = await self._next_message(ctx, tts.receive_timeout)
+            if isinstance(msg, ProviderError):
+                raise msg
+            kind = msg.get("type")
+            if kind == "chunk":
+                data = msg.get("data")
+                if data:
+                    self._push_audio(base64.b64decode(data))
+                if msg.get("done") is True:
+                    break
+            elif kind == "timestamps":
+                words = _tts_words(msg.get("word_timestamps"), offset)
+                if words:
+                    empty = AudioFrame.empty(tts.sample_rate, tts.channels)
+                    self._send(
+                        SynthesizedAudio(empty, self._request_id, self._segment_id, words=words)
+                    )
+            elif kind == "done":
+                break
+            elif kind == "error":
+                raise _api_error(msg)
+            # flush_done / phoneme_timestamps / anything new: nothing to do
+        ctx.finished = True
+        ctx.conn.release(ctx)
 
     @staticmethod
     async def _next_message(ctx: _TTSContext, timeout: float) -> dict[str, Any] | ProviderError:
@@ -876,10 +894,9 @@ class _CartesiaSTTStream(STTStream):
         receiver = asyncio.create_task(self._recv_loop(ws), name="cartesia-stt-recv")
         try:
             await asyncio.wait((sender, receiver), return_when=asyncio.FIRST_COMPLETED)
+            await _raise_task_error(receiver, sender)
             if not sender.done():
-                receiver.result()  # raises the receiver's error
-                raise _closed_error("STT")  # the server hung up while audio was flowing
-            sender.result()
+                raise _closed_error("STT")  # the server ended the stream while audio was flowing
             try:  # all audio sent and `close` requested: collect the last results
                 await asyncio.wait_for(receiver, stt.close_timeout)
             except TimeoutError:
