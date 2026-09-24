@@ -138,4 +138,6 @@ def hf_file(
             raise DownloadError(f"failed to fetch {repo_id}/{filename}: {exc}") from exc
     prefix = "" if repo_type == "model" else f"{repo_type}s/"
     url = f"https://huggingface.co/{prefix}{repo_id}/resolve/{revision}/{filename}"
-    return download(url, filename=filename.split("/")[-1], subdir=f"hf/{repo_id}", sha256=sha256)
+    return download(
+        url, filename=filename.split("/")[-1], subdir=f"hf/{repo_id}/{revision}", sha256=sha256
+    )

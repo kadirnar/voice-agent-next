@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import importlib
 import json
 import os
@@ -13,6 +14,7 @@ from typing import Annotated, Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from .. import __version__
@@ -80,8 +82,8 @@ def providers(
         table.add_column(col, overflow="fold")
     for r in rows:
         style = "green" if r["status"] == "ready" else "yellow"
-        table.add_row(*(str(r[c]) for c in ("kind", "name", "where", "default_model")),
-                      f"[{style}]{r['status']}[/{style}]", r["description"])  # fmt: skip
+        cells = [escape(str(r[c])) for c in ("kind", "name", "where", "default_model")]
+        table.add_row(*cells, f"[{style}]{escape(r['status'])}[/{style}]", escape(r["description"]))
     console.print(table)
 
 
@@ -124,16 +126,7 @@ def doctor() -> None:
             table.add_row("torch accelerators", ", ".join(accel) or "cpu only")
         except Exception as exc:
             table.add_row("torch accelerators", f"error: {exc}")
-    if is_installed("sounddevice"):
-        try:
-            import sounddevice as sd
-
-            devices = sd.query_devices()
-            n_in = sum(1 for d in devices if d["max_input_channels"] > 0)
-            n_out = sum(1 for d in devices if d["max_output_channels"] > 0)
-            table.add_row("audio devices", f"{n_in} input, {n_out} output")
-        except Exception as exc:
-            table.add_row("audio devices", f"error: {exc}")
+    _audio_doctor_rows(table)
     keys = [
         "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
         "DEEPGRAM_API_KEY", "ASSEMBLYAI_API_KEY", "CARTESIA_API_KEY", "ELEVENLABS_API_KEY",
@@ -144,13 +137,70 @@ def doctor() -> None:
     console.print(table)
 
 
-@app.command()
-def devices() -> None:
-    """List audio input/output devices."""
-    from ..utils.deps import require
+def _audio_doctor_rows(table: Table) -> None:
+    """PortAudio version, host APIs, default devices and setup hints for `van doctor`."""
+    from ..errors import MissingDependencyError, VoiceAgentError
+    from ..transports.local import describe_audio_system
 
-    sd = require("sounddevice", extra="audio")
-    console.print(sd.query_devices())
+    try:
+        info = describe_audio_system()
+    except MissingDependencyError as exc:  # no sounddevice, or no PortAudio library
+        table.add_row("audio", f"[yellow]{escape(str(exc))}[/yellow]")
+        return
+    except VoiceAgentError as exc:
+        table.add_row("audio", f"[red]error: {escape(str(exc))}[/red]")
+        return
+    table.add_row("portaudio", escape(info.portaudio_version))
+    table.add_row("audio host APIs", escape(", ".join(info.hostapis)) or "[dim]none[/dim]")
+    for label, device in (("default input", info.default_input),
+                          ("default output", info.default_output)):  # fmt: skip
+        if device is None:
+            table.add_row(label, "[yellow]none[/yellow]")
+        else:
+            table.add_row(label, escape(f"{device}, {device.default_samplerate:g} Hz"))
+    n_in = sum(1 for d in info.devices if d.max_input_channels > 0)
+    n_out = sum(1 for d in info.devices if d.max_output_channels > 0)
+    table.add_row("audio devices", f"{n_in} input, {n_out} output (details: `van devices`)")
+    for hint in info.hints():
+        table.add_row("audio hint", f"[yellow]{escape(hint)}[/yellow]")
+
+
+@app.command()
+def devices(
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output")] = False,
+) -> None:
+    """List audio devices: index, host API, channels, default rate, system defaults."""
+    from ..errors import VoiceAgentError
+    from ..transports.local import describe_audio_system
+
+    try:
+        info = describe_audio_system()
+    except VoiceAgentError as exc:  # no sounddevice / PortAudio, or PortAudio failed
+        console.print(f"[red]{escape(str(exc))}[/red]", highlight=False)
+        raise typer.Exit(1) from None
+    if as_json:
+        typer.echo(json.dumps([dataclasses.asdict(d) for d in info.devices], indent=2))
+        return
+    table = Table(title=f"audio devices ({escape(info.portaudio_release)})")
+    for col in ("#", "name", "host API", "in", "out", "rate", "default"):
+        table.add_column(
+            col, overflow="fold", justify="right" if col in ("#", "in", "out") else "left"
+        )
+    for d in info.devices:
+        default = " + ".join(
+            kind for kind, flag in (("input", d.is_default_input), ("output", d.is_default_output))
+            if flag
+        )  # fmt: skip
+        table.add_row(
+            str(d.index), escape(d.name), escape(d.hostapi), str(d.max_input_channels),
+            str(d.max_output_channels), f"{d.default_samplerate:g}", default,
+            style="bold" if default else None,
+        )  # fmt: skip
+    console.print(table)
+    console.print(
+        "[dim]select with LocalAudioTransport(input_device=<index or name>) or "
+        "`transport: {type: local, input_device: ...}`; check the setup with `van doctor`[/dim]"
+    )
 
 
 @app.command()
