@@ -108,6 +108,18 @@ class Preset:
             for member in _members(self.config[key])
         ]
 
+    def stack(self) -> str:
+        """The components on one line: ``"engine"`` or ``"stt > llm > tts"``."""
+        parts = []
+        for key in ("engine", "stt", "llm", "tts"):
+            spec = self.config.get(key)
+            if spec is None:
+                continue
+            members = _members(spec)
+            more = f" (+{len(members) - 1} failover)" if len(members) > 1 else ""
+            parts.append(_describe(members[0]) + more)
+        return " > ".join(parts)
+
     @property
     def extras(self) -> tuple[str, ...]:
         """``voice-agent-next`` extras the components need (all failover members)."""
@@ -141,7 +153,7 @@ _PRESETS: tuple[Preset, ...] = (
         config={
             "stt": "sherpa-onnx/zipformer-en-kroko",
             "llm": "ollama/LiquidAI/lfm2.5-1.2b-instruct",
-            "tts": "kokoro/v1.0",
+            "tts": "kokoro/v1.0-fp16",
             "vad": "silero",
             "turn_detector": "smart_turn",
         },
@@ -165,7 +177,7 @@ _PRESETS: tuple[Preset, ...] = (
         config={
             "stt": "faster-whisper/large-v3-turbo",
             "llm": "ollama/qwen3.5:9b",
-            "tts": "kokoro/v1.0",
+            "tts": "kokoro/v1.0-fp16",
             "vad": "silero",
             "turn_detector": "smart_turn",
         },
@@ -185,11 +197,11 @@ _PRESETS: tuple[Preset, ...] = (
     ),
     Preset(
         name="apple",
-        summary="Local on Apple silicon: sherpa-onnx streaming STT, Ollama (Metal), Kokoro (CoreML)",
+        summary="Apple silicon: sherpa-onnx streaming STT, Ollama on Metal, Kokoro on CoreML",
         config={
             "stt": "sherpa-onnx/zipformer-en-kroko",
             "llm": "ollama/qwen3.5:4b",
-            "tts": "kokoro/v1.0",
+            "tts": "kokoro/v1.0-fp16",
             "vad": "silero",
             "turn_detector": "smart_turn",
         },
@@ -215,7 +227,7 @@ _PRESETS: tuple[Preset, ...] = (
                 "groq/openai/gpt-oss-120b",
                 "ollama/LiquidAI/lfm2.5-1.2b-instruct",
             ],
-            "tts": "kokoro/v1.0",
+            "tts": "kokoro/v1.0-fp16",
             "vad": "silero",
             "turn_detector": "smart_turn",
         },
@@ -348,15 +360,21 @@ def _cuda_backend() -> Backend | None:
 
 
 def _ollama_models(base_url: str) -> list[str] | None:
-    """Model names the Ollama server has pulled, or ``None`` when it does not answer."""
-    import httpx
+    """Model names the Ollama server has pulled, or ``None`` when it does not answer.
+
+    Uses ``urllib`` rather than httpx so that a readiness check logs nothing at INFO.
+    """
+    import json
+    import urllib.request
 
     root = base_url.rstrip("/").removesuffix("/v1")
+    if not root.startswith(("http://", "https://")):
+        return None
     try:
-        response = httpx.get(f"{root}/api/tags", timeout=1.5)
-        response.raise_for_status()
-        return [str(m.get("name") or m.get("model")) for m in response.json().get("models", [])]
-    except (httpx.HTTPError, ValueError, AttributeError):
+        with urllib.request.urlopen(f"{root}/api/tags", timeout=1.5) as response:  # noqa: S310
+            models = json.loads(response.read()).get("models", [])
+        return [str(m.get("name") or m.get("model")) for m in models]
+    except (OSError, ValueError, AttributeError):
         return None
 
 
@@ -527,8 +545,10 @@ def _member_problems(key: str, spec: Any, env: Environment) -> list[Problem]:
             problems.append(
                 Problem(key, f"{label} needs {', '.join(missing)}", f"pip install {missing[0]}")
             )
-    if provider.env and not options.get("api_key") and not any(
-        env.environ.get(v) for v in provider.env
+    if (
+        provider.env
+        and not options.get("api_key")
+        and not any(env.environ.get(v) for v in provider.env)
     ):
         problems.append(
             Problem(
@@ -586,9 +606,7 @@ def _check_components(
             continue
         for member, member_problems in results:
             if member_problems:
-                notes.append(
-                    f"{key}: skipping {_describe(member)} ({member_problems[0].message})"
-                )
+                notes.append(f"{key}: skipping {_describe(member)} ({member_problems[0].message})")
         if len(ready) == 1:
             resolved[key] = ready[0]
         elif isinstance(spec, Mapping):

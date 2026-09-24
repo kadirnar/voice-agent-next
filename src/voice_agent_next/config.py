@@ -173,7 +173,7 @@ def _apply_extends(data: dict[str, Any]) -> dict[str, Any]:
 
 def _merge_component(key: str, base: Any, override: Any) -> Any:
     """A component spec over another: a mapping without ``provider:`` only changes options."""
-    if not isinstance(override, dict) or any(k in override for k in ("provider", "use", "fallback")):
+    if not isinstance(override, dict) or {"provider", "use", "fallback"} & override.keys():
         return override
     if base is None:
         raise ConfigurationError(f"`{key}:` needs a `provider:` key (there is nothing to extend)")
