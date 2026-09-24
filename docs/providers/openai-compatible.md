@@ -16,7 +16,9 @@ from voice_agent_next import AgentSession
 # fully local cascade
 session = AgentSession(stt="faster-whisper", llm="ollama/qwen3.5:4b", tts="kokoro", vad="silero")
 # fast cloud LLM
-session = AgentSession(stt="deepgram/nova-3", llm="groq/llama-3.3-70b-versatile", tts="cartesia", vad="silero")
+session = AgentSession(
+    stt="deepgram/nova-3", llm="groq/llama-3.3-70b-versatile", tts="cartesia", vad="silero"
+)
 ```
 
 ## Providers
@@ -116,7 +118,12 @@ import os
 from voice_agent_next import create
 
 llm = create("llm", "openai/mlx-community/Qwen3-4B-4bit", base_url="http://127.0.0.1:8080/v1")
-llm = create("llm", "openai/<model>", base_url="https://api.example.com/v1", api_key=os.environ["EXAMPLE_API_KEY"])
+llm = create(
+    "llm",
+    "openai/<model>",
+    base_url="https://api.example.com/v1",
+    api_key=os.environ["EXAMPLE_API_KEY"],
+)
 ```
 
 Turn off parameters a server rejects with `include_usage=False` (no `stream_options`) or
@@ -165,16 +172,22 @@ from voice_agent_next import register_provider
 from voice_agent_next.providers.openai.llm import OpenAICompatibleLLM
 
 
-@register_provider("llm", "myhost", default_model="my-model", env=("MYHOST_API_KEY",),
-                   extra="openai", requires=("openai",))
+@register_provider(
+    "llm",
+    "myhost",
+    default_model="my-model",
+    env=("MYHOST_API_KEY",),
+    extra="openai",
+    requires=("openai",),
+)
 class MyHostLLM(OpenAICompatibleLLM):
     provider = "myhost"
-    DEFAULT_MODEL = "my-model"            # None: ask the server
+    DEFAULT_MODEL = "my-model"  # None: ask the server
     DEFAULT_BASE_URL = "https://api.myhost.example/v1"
     BASE_URL_ENV = ("MYHOST_BASE_URL",)
     API_KEY_ENV = ("MYHOST_API_KEY",)
-    API_KEY_REQUIRED = True               # False for local servers
-    DEFAULT_EXTRA = {}                    # request parameters sent by default
+    API_KEY_REQUIRED = True  # False for local servers
+    DEFAULT_EXTRA = {}  # request parameters sent by default
 ```
 
 ## Known limitations

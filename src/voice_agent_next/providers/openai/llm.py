@@ -340,14 +340,13 @@ class OpenAILLM(LLM):
             if self._discover_model:
                 try:
                     page = await self._client.models.list()
-                except self._openai.APIStatusError as exc:
-                    if exc.status_code in (401, 403):
-                        raise self._map_error(exc) from exc
-                    raise ConfigurationError(
-                        f"{self.provider}: cannot list the models served at {self.base_url} "
-                        f"(GET /models: HTTP {exc.status_code}); pass model=..."
-                    ) from exc
                 except Exception as exc:
+                    status = getattr(exc, "status_code", None)
+                    if isinstance(exc, self._openai.APIStatusError) and status in (404, 405):
+                        raise ConfigurationError(
+                            f"{self.provider}: cannot list the models served at "
+                            f"{self.base_url} (GET /models: HTTP {status}); pass model=..."
+                        ) from exc
                     raise self._map_error(exc) from exc
                 ids = [str(m.id) for m in getattr(page, "data", None) or []]
                 chat_ids = [i for i in ids if "embed" not in i.lower()] or ids

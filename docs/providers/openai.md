@@ -28,7 +28,9 @@ server needs one.
 from voice_agent_next import AgentSession, ChatContext, create
 
 # in a cascade
-session = AgentSession(stt="deepgram/nova-3", llm="openai/gpt-4.1-mini", tts="cartesia", vad="silero")
+session = AgentSession(
+    stt="deepgram/nova-3", llm="openai/gpt-4.1-mini", tts="cartesia", vad="silero"
+)
 
 # or directly
 llm = create("llm", "openai/gpt-4.1", temperature=0.6, max_tokens=300)
