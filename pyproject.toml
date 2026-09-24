@@ -71,6 +71,15 @@ smart-turn = ["onnxruntime>=1.19"]
 # --- local STT / TTS / LLM ------------------------------------------------------
 faster-whisper = ["faster-whisper>=1.1"]
 kokoro = ["kokoro-onnx>=0.6.1; python_version < '3.14'"]  # upstream caps Requires-Python <3.14
+# moonshine-voice ships py3-none wheels only for these platforms (no sdist)
+moonshine = [
+  "moonshine-voice>=0.1.5; (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')) or (sys_platform == 'darwin' and platform_machine == 'arm64') or (sys_platform == 'win32' and platform_machine == 'AMD64')",
+]
+# CPU-only torch (see [tool.uv.sources]); no torch wheels for Intel macOS since torch 2.3
+pocket-tts = [
+  "pocket-tts>=3.3,<4; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
+  "torch>=2.5; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
+]
 # sherpa-onnx wheels (except Linux armv7l, which bundles it) depend on sherpa-onnx-core of the
 # same version, which uv's universal lock misses: it reads the armv7l metadata. Upgrade both.
 # 1.13.3 (2026-06) postdates every model in the catalog (Nemotron 3.5 streaming, 2026-06-11).
@@ -114,6 +123,16 @@ dev = [
   "opentelemetry-api>=1.27",  # tracing tests (in-memory span exporter)
   "opentelemetry-sdk>=1.27",
 ]
+
+[tool.uv.sources]
+# Linux/Windows: CPU wheels (~200 MB) instead of the multi-GB CUDA build; macOS wheels on PyPI
+# are CPU/MPS already.
+torch = [{ index = "pytorch-cpu", marker = "sys_platform != 'darwin'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/voice_agent_next"]

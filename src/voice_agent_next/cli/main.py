@@ -534,7 +534,7 @@ def _attach_console_logging(session: Any) -> None:
 
 def _register_command_groups() -> None:
     """Optional command groups live in ``cli/<name>.py`` modules exposing a Typer ``app``."""
-    for name in ("bench", "serve"):
+    for name in ("bench", "models", "serve"):
         module_name = f"{__package__}.{name}"
         try:
             module = importlib.import_module(module_name)

@@ -1,0 +1,27 @@
+# T1 latency with real speech rendered by Kyutai Pocket TTS: the same questions as
+# `latency-local`, for machines with only the `pocket-tts` extra (no Kokoro). The caller
+# speaks with a male voice (george), so it can be told apart from the agent's default
+# voice (alba) in the recording. The model is downloaded once (~220 MB, plus CPU torch).
+#
+#   van bench latency -c agent.yaml -s benchmarks/scenarios/latency-local-pocket.yaml --turns 12
+#
+# docs/providers/pocket-tts.md has the agent config of the Pocket TTS vs Kokoro run.
+name: latency-local-pocket
+version: 1
+description: >-
+  Short customer-service questions spoken by Pocket TTS (george), for benchmarking engines
+  with real STT / VAD models fully offline.
+sample_rate: 16000
+loudness_dbfs: -20.0
+lead_in: 0.5
+stimuli: tts
+tts: {provider: pocket-tts/george}
+reply_timeout: 15.0
+gap_after_reply: 0.5
+turns:
+  - {id: "time", text: "What time does the store open tomorrow?"}
+  - {id: "table", text: "Can you book a table for two people tonight?"}
+  - {id: "order", text: "Where is my order? I placed it last week."}
+  - {id: "sunday", text: "Are you open on Sunday afternoon?"}
+  - {id: "flight", text: "Please change my flight to Friday morning."}
+  - {id: "refund", text: "How long does a refund usually take?"}

@@ -2,7 +2,7 @@
 
 **Real-time speech-to-speech voice agents in Python — native S2S models and streaming cascades, local and cloud, on Linux, macOS and Windows, with a built-in benchmark suite.**
 
-> Status: **alpha** — 35 providers (local and cloud), native speech-to-speech engines and streaming cascades behind one runtime, a benchmark suite; APIs may still change. See the [roadmap](ROADMAP.md) and the [research report](docs/research/REPORT.md).
+> Status: **alpha** — 52 providers (local and cloud), native speech-to-speech engines and streaming cascades behind one runtime, a benchmark suite; APIs may still change. See the [roadmap](ROADMAP.md) and the [research report](docs/research/REPORT.md).
 
 ## Why
 
@@ -93,17 +93,18 @@ Every component is addressed by a `provider/model` spec and installed through an
 | | Local | Cloud |
 |---|---|---|
 | **Speech-to-speech engines** | any OpenAI-Realtime-compatible server: Speaches, LocalAI, vLLM-Omni | OpenAI Realtime, Gemini Live, Azure OpenAI Realtime, xAI Grok Voice, Qwen-Omni Realtime |
-| **STT** | faster-whisper (CPU int8 / CUDA) | Deepgram Nova-3 & Flux, Cartesia Ink |
-| **LLM** | Ollama, llama.cpp, vLLM, LM Studio | OpenAI, Anthropic Claude, Groq, Cerebras, Together, OpenRouter, DeepSeek, Fireworks, SambaNova |
-| **TTS** | Kokoro-82M (ONNX) | Cartesia Sonic, Deepgram Aura-2 |
-| **VAD & turn-taking** | Silero VAD v6, energy VAD, Smart Turn v3.2 | STT-native turn events (Deepgram Flux, Cartesia Ink) |
-| **Transports** | microphone/speakers (with WebRTC echo cancellation), files, loopback | WebSocket server + browser client |
+| **STT** | sherpa-onnx (streaming Zipformer/NeMo, Parakeet, Moonshine, SenseVoice, Whisper), faster-whisper (CPU / CUDA) | Deepgram Nova-3 & Flux, AssemblyAI Universal-Streaming, ElevenLabs Scribe v2, OpenAI transcribe, Cartesia Ink |
+| **LLM** | Ollama, llama.cpp, vLLM, LM Studio | OpenAI, Anthropic Claude, Google Gemini, Groq, Cerebras, Together, OpenRouter, DeepSeek, Fireworks, SambaNova |
+| **TTS** | Kokoro-82M, sherpa-onnx (Piper/VITS, Kokoro, Matcha), Kokoro-FastAPI | Cartesia Sonic, ElevenLabs Flash/v3, OpenAI gpt-4o-mini-tts, Gemini TTS, Deepgram Aura-2 |
+| **VAD & turn-taking** | Silero VAD v6, TEN VAD, energy VAD, Smart Turn v3.2 | STT-native turn events (Deepgram Flux, AssemblyAI, Cartesia Ink) |
+| **Transports** | microphone/speakers (with WebRTC echo cancellation), files, loopback | WebSocket + browser client, telephony (Twilio, Telnyx, Vonage, Plivo) |
+| **Serving & ops** | `van serve`: any engine behind the OpenAI Realtime protocol | failover chains, call recording (stereo WAV + JSONL), OpenTelemetry tracing, GPU auto-selection |
 
-In progress ([roadmap](ROADMAP.md)): sherpa-onnx streaming STT/TTS, OpenAI STT/TTS, ElevenLabs, Gemini LLM/TTS, AssemblyAI, Moshi, MLX on Apple Silicon, WebRTC, telephony, and serving any engine over the OpenAI Realtime protocol.
+In progress ([roadmap](ROADMAP.md)): omni models (LFM2.5-Audio), presets, WebRTC, Moonshine, Pocket TTS, async tools, Moshi, MLX on Apple Silicon.
 
 ## Benchmarks
 
-`van bench latency` drives a simulated caller through the real runtime and measures voice-to-voice latency **on the call recording** (end of user speech → first agent audio), with a reproducibility manifest for every run. A fully local pipeline (Silero + Smart Turn + faster-whisper `base` + Ollama LFM2.5-1.2B + Kokoro) on a Ryzen 5 5600 CPU: **1.13 s p50 / 1.63 s p90**; the runtime itself adds ≈ 2 ms. Details and methodology: [docs/benchmarks/results.md](docs/benchmarks/results.md), [benchmarks/README.md](benchmarks/README.md).
+`van bench latency` drives a simulated caller through the real runtime and measures voice-to-voice latency **on the call recording** (end of user speech → first agent audio), with a reproducibility manifest for every run. A fully local pipeline (Silero + Smart Turn + faster-whisper `base` + Ollama LFM2.5-1.2B + Kokoro) on a Ryzen 5 5600 CPU: **1.13 s p50 / 1.63 s p90**, and **0.97 s p50** with GPU speech recognition on an RTX 5070 Ti; the runtime itself adds ≈ 2 ms (checked on every PR). Details and methodology: [docs/benchmarks/results.md](docs/benchmarks/results.md), [benchmarks/README.md](benchmarks/README.md).
 
 ## Architecture (short)
 
