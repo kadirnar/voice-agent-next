@@ -18,9 +18,9 @@ The only dependency is `onnxruntime`. The model is downloaded on first use; see 
 from voice_agent_next import AgentSession, create
 from voice_agent_next.providers.silero import SileroVAD
 
-vad = create("vad", "silero")                        # default model and options
-vad = SileroVAD(min_silence_duration=0.3)            # override single VADOptions fields
-await vad.warmup()                                   # optional: download + load now, off the event loop
+vad = create("vad", "silero")  # default model and options
+vad = SileroVAD(min_silence_duration=0.3)  # override single VADOptions fields
+await vad.warmup()  # optional: download + load now, off the event loop
 
 session = AgentSession(stt=..., llm=..., tts=..., vad="silero")
 ```

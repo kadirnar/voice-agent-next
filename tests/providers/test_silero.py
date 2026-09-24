@@ -330,6 +330,7 @@ def test_invalid_configuration(fake_ort: FakeOrt, kwargs: dict[str, Any], match:
 
 def test_model_path_skips_model_id_validation(fake_ort: FakeOrt, model_file: Path) -> None:
     assert SileroVAD(model="my-finetune", model_path=model_file).model == "my-finetune"
+    assert SileroVAD(model_path="~/silero.onnx").model_path == Path.home() / "silero.onnx"
 
 
 def test_missing_model_file(fake_ort: FakeOrt, tmp_path: Path) -> None:

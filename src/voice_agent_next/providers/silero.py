@@ -180,7 +180,7 @@ class SileroVAD(VAD):
             model=model,
         )
         self._ort = require("onnxruntime", extra="silero")
-        self.model_path = Path(model_path) if model_path is not None else None
+        self.model_path = Path(model_path).expanduser() if model_path is not None else None
         self.force_cpu = force_cpu
         self._session: Any = None
         self._session_lock = threading.Lock()
