@@ -525,8 +525,8 @@ def latency_report_spec(results: RunResults) -> ReportSpec:
     vad = onset.get("reference_vad", {})
     vad_desc = ", ".join(f"{k}={v}" for k, v in vad.items()) or "default"
     refine = (
-        "The onset is refined to the first 1 ms block inside that frame reaching "
-        f"{onset['refine_threshold_db']:g} dBFS."
+        "The onset is then refined to the first sample of that frame reaching "
+        f"{onset['refine_threshold_db']:g} dBFS (inside a 1 ms block at that level)."
         if onset.get("refine") and onset.get("refine_threshold_db") is not None
         else ""
     )

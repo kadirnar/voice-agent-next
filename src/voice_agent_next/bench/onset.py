@@ -14,8 +14,8 @@ The reference VAD is pluggable because it slightly biases every latency number:
 
 Frames are laid out on exact 10 ms boundaries for any sample rate (frame ``i`` starts at
 ``round(i * 0.01 * rate)``), so onset times never drift over long recordings. By default
-the onset is refined inside its frame to the first 1 ms block above the level threshold
-(see :class:`OnsetDetector`), which removes up to one frame of quantization bias.
+the onset is then refined to sample precision inside its frame (see
+:class:`OnsetDetector`), which removes up to one frame of quantization bias.
 """
 
 from __future__ import annotations
@@ -227,9 +227,10 @@ class OnsetDetector:
 
     The frame rule decides *which* speech counts (a run of >= ``min_speech``); with
     ``refine`` (default) the onset is then moved from the start of its 10 ms frame to the
-    first 1 ms block inside that frame whose RMS level reaches ``refine_threshold_db``
-    (default: the RMS reference threshold, -40 dBFS). This removes the up-to-one-frame
-    quantization bias without changing which frame is chosen.
+    first sample whose magnitude reaches ``refine_threshold_db`` inside the first 1 ms
+    block of that frame whose RMS level reaches it too (default threshold: the RMS
+    reference threshold, -40 dBFS). This removes the up-to-one-frame quantization bias
+    without changing which frame is chosen; the block condition ignores isolated samples.
     """
 
     vad: ReferenceVAD = field(default_factory=RMSReferenceVAD)
@@ -264,11 +265,12 @@ class OnsetDetector:
         start = round(onset * rate)
         end = min(round((onset + self.frame_duration) * rate), len(x))
         block = max(1, round(0.001 * rate))
-        power = 10.0 ** (self._refine_threshold() / 10.0)
+        level = 10.0 ** (self._refine_threshold() / 20.0)
         for i in range(start, end, block):
             seg = x[i : min(i + block, end)]
-            if seg.size and float(np.mean(np.square(seg))) >= power:
-                return i / rate
+            if seg.size and float(np.sqrt(np.mean(np.square(seg)))) >= level:
+                # max |x| >= RMS, so some sample of the block reaches the level
+                return (i + int(np.argmax(np.abs(seg) >= level))) / rate
         return onset
 
     def segments(

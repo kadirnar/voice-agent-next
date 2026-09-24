@@ -52,7 +52,7 @@ def test_onset_ignores_clicks_and_comfort_noise() -> None:
     audio = mix(signal, noise)
 
     refined = OnsetDetector().onsets(audio)
-    assert refined == [pytest.approx(1.234, abs=0.0015)]
+    assert refined == [pytest.approx(1.234, abs=0.0002)]  # sample precision
     coarse = OnsetDetector(refine=False).onsets(audio)
     assert coarse == [pytest.approx(1.23, abs=1e-9)]  # start of the 10 ms frame
 
