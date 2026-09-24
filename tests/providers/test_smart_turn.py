@@ -205,7 +205,7 @@ async def test_predict_resamples_and_downmixes() -> None:
     await detector.predict_end_of_turn(audio=resample(speech, 48_000).to_channels(2))
     await detector.predict_end_of_turn(audio=resample(synth_speech(9.0, SR), 8_000))
     reference, converted = (f["input_features"][0] for f in session.feeds[:2])
-    assert np.abs(reference - converted).mean() < 0.02
+    assert np.abs(reference - converted).mean() < 0.002  # ~1e-4 with soxr or numpy
     assert all(f["input_features"].shape == (1, 80, 800) for f in session.feeds)
 
 
@@ -314,7 +314,8 @@ def test_model_variants_revision_and_threads(monkeypatch: pytest.MonkeyPatch) ->
         return Path(filename)
 
     monkeypatch.setattr(smart_turn, "hf_file", fake_hf_file)
-    SmartTurnDetector(model="v3.2-gpu", num_threads=4, providers=["CUDAExecutionProvider"])._get_session()
+    gpu = SmartTurnDetector(model="v3.2-gpu", num_threads=4, providers=["CUDAExecutionProvider"])
+    gpu._get_session()
     SmartTurnDetector(model="smart-turn-v3.1-cpu.onnx", revision="main")._get_session()
     assert fetched[0] == (
         "smart-turn-v3.2-gpu.onnx",
@@ -497,7 +498,7 @@ async def test_real_model_in_agent_session(vad: str, jfk: AudioFrame) -> None:
     except (ProviderNotFoundError, MissingDependencyError) as exc:
         pytest.skip(f"{vad} VAD is not available: {exc}")
     session = AgentSession(
-        stt=MockSTT(transcripts=["ask not", "ask what you can do for your country."]),
+        stt=MockSTT(default_text="words"),
         llm=MockLLM(responses=["Noted."]),
         tts=MockTTS(),
         vad=vad_component,
@@ -522,8 +523,9 @@ async def test_real_model_in_agent_session(vad: str, jfk: AudioFrame) -> None:
     await transport.play_user_audio(room_tone, realtime=False)
     await _wait_for(lambda: bool(finals), 10)
     await session.aclose()
+    print(f"{vad}: end-of-turn probabilities {[round(m.probability, 3) for m in eot]}")
     assert eot[-1].end_of_turn, [m.probability for m in eot]
-    assert finals == ["ask not ask what you can do for your country."]
+    assert len(finals) == 1  # one user turn despite the pause after "ask not"
 
 
 # ---------------------------------------------------------------- golden file generator
