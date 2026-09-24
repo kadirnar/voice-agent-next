@@ -139,7 +139,9 @@ class LocalTorchTTS(TTS):
         if self._model is None:
             backend = select_torch_backend(self.device_request, accelerators=self._accelerators())
             if backend.fix:
-                logger.warning("%s: running on %s; to use the GPU: %s", self.provider, backend, backend.fix)
+                logger.warning(
+                    "%s: running on %s; to use the GPU: %s", self.provider, backend, backend.fix
+                )
             t0 = now()
             try:
                 self._model = self._load(backend.device)
