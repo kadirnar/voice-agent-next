@@ -103,6 +103,8 @@ def test_invalid_scenarios_are_rejected(tmp_path: Path) -> None:
         Scenario(name="x", turns=[TurnSpec()])  # no duration or text
     with pytest.raises(pydantic.ValidationError):
         TurnSpec(duration=1.0, speech=(0.5, 0.2))
+    with pytest.raises(pydantic.ValidationError, match="unique"):
+        Scenario(name="x", turns=[TurnSpec(id="a", duration=1), TurnSpec(id="a", duration=1)])
     with pytest.raises(pydantic.ValidationError):
         Scenario.model_validate({"name": "x", "turns": [{"duration": 1}], "bogus": 1})
     with pytest.raises(ConfigurationError):
@@ -114,11 +116,14 @@ def test_invalid_scenarios_are_rejected(tmp_path: Path) -> None:
         builtin_scenario("nope")
 
 
-async def test_missing_wav_is_reported(tmp_path: Path) -> None:
+async def test_missing_or_silent_wav_is_reported(tmp_path: Path) -> None:
     (tmp_path / "s.yaml").write_text(
         "name: w\nstimuli: wav\nturns: [{wav: nope.wav}]\n", encoding="utf-8"
     )
     with pytest.raises(ConfigurationError, match="not found"):
+        await render_stimuli(load_scenario(tmp_path / "s.yaml"))
+    write_wav(tmp_path / "nope.wav", silence(0.5, 16_000))
+    with pytest.raises(ConfigurationError, match="silent"):
         await render_stimuli(load_scenario(tmp_path / "s.yaml"))
 
 

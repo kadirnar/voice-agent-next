@@ -168,8 +168,9 @@ from voice_agent_next.bench import BenchSystem, LatencyOptions, load_scenario, r
 
 system = BenchSystem.from_options(engine={"provider": "mock", "response_delay": 0.3})
 results = asyncio.run(
-    run_latency_benchmark(system, load_scenario("latency-smoke"), LatencyOptions(turns=10),
-                          out_dir="bench-results")
+    run_latency_benchmark(
+        system, load_scenario("latency-smoke"), LatencyOptions(turns=10), out_dir="bench-results"
+    )
 )
 print(results.summary.metrics["v2v_ms"].p50, results.directory)
 ```

@@ -138,6 +138,7 @@ class CallerEmulator:
         self._scanned = 0
         self._agent_end = -math.inf
         self._aborted = False
+        self._used = False
 
     # ------------------------------------------------------------------ public
     async def run(
@@ -149,7 +150,13 @@ class CallerEmulator:
         gap_after_reply: float = 0.3,
         max_reply: float = 60.0,
     ) -> CallResult:
-        """Speak every stimulus in order; return the recording and per-turn timing."""
+        """Speak every stimulus in order; return the recording and per-turn timing.
+
+        A caller places one call: create a new instance (and transport) for the next one.
+        """
+        if self._used:
+            raise RuntimeError("CallerEmulator.run() can only be called once")
+        self._used = True
         turns: list[TurnTiming] = []
         self._t_stream = now()
         origin = self._t_stream if self.origin is None else self.origin

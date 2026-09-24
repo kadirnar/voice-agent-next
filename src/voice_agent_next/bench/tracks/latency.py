@@ -106,6 +106,12 @@ class LatencyOptions:
     """Bootstrap seed."""
     bootstrap_resamples: int = 2000
 
+    def timing(self, scenario: Scenario) -> tuple[float, float]:
+        """``(reply_timeout, gap_after_reply)``: these options, else the scenario's."""
+        reply_timeout = scenario.reply_timeout if self.reply_timeout is None else self.reply_timeout
+        gap = scenario.gap_after_reply if self.gap_after_reply is None else self.gap_after_reply
+        return reply_timeout, gap
+
     def validate(self) -> None:
         if self.turns < 1:
             raise ValueError("turns must be >= 1")
@@ -288,16 +294,13 @@ async def _run_session(
         should_stop=lambda: session.closed,
         on_turn=on_turn,
     )
+    reply_timeout, gap = options.timing(scenario)
     try:
         call = await caller.run(
             stimuli,
             lead_in=scenario.lead_in,
-            reply_timeout=options.reply_timeout or scenario.reply_timeout,
-            gap_after_reply=(
-                scenario.gap_after_reply
-                if options.gap_after_reply is None
-                else options.gap_after_reply
-            ),
+            reply_timeout=reply_timeout,
+            gap_after_reply=gap,
             max_reply=scenario.max_reply,
         )
     finally:
@@ -622,15 +625,14 @@ async def run_latency_benchmark(
     """
     options = options or LatencyOptions()
     options.validate()
+    final_id = run_id or new_run_id(TRACK, system.label)
     directory: Path | None = None
     if out_dir is not None:
-        directory = _reserve_directory(Path(out_dir), run_id or new_run_id(TRACK, system.label),
-                                       unique=run_id is None)  # fmt: skip
-        run_id = directory.name
+        directory = _reserve_directory(Path(out_dir), final_id, unique=run_id is None)
+        final_id = directory.name
     try:
         return await _run_latency(
-            system, scenario, options, directory=directory,
-            run_id=run_id or new_run_id(TRACK, system.label),
+            system, scenario, options, directory=directory, run_id=final_id,
             detector=detector or OnsetDetector(), on_turn=on_turn,
         )  # fmt: skip
     except BaseException:
@@ -703,8 +705,7 @@ async def _run_latency(
     unique: dict[str, Stimulus] = {}
     for stim in stimuli:
         unique.setdefault(stim.id, stim)
-    reply_timeout = options.reply_timeout or scenario.reply_timeout
-    gap = scenario.gap_after_reply if options.gap_after_reply is None else options.gap_after_reply
+    reply_timeout, gap = options.timing(scenario)
     manifest = RunManifest(
         run_id=run_id,
         track=TRACK,

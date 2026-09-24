@@ -132,6 +132,9 @@ class Scenario(BaseModel):
 
     @model_validator(mode="after")
     def _check_turns(self) -> Scenario:
+        ids = [self.turn_id(i) for i in range(len(self.turns))]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"turn ids must be unique: {ids}")
         for i, turn in enumerate(self.turns):
             source = turn.source or self.stimuli
             if source == "wav" and not turn.wav:
@@ -375,7 +378,10 @@ async def render_stimuli(scenario: Scenario, *, turns: int | None = None) -> lis
         if not audio:
             raise ConfigurationError(f"turn {scenario.turn_id(i)!r} rendered no audio")
         if span is None:
-            span = annotate_speech(audio)
+            try:
+                span = annotate_speech(audio)
+            except ValueError as exc:
+                raise ConfigurationError(f"turn {scenario.turn_id(i)!r}: {exc}") from exc
         if span[1] > audio.duration + 1e-6:
             raise ConfigurationError(
                 f"turn {scenario.turn_id(i)!r}: speech span ends after the clip "
