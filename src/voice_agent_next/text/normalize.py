@@ -384,14 +384,12 @@ def _plural(value: str, singular: str, plural: str) -> str:
     return singular if value in ("1", "-1") else plural
 
 
-_LETTER_NAMES = dict(
-    zip(
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-        "ay bee see dee ee eff jee aitch eye jay kay el em en oh pee cue ar ess tee you vee "
-        "double-you ex why zee".split(),
-        strict=True,
-    )
-)
+_LETTER_NAMES = {
+    "A": "ay", "B": "bee", "C": "see", "D": "dee", "E": "ee", "F": "eff", "G": "jee",
+    "H": "aitch", "I": "eye", "J": "jay", "K": "kay", "L": "el", "M": "em", "N": "en",
+    "O": "oh", "P": "pee", "Q": "cue", "R": "ar", "S": "ess", "T": "tee", "U": "you",
+    "V": "vee", "W": "double-you", "X": "ex", "Y": "why", "Z": "zee",
+}  # fmt: skip
 
 
 def _letters(word: str) -> str:
@@ -558,11 +556,20 @@ class EnglishNormalizer(RuleNormalizer):
     units, times, dates, years and decades, fractions, ranges, phone numbers and IDs
     (digit by digit), alphanumeric codes, e-mail addresses, URLs, common abbreviations and
     spelled-out initialisms. Text it does not recognize is left untouched.
+
+    Args:
+        spell_acronyms: spell initialisms such as "NYC" and "API" as letter names.
+        hyphenate_digit_groups: read phone number groups as "five-five-five" instead of
+            "five five five" (Pocket TTS runs digit groups together otherwise; Piper
+            reads the plain form better).
     """
 
     language = "en"
 
-    def __init__(self, *, spell_acronyms: bool = True) -> None:
+    def __init__(
+        self, *, spell_acronyms: bool = True, hyphenate_digit_groups: bool = False
+    ) -> None:
+        self._group_joiner = "-" if hyphenate_digit_groups else " "
         rules: list[tuple[str, Handler]] = [
             (r"(?<![\w.+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b",
              self._email),
@@ -619,22 +626,22 @@ class EnglishNormalizer(RuleNormalizer):
     def _url(m: re.Match[str], text: str) -> str:
         return _say_address(re.sub(r"^https?://", "", m.group(), flags=re.IGNORECASE))
 
-    @staticmethod
-    def _phone(m: re.Match[str], text: str) -> str:
+    def _group(self, digits: str) -> str:
+        return spell_digits(digits).replace(" ", self._group_joiner)
+
+    def _phone(self, m: re.Match[str], text: str) -> str:
         s = m.group()
         plus = s.startswith("+")
         groups = re.findall(r"\d+", s)
         if plus and len(groups) == 1:  # compact international number
             return "plus " + spell_digits(groups[0])
-        # "five-five-five, zero-one-four-two": Pocket TTS runs "five five five, zero" together
-        words = [spell_digits(g).replace(" ", "-") for g in groups]
+        words = [self._group(g) for g in groups]
         if plus:
             words[0] = "plus " + words[0]
         return ", ".join(words)
 
-    @staticmethod
-    def _digit_groups(m: re.Match[str], text: str) -> str:
-        return ", ".join(spell_digits(g).replace(" ", "-") for g in m.group().split("-"))
+    def _digit_groups(self, m: re.Match[str], text: str) -> str:
+        return ", ".join(self._group(g) for g in m.group().split("-"))
 
     @staticmethod
     def _version(m: re.Match[str], text: str) -> str:
@@ -648,7 +655,7 @@ class EnglishNormalizer(RuleNormalizer):
             return None
         spoken = f"{_MONTH_LIST[month - 1]} {ordinal(day)}"
         if y:
-            spoken += f", {year(int(y))}"
+            spoken += f" {year(int(y))}"  # no comma: Piper garbles the sentence with one
         return spoken
 
     def _iso_date(self, m: re.Match[str], text: str) -> str | None:
@@ -704,7 +711,7 @@ class EnglishNormalizer(RuleNormalizer):
             return None
         spoken = f"{ordinal(day)} of {month}"
         if m.group(3):
-            spoken += f", {year(int(m.group(3)))}"
+            spoken += f" {year(int(m.group(3)))}"
         elif _sentence_end(m, text):
             spoken += "."
         return spoken

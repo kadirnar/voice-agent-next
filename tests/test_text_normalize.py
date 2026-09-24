@@ -91,13 +91,13 @@ CASES: list[tuple[str, str]] = [
     ("Lands at 18:00", "Lands at eighteen hundred"),
     # dates and years
     ("on March 3rd", "on March third"),
-    ("on July 14, 2025.", "on July fourteenth, twenty twenty five."),
+    ("on July 14, 2025.", "on July fourteenth twenty twenty five."),
     ("by Sept 5", "by September fifth"),
     ("on the 3rd of March", "on the third of March"),
-    ("on 3 March 2024", "on third of March, twenty twenty four"),
-    ("due 2025-03-04", "due March fourth, twenty twenty five"),
-    ("due 3/4/2025", "due March fourth, twenty twenty five"),
-    ("due 25/12/2024", "due December twenty fifth, twenty twenty four"),
+    ("on 3 March 2024", "on third of March twenty twenty four"),
+    ("due 2025-03-04", "due March fourth twenty twenty five"),
+    ("due 3/4/2025", "due March fourth twenty twenty five"),
+    ("due 25/12/2024", "due December twenty fifth twenty twenty four"),
     ("in March 2025", "in March twenty twenty five"),
     ("in 1999", "in nineteen ninety nine"),
     ("since 2005", "since two thousand five"),
@@ -118,14 +118,14 @@ CASES: list[tuple[str, str]] = [
     ("2/3 done", "two thirds done"),
     ("open 24/7", "open twenty four seven"),
     # phone numbers and IDs, digit by digit
-    ("Call 555-0142.", "Call five-five-five, zero-one-four-two."),
+    ("Call 555-0142.", "Call five five five, zero one four two."),
     (
         "Call (415) 555-0142",
-        "Call four-one-five, five-five-five, zero-one-four-two",
+        "Call four one five, five five five, zero one four two",
     ),
     (
         "Call +1 415-555-0142",
-        "Call plus one, four-one-five, five-five-five, zero-one-four-two",
+        "Call plus one, four one five, five five five, zero one four two",
     ),
     (
         "Dial +442071838750",
@@ -133,7 +133,7 @@ CASES: list[tuple[str, str]] = [
     ),
     (
         "Call 1-800-555-1234",
-        "Call one, eight-zero-zero, five-five-five, one-two-three-four",
+        "Call one, eight zero zero, five five five, one two three four",
     ),
     ("Your order number is 58213.", "Your order number is five eight two one three."),
     ("The zip code was 94107?", "The zip code was nine four one zero seven?"),
@@ -181,6 +181,11 @@ CASES: list[tuple[str, str]] = [
 @pytest.mark.parametrize(("text", "spoken"), CASES)
 def test_english_spoken_forms(text: str, spoken: str) -> None:
     assert normalize_text(text) == spoken
+
+
+def test_hyphenated_digit_groups_option() -> None:
+    norm = EnglishNormalizer(hyphenate_digit_groups=True)
+    assert norm.normalize("Call 555-0142.").text == "Call five-five-five, zero-one-four-two."
 
 
 def test_number_words() -> None:

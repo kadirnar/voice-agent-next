@@ -576,4 +576,6 @@ async def test_numbers_are_spoken_and_word_timings_point_to_the_original(
     assert backend.model.calls[-1]["text"] == "It is 5."
     assert [w.word for w in words_of(raw)] == ["It", "is", "5."]
     assert PocketTTS(language="french").text_language(None) == "french"
+    await collect(tts, "Call 555-0142.")
+    assert backend.models[0].calls[-1]["text"] == "Call five-five-five, zero-one-four-two."
     await tts.aclose()

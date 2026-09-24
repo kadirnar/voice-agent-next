@@ -52,6 +52,7 @@ from ..audio.frame import AudioFrame
 from ..errors import ConfigurationError, ProviderError
 from ..registry import register_provider
 from ..stt import WordTiming
+from ..text.normalize import EnglishNormalizer, TextNormalizer
 from ..text.sentences import SentenceSegmenter
 from ..tts import TTS, ChunkedStream, NormalizeOption, SynthesizedAudio
 from ..utils.clock import now
@@ -354,6 +355,12 @@ class PocketTTS(TTS):
     def text_language(self, voice: str | None) -> str | None:
         return self.language or None  # "english_2026-04" -> the English normalizer
 
+    def normalizer_for(self, voice: str | None = None) -> TextNormalizer | None:
+        normalizer = super().normalizer_for(voice)
+        if type(normalizer) is EnglishNormalizer:  # the default English rules, tuned
+            return _POCKET_ENGLISH
+        return normalizer
+
     def _synthesize(self, text: str, *, voice: str | None) -> ChunkedStream:
         return _PocketChunkedStream(self, text, voice=voice)
 
@@ -573,6 +580,9 @@ class PocketTTS(TTS):
                         yield words
             offset += audio.size
 
+
+_POCKET_ENGLISH = EnglishNormalizer(hyphenate_digit_groups=True)
+"""Pocket TTS runs "five five five, zero one four two" together; hyphens keep it apart."""
 
 _DONE = object()
 

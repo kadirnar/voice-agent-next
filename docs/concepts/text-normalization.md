@@ -92,6 +92,15 @@ e-mail addresses, URLs or "Dr.". See the [measurements](#measurements).
   that are spelled out (`NYC`, `AI`, `API`, `FAQ`). Words that are pronounced as words
   are left alone (`NASA`, and Roman numerals like `IV`).
 
+A few spoken forms were chosen by round-trip tests on Pocket TTS, Kokoro and Piper:
+
+- Number words have no hyphens ("forty two"). Piper (espeak-ng) pauses at a hyphen, and
+  "forty-two dollars" came back as "$40, $2".
+- Letters are written as letter names ("en why see", "ay em"). Bare capitals ("N Y C")
+  are sometimes read as one word ("Nysi").
+- Phone number groups are hyphenated ("five-five-five, zero-one-four-two"). Pocket TTS
+  runs "five five five, zero" together.
+
 The normalizer leaves text it does not recognize unchanged. A four-digit number is read
 as a year only in a year context (`in 1999`). Elsewhere it is a cardinal (`1500 points`
 becomes "one thousand five hundred points").
