@@ -67,7 +67,7 @@ kokoro = ["kokoro-onnx>=0.6.1; python_version < '3.14'"]  # upstream caps Requir
 sherpa-onnx = ["sherpa-onnx>=1.10"]
 # --- cloud providers (Deepgram, Cartesia, AssemblyAI, ElevenLabs... use raw WS/HTTP) --
 anthropic = ["anthropic>=0.60"]
-google = ["google-genai>=1.30"]
+google = ["google-genai>=2.25"]
 openai = ["openai>=2.0"]
 # --- transports -------------------------------------------------------------------
 webrtc = ["aiortc>=1.9"]
