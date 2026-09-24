@@ -11,6 +11,7 @@ recovery); pass ``pausable=False`` to simulate an output that cannot pause.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -215,7 +216,8 @@ class LoopbackTransport(Transport):
             frame = self._pop()
             cleared_at_start = self._cleared
             # back to back with the previous frame, unless it arrived after that one ended
-            start = now() if play_head is None else max(play_head, self._arrived)
+            t = now()
+            start = t if play_head is None else min(t, max(play_head, self._arrived))
             play_head = None
             self._current_end = start + frame.duration
             self._deliver(frame, start)
@@ -225,10 +227,8 @@ class LoopbackTransport(Transport):
                 if remaining <= 0:
                     break
                 self._wakeup.clear()
-                try:
+                with contextlib.suppress(TimeoutError):  # may fire a clock tick early
                     await asyncio.wait_for(self._wakeup.wait(), remaining)
-                except TimeoutError:
-                    break
             if self._cleared == cleared_at_start:
                 play_head = self._current_end  # played to the end: the next frame follows
             self._current_end = None

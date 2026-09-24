@@ -36,6 +36,7 @@ from voice_agent_next.providers.mock import (
     synth_speech,
 )
 from voice_agent_next.transports import FileTransport, LoopbackTransport
+from voice_agent_next.utils import now
 
 
 class Recorder:
@@ -160,6 +161,38 @@ async def test_loopback_playout_keeps_its_sample_clock_through_late_wakeups() ->
     for prev, cur in itertools.pairwise(log):
         assert cur.start_time == pytest.approx(prev.start_time + prev.frame.duration, abs=1e-9)
     await transport.aclose()
+
+
+async def test_loopback_playout_never_starts_a_frame_in_the_future(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timers that fire early (Windows: up to a 15.6 ms clock tick) must not end a frame
+    early: the next one would be scheduled ahead of time, and a clear() in between would
+    let it "play" after the clear."""
+    wait_for = asyncio.wait_for
+
+    async def early_wait_for(aw: Any, timeout: float | None) -> Any:
+        if timeout is None or timeout <= 0.016:
+            return await wait_for(aw, timeout)
+        return await wait_for(aw, timeout - 0.016)
+
+    monkeypatch.setattr(asyncio, "wait_for", early_wait_for)
+    transport = LoopbackTransport(realtime_playout=True)
+    await transport.start()
+    late: list[float] = []
+
+    async def listen() -> None:
+        async for played in transport.agent_audio():
+            late.append(played.start_time - now())
+
+    listener = asyncio.create_task(listen())
+    for _ in range(10):
+        await transport.write_audio(AudioFrame.silence(0.02, 24_000))
+    await wait_for(transport.wait_for_playout(), 2)
+    await asyncio.sleep(0.03)
+    listener.cancel()
+    await transport.aclose()
+    assert len(late) == 10 and max(late) <= 0.0
 
 
 async def test_resampled_responses_are_played_to_the_end() -> None:
