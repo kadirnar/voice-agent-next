@@ -96,7 +96,7 @@ webrtc = ["aiortc>=1.9"]
 # --- observability -----------------------------------------------------------------
 otel = ["opentelemetry-api>=1.27"]  # tracing API only: pick your own SDK and exporter
 # --- benchmark ----------------------------------------------------------------------
-bench = ["jiwer>=3.0"]
+bench = ["jiwer>=3.0", "soundfile>=0.12"]  # soundfile: FLAC/OGG test sets (LibriSpeech)
 # --- bundles ------------------------------------------------------------------------
 local = ["voice-agent-next[audio,silero,smart-turn,faster-whisper,kokoro]"]
 cloud = ["voice-agent-next[openai,anthropic,google]"]
