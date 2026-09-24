@@ -176,7 +176,7 @@ def devices(
     try:
         info = describe_audio_system()
     except VoiceAgentError as exc:  # no sounddevice / PortAudio, or PortAudio failed
-        console.print(f"[red]{escape(str(exc))}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]", highlight=False)
         raise typer.Exit(1) from None
     if as_json:
         typer.echo(json.dumps([dataclasses.asdict(d) for d in info.devices], indent=2))

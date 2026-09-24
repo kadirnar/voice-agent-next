@@ -15,6 +15,7 @@ import importlib.machinery
 import json
 import logging
 import queue
+import re
 import sys
 import threading
 import time
@@ -49,6 +50,7 @@ from voice_agent_next.transports.local import (
 RATE = 16_000
 BLOCK = 160  # 10 ms at 16 kHz
 PORTAUDIO_19_6 = "PortAudio V19.6.0-devel, revision 396fe4b6699ae929d3a685b3ef8a7e97396139a4"
+ANSI_STYLE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 # ------------------------------------------------------------------------ fake backend
@@ -941,11 +943,17 @@ def test_hints_for_other_setups() -> None:
     ]
 
 
+def cli(*args: str) -> tuple[int, str]:
+    """Run ``van`` and return its exit code and output without ANSI styles (CI forces colors)."""
+    result = CliRunner().invoke(app, list(args))
+    return result.exit_code, ANSI_STYLE.sub("", result.output)
+
+
 def test_cli_devices(fake_sd: FakeSoundDevice) -> None:
-    result = CliRunner().invoke(app, ["devices"])
-    assert result.exit_code == 0, result.output
+    code, output = cli("devices")
+    assert code == 0, output
     for text in ("Built-in Microphone", "pipewire", "JACK", "input", "output", "V19.6.0"):
-        assert text in result.output
+        assert text in output
     result = CliRunner().invoke(app, ["devices", "--json"])
     assert result.exit_code == 0, result.output
     rows = json.loads(result.stdout)
@@ -955,16 +963,16 @@ def test_cli_devices(fake_sd: FakeSoundDevice) -> None:
 
 def test_cli_devices_without_sounddevice(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "sounddevice", None)
-    result = CliRunner().invoke(app, ["devices"])
-    assert result.exit_code == 1
-    assert "voice-agent-next[audio]" in result.output
+    code, output = cli("devices")
+    assert code == 1
+    assert "voice-agent-next[audio]" in output
 
 
 def test_cli_doctor_reports_the_audio_setup(fake_sd: FakeSoundDevice) -> None:
-    result = CliRunner().invoke(app, ["doctor"])
-    assert result.exit_code == 0, result.output
+    code, output = cli("doctor")
+    assert code == 0, output
     for text in ("portaudio", "V19.6.0", "ALSA", "Built-in Microphone", "Built-in Speakers"):
-        assert text in result.output
+        assert text in output
 
 
 # -------------------------------------------------------------------- session, end to end
