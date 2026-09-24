@@ -331,8 +331,8 @@ def _to_transcript(
     if segments:
         # exp(mean token log-probability), weighted by segment length in tokens
         weights = [max(1, len(s.tokens)) for s in segments]
-        mean_logprob = sum(s.avg_logprob * w for s, w in zip(segments, weights, strict=True))
-        confidence = min(1.0, math.exp(mean_logprob / sum(weights)))
+        total = sum(s.avg_logprob * w for s, w in zip(segments, weights, strict=True))
+        confidence = min(1.0, math.exp(total / sum(weights)))
     return Transcript(
         text=text,
         language=getattr(info, "language", None) or language,

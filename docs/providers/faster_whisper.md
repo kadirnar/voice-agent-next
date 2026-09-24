@@ -20,7 +20,7 @@ multilingual recognizer of voice-agent-next.
 from voice_agent_next import create
 
 stt = create("stt", "faster_whisper/small", language="en")
-await stt.warmup()                 # download (first run) + load + warm-up inference
+await stt.warmup()  # download (first run) + load + warm-up inference
 transcript = await stt.transcribe(frame)  # any sample rate / channel count
 print(transcript.text, transcript.language, transcript.confidence)
 ```
@@ -172,7 +172,9 @@ Reproduce the table with a loop like this (`clip` is the 11 s JFK recording as a
 ```python
 stt = FasterWhisperSTT(model="base", device="cpu", language="en")
 await stt.warmup()
-t0 = time.perf_counter(); await stt.transcribe(clip); rtf = (time.perf_counter() - t0) / clip.duration
+t0 = time.perf_counter()
+await stt.transcribe(clip)
+rtf = (time.perf_counter() - t0) / clip.duration
 ```
 
 ## Errors
