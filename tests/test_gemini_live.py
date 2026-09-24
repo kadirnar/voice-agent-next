@@ -18,6 +18,7 @@ from voice_agent_next import Agent, AgentSession, AgentState, ChatMessage, funct
 from voice_agent_next.audio import AudioFrame
 from voice_agent_next.chat import FunctionCallOutput
 from voice_agent_next.engine import EngineOptions
+from voice_agent_next.engines.rotation import SummarizeHistory
 from voice_agent_next.errors import (
     AuthenticationError,
     ConfigurationError,
@@ -39,9 +40,9 @@ from voice_agent_next.events import (
     ResponseToolCall,
     ToolCallCancelled,
 )
-from voice_agent_next.metrics import EngineMetrics, TurnMetrics
+from voice_agent_next.metrics import EngineMetrics, RotationMetrics, TurnMetrics
 from voice_agent_next.providers.google.live import GeminiLiveConnection, GeminiLiveEngine
-from voice_agent_next.providers.mock import synth_speech
+from voice_agent_next.providers.mock import MockLLM, synth_speech
 from voice_agent_next.testing.gemini_live import FakeGeminiLiveServer, FakeReply, FakeToolCall
 from voice_agent_next.transports import LoopbackTransport
 
@@ -1123,3 +1124,56 @@ async def test_close_while_reconnecting_does_not_hang(fake: Callable[..., Any]) 
     assert conn.closed
     await conn.send_audio(AudioFrame.silence(0.02, 16_000))  # ignored after close
     await conn.send_text("ignored")
+
+
+# ------------------------------------------------------- rotation metrics & carry-over
+async def test_rotations_are_reported_as_metrics(fake: Callable[..., Any]) -> None:
+    server = await fake(replies=["Hello!"])
+    engine = engine_for(server)
+    metrics: list[RotationMetrics] = []
+    engine.on("metrics", lambda m: metrics.append(m) if isinstance(m, RotationMetrics) else None)
+    conn = await engine.connect(EngineOptions(instructions="be brief"))
+    assert isinstance(conn, GeminiLiveConnection)
+    events = Events(conn)
+    await say(conn)
+    await events.wait(lambda: bool(events.of(ResponseDone)))
+    await wait_for(lambda: len(server.connection.handles) == 2)
+    await server.go_away(time_left=10.0)
+    await events.wait(lambda: bool(metrics))
+    await server.drop()
+    await events.wait(lambda: len(metrics) == 2)
+    await conn.aclose()
+
+    planned, dropped = metrics
+    assert (planned.reason, planned.planned, planned.resumed) == ("go_away", True, True)
+    assert planned.rotation == 1 and planned.attempts == 1 and planned.lost_audio == 0
+    assert planned.carried_items == 0 and planned.failed_responses == 0
+    assert 0 <= planned.gap < 2.0
+    assert not dropped.planned and dropped.resumed and dropped.rotation == 2
+    assert conn.rotations == 2
+
+
+async def test_fresh_session_is_seeded_with_the_carry_over_strategy(
+    fake: Callable[..., Any],
+) -> None:
+    server = await fake(replies=["Nice to meet you, Ada."], transcripts=["my name is Ada"])
+    summarizer = SummarizeHistory(MockLLM(responses=["The user is Ada."]), keep_last=1,
+                                  min_items=1)  # fmt: skip
+    conn, events = await connect(server, carry_over=summarizer)
+    metrics: list[RotationMetrics] = []
+    conn._e.on("metrics", lambda m: metrics.append(m) if isinstance(m, RotationMetrics) else None)
+    await say(conn)
+    await events.wait(lambda: bool(events.of(ResponseDone)))
+    await wait_for(lambda: len(server.connection.handles) == 2)
+    server._by_handle.clear()  # the handle expired: a fresh session must be seeded
+    await server.drop()
+    await events.wait(lambda: bool(metrics))
+    await conn.aclose()
+
+    fresh = server.connections[-1]
+    assert fresh.client_contents[0]["turns"] == [
+        {"role": "user", "parts": [{"text": "Summary of the conversation so far: The user is Ada."}]},
+        {"role": "model", "parts": [{"text": "Nice to meet you, Ada."}]},
+    ]  # fmt: skip
+    (m,) = metrics
+    assert not m.planned and not m.resumed and m.carried_items == 2
