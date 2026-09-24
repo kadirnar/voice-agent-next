@@ -61,6 +61,7 @@ __all__ = [
     "load_cuda_libraries",
     "onnxruntime_info",
     "parse_nvidia_smi",
+    "report",
     "select_ctranslate2_backend",
     "select_onnx_backend",
     "session_providers",
@@ -810,6 +811,89 @@ def _onnx_accelerator(device: str, info: OnnxRuntimeInfo, *, explicit: bool) -> 
             )
     reason = detect_nvidia().gpu_name() if device == "cuda" else provider
     return Backend(device, providers=(provider, CPU_PROVIDER), reason=reason)
+
+
+# ------------------------------------------------------------------ reporting
+def _describe_nvidia(nvidia: NvidiaInfo) -> str:
+    if not nvidia.gpus:
+        return "none" if nvidia.driver_version is None else "driver found, no GPU visible"
+    gpus = "; ".join(str(gpu) for gpu in nvidia.gpus)
+    cuda = " (CUDA {}.{})".format(*nvidia.cuda_version) if nvidia.cuda_version else ""
+    return f"{gpus}; driver {nvidia.driver_version or 'unknown'}{cuda}"
+
+
+def _describe_libraries(libraries: Sequence[CudaLibrary]) -> str:
+    return "; ".join(str(lib) for lib in libraries)
+
+
+def report() -> list[tuple[str, str]]:
+    """``(check, result)`` rows describing the hardware and backend choices (``van doctor``).
+
+    Loads the CUDA libraries the installed runtimes need (as the providers would) and
+    never raises: a failing check becomes an ``error: ...`` row.
+    """
+    rows: list[tuple[str, str]] = []
+
+    def row(check: str, describe: Any) -> None:
+        try:
+            result = describe()
+        except Exception as exc:  # a doctor must not crash on a broken install
+            result = f"error: {exc}"
+        if result is not None:
+            rows.append((check, str(result)))
+
+    nvidia = detect_nvidia()
+    row("NVIDIA GPU", lambda: _describe_nvidia(nvidia))
+    apple = detect_apple_silicon()
+    if apple is not None:
+        row("Apple silicon", lambda: f"{apple}; mlx {'installed' if apple.mlx else 'not installed'}")
+
+    ct2 = ctranslate2_info()
+    if ct2 is not None:
+
+        def describe_ct2() -> str:
+            if not ct2.cuda_devices:
+                return f"{ct2.version}, CPU only"
+            types = f" ({', '.join(ct2.cuda_compute_types)})" if ct2.cuda_compute_types else ""
+            return f"{ct2.version}, {ct2.cuda_devices} CUDA device(s){types}"
+
+        row("ctranslate2", describe_ct2)
+        if ct2.cuda_major is not None and (ct2.cuda_devices or nvidia.gpus):
+            row(
+                f"CUDA {ct2.cuda_major} libraries (ctranslate2)",
+                lambda: _describe_libraries(
+                    load_cuda_libraries(CTRANSLATE2_CUDA_LIBRARIES, ct2.cuda_major or 12)
+                ),
+            )
+        row("faster-whisper device=auto", lambda: _describe_backend(select_ctranslate2_backend()))
+
+    ort = onnxruntime_info()
+    if ort is not None:
+        row("onnxruntime build", lambda: ort.build)
+        if len(ort.distributions) > 1:
+            rows.append(
+                (
+                    "onnxruntime conflict",
+                    f"{' and '.join(ort.distributions)} are both installed and overwrite "
+                    "each other: uninstall all of them, then install one",
+                )
+            )
+        if ort.cuda_major is not None and EXECUTION_PROVIDERS["cuda"] in ort.providers:
+            row(
+                f"CUDA {ort.cuda_major} libraries (onnxruntime)",
+                lambda: _describe_libraries(
+                    load_cuda_libraries(ONNXRUNTIME_CUDA_LIBRARIES, ort.cuda_major or 12)
+                ),
+            )
+        row(
+            "onnxruntime device=auto (Kokoro)",
+            lambda: _describe_backend(select_onnx_backend(accelerators=("cuda", "coreml", "directml"))),
+        )
+    return rows
+
+
+def _describe_backend(backend: Backend) -> str:
+    return f"{backend}; to use the GPU: {backend.fix}" if backend.fix else str(backend)
 
 
 def session_providers(session: Any) -> list[str]:
