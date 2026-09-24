@@ -174,6 +174,12 @@ retries on CPU. Providers passed explicitly (`providers=`) are used as given. Th
 `onnxruntime` wheel is CPU-only on Linux and Windows (plus `AzureExecutionProvider`, which is
 ignored) and includes CoreML on macOS.
 
+With `onnxruntime-gpu`, the CUDA libraries it opens (cuBLAS, cuDNN, cuFFT...) are loaded from
+NVIDIA's pip wheels first (`pip install 'onnxruntime-gpu[cuda,cudnn]'` installs them); when
+they are missing CUDA is skipped instead of failing. On an NVIDIA machine with the CPU-only
+build, one INFO line says how to switch. `van doctor` shows the choice; see
+[hardware.md](../hardware.md).
+
 The int8 models are built on `ConvInteger`, which the CUDA execution provider does not
 implement, so ONNX Runtime runs those nodes on the CPU. With CUDA, use fp32 or fp16.
 

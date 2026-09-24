@@ -58,6 +58,13 @@ resample = ["soxr>=0.5"]
 audio = ["sounddevice>=0.5", "soxr>=0.5"]
 aec = ["livekit>=1.0"]
 onnx = ["onnxruntime>=1.19"]
+# --- GPU runtime libraries (see docs/hardware.md) ---------------------------------
+# cuBLAS 12 for CTranslate2 4.x (faster-whisper on NVIDIA GPUs; 12.8+ has Blackwell
+# kernels). voice_agent_next.hardware loads it from site-packages: no LD_LIBRARY_PATH.
+# ONNX Runtime models need `onnxruntime-gpu` in place of `onnxruntime` instead.
+cuda = [
+  "nvidia-cublas-cu12>=12.8; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')",
+]
 # --- VAD / turn detection (local) ----------------------------------------------
 silero = ["onnxruntime>=1.19"]
 smart-turn = ["onnxruntime>=1.19"]
@@ -69,13 +76,21 @@ pocket-tts = [
   "pocket-tts>=3.3,<4; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
   "torch>=2.5; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
 ]
-sherpa-onnx = ["sherpa-onnx>=1.10"]
+# sherpa-onnx wheels (except Linux armv7l, which bundles it) depend on sherpa-onnx-core of the
+# same version, which uv's universal lock misses: it reads the armv7l metadata. Upgrade both.
+# 1.13.3 (2026-06) postdates every model in the catalog (Nemotron 3.5 streaming, 2026-06-11).
+sherpa-onnx = [
+  "sherpa-onnx>=1.13.3",
+  "sherpa-onnx-core>=1.13.3; platform_machine != 'armv7l'",
+]
 # --- cloud providers (Deepgram, Cartesia, AssemblyAI, ElevenLabs... use raw WS/HTTP) --
 anthropic = ["anthropic>=0.60"]
 google = ["google-genai>=2.25"]
 openai = ["openai>=2.0"]
 # --- transports -------------------------------------------------------------------
 webrtc = ["aiortc>=1.9"]
+# --- observability -----------------------------------------------------------------
+otel = ["opentelemetry-api>=1.27"]  # tracing API only: pick your own SDK and exporter
 # --- benchmark ----------------------------------------------------------------------
 bench = ["jiwer>=3.0"]
 # --- bundles ------------------------------------------------------------------------
@@ -101,6 +116,8 @@ dev = [
   "mypy>=1.11",
   "types-PyYAML>=6.0",
   "soxr>=0.5",
+  "opentelemetry-api>=1.27",  # tracing tests (in-memory span exporter)
+  "opentelemetry-sdk>=1.27",
 ]
 
 [tool.uv.sources]

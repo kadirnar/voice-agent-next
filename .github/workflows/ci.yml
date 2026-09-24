@@ -72,7 +72,8 @@ jobs:
           python-version: "3.12"
       - name: System audio library (sounddevice)
         run: sudo apt-get update -q && sudo apt-get install -y -q libportaudio2
-      - run: uv sync --all-extras
+      # `cuda` is ~700 MB of NVIDIA runtime wheels, useless on a GPU-less runner
+      - run: uv sync --all-extras --no-extra cuda
       - run: uv run pytest -q
       - run: uv run van providers --json > /dev/null
 

@@ -87,26 +87,28 @@ converted model (`model="/models/whisper-ct2"`). Downloads go to the Hugging Fac
 
 ## Devices and compute types
 
-`device="auto"` uses CUDA only when CTranslate2 reports a CUDA device **and** a warm-up
-inference on it succeeds; otherwise it logs a warning and loads the model on the CPU. The
-check matters because a visible GPU is not enough: CTranslate2's pip wheels (Linux and
-Windows) link against **cuBLAS 12 and cuDNN 9** at run time and do not ship them. Without
-them the model loads on the GPU and then fails on the first inference with
-`Library libcublas.so.12 is not found or cannot be loaded`. Forcing `device="cuda"` turns
-that into a `ProviderError` during `warmup()` instead of a silent fallback.
-`resolved_device` and `resolved_compute_type` tell you what was picked.
+`device="auto"` uses CUDA when CTranslate2 reports a CUDA device, the CUDA libraries it
+opens at run time load, **and** a warm-up inference on it succeeds; otherwise the model runs
+on the CPU. A visible GPU is not enough: CTranslate2's pip wheels (Linux and Windows) open
+**cuBLAS 12** at run time and do not ship it. Without it the model loads on the GPU and then
+fails on the first inference with `Library libcublas.so.12 is not found or cannot be
+loaded`. The provider checks this up front (`voice_agent_next.hardware`): when cuBLAS is
+missing the model stays on the CPU and one INFO line names the fix; when the GPU fails later
+(no kernels for it, out of memory) a warning is logged and the CPU is used. Forcing
+`device="cuda"` turns failures into a `ProviderError` during `warmup()` instead of a
+fallback. `resolved_device` and `resolved_compute_type` tell you what was picked, and
+`van doctor` shows what `"auto"` picks on this machine and why.
 
-To enable the GPU on Linux, install the NVIDIA runtime wheels and put them on the library path
-before starting Python:
+To enable the GPU (Linux x86_64, Windows x64), install the `cuda` extra:
 
 ```bash
-pip install nvidia-cublas-cu12 'nvidia-cudnn-cu12==9.*'
-export LD_LIBRARY_PATH=$(python -c 'import os, nvidia.cublas.lib, nvidia.cudnn.lib; print(os.path.dirname(nvidia.cublas.lib.__file__) + ":" + os.path.dirname(nvidia.cudnn.lib.__file__))')
+pip install 'voice-agent-next[faster-whisper,cuda]'
 ```
 
-A system CUDA 12 toolkit with cuDNN 9 works too. On Windows, put the cuBLAS 12 and cuDNN 9
-DLLs on `PATH`. macOS wheels are CPU-only (int8 runs well on Apple Silicon); for Metal use
-an MLX provider.
+It installs NVIDIA's cuBLAS 12 wheel, which the library finds in `site-packages` and loads
+before CTranslate2 needs it: no `LD_LIBRARY_PATH` or `PATH` changes. A system CUDA 12
+toolkit on the library path works too. macOS wheels are CPU-only (int8 runs well on Apple
+Silicon); for Metal use an MLX provider. See [hardware.md](../hardware.md).
 
 GPUs newer than the CTranslate2 build (for example the RTX 50xx series) run through the
 driver's PTX JIT: the very first CUDA inference on such a machine took about 11 s here while
@@ -150,7 +152,7 @@ machine was busy with other jobs (load average ~7-10), so treat these as upper b
 | `small` | `"en"` / detect | 1.22 / 2.60 s | 0.111 / 0.237 | 1,018 / 2,360 ms |
 | `large-v3-turbo` | — | not measured | — | — |
 
-**GPU:** NVIDIA RTX 5070 Ti (16 GB), `float16`, with cuBLAS 12 / cuDNN 9 on the library path,
+**GPU:** NVIDIA RTX 5070 Ti (16 GB), `float16`, with cuBLAS 12 (the `cuda` extra),
 `language="en"`.
 
 | Model | 11 s clip | RTF | 2.5 s utterance |
