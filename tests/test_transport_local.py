@@ -474,7 +474,8 @@ def test_no_default_device_is_a_clear_error(make_fake_sd: Callable[..., FakeSoun
     make_fake_sd(default=(-1, 1))
     with pytest.raises(ConfigurationError, match="no default input device"):
         LocalAudioTransport(echo_mode="headphones")
-    assert LocalAudioTransport(input_device="usb headset", echo_mode="headphones")
+    t = LocalAudioTransport(input_device="usb headset", echo_mode="headphones")
+    assert t.input_device.index == 2  # ties broken by the default output's host API
 
 
 def test_stream_formats_follow_device_defaults_unless_given(fake_sd: FakeSoundDevice) -> None:
@@ -769,7 +770,7 @@ async def test_buffered_duration_is_queue_plus_device_latency(
 
 
 # ----------------------------------------------------------------------------------- echo
-async def test_auto_echo_mode_without_canceller_is_half_duplex(
+def test_auto_echo_mode_without_canceller_is_half_duplex(
     fake_sd: FakeSoundDevice, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.WARNING, logger="voice_agent_next"):
@@ -958,7 +959,7 @@ async def test_session_with_the_mock_engine_over_fake_devices(
     try:
         await session.start(Agent("be brief"), transport)
         await wait_for(lambda: heard == ["hello there"])
-        await wait_for(lambda: bool(np.abs(fake_sd.played_audio()).max() > 1000))
+        await wait_for(lambda: int(np.abs(fake_sd.played_audio()).max(initial=0)) > 1000)
     finally:
         await session.aclose()
     assert fake_sd.input_stream.closed and fake_sd.output_stream.closed

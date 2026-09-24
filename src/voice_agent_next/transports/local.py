@@ -504,14 +504,11 @@ class LocalAudioTransport(Transport):
                 f"{self.output_device} has {self.output_device.max_output_channels} output "
                 f"channel(s); output_channels={output_channels}"
             )
+        in_rate = sample_rate if input_sample_rate is None else input_sample_rate
+        out_rate = sample_rate if output_sample_rate is None else output_sample_rate
         super().__init__(
-            input_format=AudioFormat(
-                _stream_rate(input_sample_rate or sample_rate, self.input_device), input_channels
-            ),
-            output_format=AudioFormat(
-                _stream_rate(output_sample_rate or sample_rate, self.output_device),
-                output_channels,
-            ),
+            input_format=AudioFormat(_stream_rate(in_rate, self.input_device), input_channels),
+            output_format=AudioFormat(_stream_rate(out_rate, self.output_device), output_channels),
         )
         self._rate_overridden = any(
             r is not None for r in (sample_rate, input_sample_rate, output_sample_rate)
