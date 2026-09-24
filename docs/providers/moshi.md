@@ -10,10 +10,10 @@ It works with Kyutai's `python -m moshi.server`, the Rust `moshi-backend` and
 from voice_agent_next import Agent, AgentSession
 from voice_agent_next.providers.moshi import MoshiEngine
 
-session = AgentSession(MoshiEngine(url="ws://localhost:8998"))   # or AgentSession("moshi")
+session = AgentSession(MoshiEngine(url="ws://localhost:8998"))  # or AgentSession("moshi")
 await session.run(Agent(""), transport)
 
-session = AgentSession("personaplex")                            # wss://localhost:8998
+session = AgentSession("personaplex")  # wss://localhost:8998
 await session.run(Agent("You work for Acme Bank and your name is Sam.", voice="NATM1"), transport)
 ```
 
@@ -58,11 +58,13 @@ from moshi.models import loaders
 
 _load_file = loaders.load_file
 
+
 class _KeepScales(dict):
     def __setitem__(self, key, value):
         if key.endswith("_scb") and key in self:
             return  # keep the float32 scale, not the down-cast copy
         super().__setitem__(key, value)
+
 
 loaders.load_file = lambda *a, **kw: _KeepScales(_load_file(*a, **kw))
 runpy.run_module("moshi.server", run_name="__main__")
