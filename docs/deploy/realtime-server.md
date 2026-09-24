@@ -44,7 +44,7 @@ asyncio.run(main())
 
 | Option | Meaning |
 | --- | --- |
-| `--protocol/-p` | Wire protocol. Only `openai-realtime` for now. The command is built from `build_models()` and `build_server()` in `cli/serve.py`, so more protocols can be added later. |
+| `--protocol/-p` | Wire protocol: `openai-realtime` (default, this page), or `websocket`, `webrtc`, `twilio`, `telnyx`, `vonage`, `plivo` (see [Serving in production](serving.md)). |
 | `--engine/-e [NAME=]SOURCE` | A registry spec (`mock`, `openai/gpt-realtime`), an inline mapping (`'{provider: mock, response_delay: 0.2}'`) or an agent config file (YAML/TOML/JSON, engine or cascade). Repeat it to serve several models. |
 | `--stt --llm --tts --vad --turn` | Build a cascade (named `--name`, default `cascade`). |
 | `--name/-n` | Model name of a single engine. |
@@ -55,6 +55,9 @@ asyncio.run(main())
 | `--max-session-duration` | Close sessions after N seconds with a `session_expired` error, like OpenAI. |
 | `--warmup/--no-warmup` | Call `engine.warmup()` before accepting clients (default on). |
 | `--host --port` | Listening address. `--port 0` picks a free port. |
+| `--preset --config` | Serve a preset's or a config file's engine (like `-e agent.yaml`). |
+| `--prewarm N`, `--engine-per-session` | Keep N engine connections open ahead of calls; one engine per session. See [prewarm](serving.md#prewarm-no-model-load-or-connection-setup-in-the-call-path). |
+| `--workers N`, `--drain-timeout S`, `--log-format json` | Worker processes on one port, graceful drain, structured logs. See [Serving in production](serving.md). |
 
 With a config file, the agent's `instructions`, `voice` and `language` become session
 defaults. Agent `tools` in the config are **not** served: Realtime clients declare and run
@@ -140,7 +143,8 @@ only the client knows how much the user heard. It reports that with
 * **TLS and origins.** Pass `serve_options={"ssl": ctx, "origins": [...]}` to
   `RealtimeServer`, or terminate TLS at a reverse proxy (enable WebSocket upgrades on it).
 * **Health.** `GET /health` returns `{"status": "ok", ...}`. `GET /v1/models` lists the
-  served models.
+  served models. Under `van serve`, `GET /ready` and `GET /metrics` (Prometheus) are
+  served too: see [Serving in production](serving.md#health-readiness-and-metrics).
 * **Concurrency.** Each client session gets its own `engine.connect()`. A shared engine loads
   its models once. A factory (`RealtimeModel(lambda: make_engine())`) builds and closes one
   engine per session.
@@ -149,8 +153,10 @@ only the client knows how much the user heard. It reports that with
   the session stops taking engine output, so the engine's own buffers hold it. Client events
   (cancel, barge-in) are still handled. A client that stops reading entirely is closed (1008)
   once `max_send_buffer` is exceeded.
-* **Shutdown.** `server.close()` (or Ctrl-C under `van serve`) closes every session with
-  1001 and closes the engines the server created.
+* **Shutdown.** `server.aclose()` closes every session with 1001 and closes the engines
+  the server created. Under `van serve`, SIGTERM or Ctrl-C first drains: new sessions are
+  refused and live ones get `--drain-timeout` seconds to finish
+  ([graceful drain](serving.md#graceful-drain)).
 
 ## Limitations
 
