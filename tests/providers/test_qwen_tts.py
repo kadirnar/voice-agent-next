@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import sys
 import threading
 import time
@@ -496,20 +497,17 @@ def _cuda() -> bool:
 
 @pytest.mark.model
 @pytest.mark.timeout(1800)  # the first run downloads the model (~2.5 GB)
-async def test_real_model_streams_and_clones(tmp_path: Path) -> None:
+async def test_real_model_streams() -> None:
+    """The default model (0.6B CustomVoice). With ``VAN_QWEN_TTS_TEST_VOICE`` set to a
+    reference WAV, the 0.6B Base model clones it instead (another ~2.5 GB)."""
     pytest.importorskip("qwen_tts")
     if not _cuda():
         pytest.skip("needs a CUDA GPU")
-    from voice_agent_next.audio.wav import write_wav
-
-    # a reference voice rendered by the 0.6B CustomVoice model, cloned by the 0.6B Base
-    speaker = QwenTTS(model="0.6b-custom", voice="ryan")
-    reference = "Good morning, and thank you for calling. How can I help you with your order?"
-    ref = tmp_path / "ref.wav"
-    write_wav(ref, await speaker.synthesize(reference).collect())
-    await speaker.aclose()
-
-    tts = QwenTTS(model="0.6b", voice=ref, ref_text=reference)
+    reference = os.environ.get("VAN_QWEN_TTS_TEST_VOICE")
+    if reference:
+        tts = QwenTTS(model="0.6b", voice=reference, language="en")
+    else:
+        tts = QwenTTS(voice="ryan", language="en")
     await tts.warmup()
     assert tts.device == "cuda"
     text = "Hello! This is Qwen three TTS, streaming speech from a local GPU."
@@ -530,6 +528,6 @@ async def test_real_model_streams_and_clones(tmp_path: Path) -> None:
     assert [w.word for w in words_of(items)] == text.split()
     assert ttfb is not None and ttfb < elapsed / 2
     print(
-        f"\nqwen-tts/0.6b: first audio {ttfb * 1000:.0f} ms, RTF {elapsed / audio.duration:.3f} "
-        f"({audio.duration:.2f} s in {elapsed:.2f} s)"
+        f"\nqwen-tts/{tts.model}: first audio {ttfb * 1000:.0f} ms, RTF "
+        f"{elapsed / audio.duration:.3f} ({audio.duration:.2f} s in {elapsed:.2f} s)"
     )

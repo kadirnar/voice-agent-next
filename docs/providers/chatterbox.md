@@ -119,12 +119,14 @@ audio and real-time factor of `synthesize()` on three short customer-service sen
 (3–5 s of audio), after `warmup()`, median of 9 runs; see the [Qwen3-TTS page](qwen-tts.md#performance)
 for the full comparison with Kokoro and Pocket TTS.
 
-| Model | Device | First audio p50 | RTF | VRAM |
+| Model | Device | First audio p50 | RTF | VRAM (peak reserved) |
 |---|---|---:|---:|---:|
-| Turbo | CUDA | 980 ms | 0.29 | ~3.5 GB |
-| Nano | CUDA | 466 ms | 0.15 | ~2.5 GB |
+| Turbo | CUDA | 980 ms | 0.29 | 2.9 GiB |
+| Nano | CUDA | 466 ms | 0.15 | 1.9 GiB |
 
 Chatterbox renders a whole sentence before returning audio, so the first audio grows with
 the length of the first sentence (the session's sentence adapter keeps the first chunk of
-a reply short). The T3 decoding loop is launch-bound on the GPU; see the follow-ups in
-the pull request (#79).
+a reply short). In the full local cascade (T1, [Qwen3-TTS page](qwen-tts.md#in-the-local-cascade-t1))
+Nano matches Kokoro on CPU and Turbo is ~400 ms slower, with 10% dead air: a sentence
+sometimes finishes rendering after the previous one finished playing. Streaming Turbo's
+decoder and speeding up its token loop (CUDA graphs, as for Qwen3-TTS) are follow-ups.

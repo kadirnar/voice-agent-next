@@ -114,6 +114,7 @@ Kokoro and Pocket TTS on CPU for comparison. The machine was shared with other w
 
 | Model | Device | First audio p50 (p90) | RTF |
 |---|---|---:|---:|
+| Qwen3-TTS 0.6B CustomVoice (default) | CUDA | **115 ms** (116) | 0.44 |
 | Qwen3-TTS 0.6B Base, cloned voice | CUDA | **113 ms** (116) | 0.45 |
 | Qwen3-TTS 1.7B CustomVoice | CUDA | **118 ms** (123) | 0.46 |
 | Chatterbox Nano | CUDA | 466 ms (658) | 0.15 |
@@ -121,6 +122,31 @@ Kokoro and Pocket TTS on CPU for comparison. The machine was shared with other w
 | Pocket TTS | CPU | 248 ms (302) | 0.67 |
 | Kokoro v1.0 fp16 | CPU | 1,727 ms (2,123) | 0.41 |
 
+Peak VRAM (reserved, after a synthesis): 2.3 GiB for 0.6B CustomVoice, 2.4 GiB for 0.6B
+Base, 4.1 GiB for 1.7B CustomVoice.
+
 The 0.6B and 1.7B models run at the same speed: what remains is the talker's own
 `generate` loop, which is launch-bound too. The transcripts of all outputs (faster-whisper
 `small.en`) matched the input text word for word.
+
+### In the local cascade (T1)
+
+Voice-to-voice latency measured on the call recording, `van bench latency` with
+[`benchmarks/scenarios/latency-local-gpu-tts.yaml`](../../benchmarks/scenarios/latency-local-gpu-tts.yaml)
+(same stimuli as `latency-local-gpu.yaml`): Silero VAD, Smart Turn, faster-whisper `base`
+on CUDA float16, Ollama `LiquidAI/lfm2.5-1.2b-instruct` (temperature 0, same GPU), and the
+TTS below; 6 turns x 2 sessions, first turn of each session excluded (10 measured turns),
+run back to back on the machine above.
+
+| TTS | v2v p50 | v2v p90 | TTS first audio p50 / p90 | dead air |
+|---|---:|---:|---:|---:|
+| Kokoro v1.0 fp16 (CPU) | 1,036 ms | 1,413 ms | 499 / 885 ms | 0% |
+| Chatterbox Turbo (CUDA) | 1,436 ms | 1,807 ms | 850 / 1,184 ms | 10% |
+| Chatterbox Nano (CUDA) | 1,053 ms | 1,317 ms | 471 / 706 ms | 0% |
+| Qwen3-TTS 1.7B CustomVoice, ryan (CUDA) | 875 ms | 955 ms | 147 / 156 ms | 0% |
+| **Qwen3-TTS 0.6B Base, cloned voice (CUDA)** | **715 ms** | **930 ms** | **153 / 159 ms** | 0% |
+
+With a streaming TTS the first audio no longer depends on the length of the reply's first
+clause: Qwen3-TTS takes ~150 ms whatever the LLM says, where Kokoro and Chatterbox take
+0.4–1.2 s. The rest of the ~700 ms is the 400 ms end-of-turn silence, ~50 ms of STT and
+~20 ms of LLM time to first token.
