@@ -911,8 +911,8 @@ async def _run_tts(
                 score_transcript(
                     item, texts_by_id[item.text_id], language=language, normalize=normalize
                 )
-            except Exception as exc:
-                item.error = item.error or f"stt: {exc!r}"
+            except Exception as exc:  # the clip's timing stays valid; it is just not scored
+                notes.append(f"Round-trip STT failed for {item.id}: {exc!r}")
         if mos is not None:
             try:
                 item.mos = {k: round(v, 4) for k, v in (await mos.score(clip)).items()}
