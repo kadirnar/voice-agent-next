@@ -17,11 +17,14 @@ import base64
 import contextlib
 import inspect
 import json
+import re
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from typer.testing import CliRunner
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
@@ -34,8 +37,11 @@ from voice_agent_next import (
     function_tool,
 )
 from voice_agent_next.audio.codecs import mulaw_encode
+from voice_agent_next.cli.main import app as cli_app
+from voice_agent_next.cli.serve import ServeOptions, build_models, build_server
 from voice_agent_next.engine import EngineConnection, EngineOptions, S2SEngine
 from voice_agent_next.engines.cascade import CascadeEngine, CascadeOptions
+from voice_agent_next.errors import ConfigurationError
 from voice_agent_next.events import (
     InputCommitted,
     InputTranscript,
@@ -61,6 +67,7 @@ from voice_agent_next.transports import LoopbackTransport
 from voice_agent_next.utils import now
 
 KEY = "sk-local-test"
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _CONNECT_ACCEPTS_PROXY = "proxy" in inspect.signature(connect.__init__).parameters
 
 
@@ -1012,3 +1019,64 @@ async def test_official_openai_sdk_client() -> None:
     assert transcript == "Hello from a local engine."
     assert len(audio) / 2 / 24_000 > 1.0
     assert engine.connections[0].instructions == "Be kind."
+
+
+# ------------------------------------------------------------------------------ CLI
+def test_van_serve_is_registered() -> None:
+    result = CliRunner().invoke(cli_app, ["serve", "--help"])
+    assert result.exit_code == 0, result.output
+    text = ANSI.sub("", result.output)
+    assert "--engine" in text and "--protocol" in text and "--api-key" in text
+
+
+def test_build_models_from_cli_options(tmp_path: Path) -> None:
+    assert list(build_models(None)) == ["mock"]
+    [(name, model)] = build_models(["mock"], name="local", voice="alloy").items()
+    assert (name, model.engine, model.voice) == ("local", "mock", "alloy")
+    models = build_models(["fast={provider: mock, response_delay: 0.2}", "{provider: mock}"])
+    assert list(models) == ["fast", "mock"]
+    assert models["fast"].engine == {"provider": "mock", "response_delay": 0.2}
+    native = tmp_path / "native.yaml"
+    native.write_text(
+        "engine: mock\nagent: {instructions: From the file., voice: cedar, language: de}\n",
+        encoding="utf-8",
+    )
+    cascade = tmp_path / "local-cascade.toml"
+    cascade.write_text(
+        'stt = "mock"\nllm = "mock"\ntts = "mock"\nvad = "energy"\n', encoding="utf-8"
+    )
+    models = build_models([str(native), str(cascade)], instructions=None)
+    assert list(models) == ["native", "local-cascade"]
+    assert isinstance(models["native"].engine, MockEngine)
+    assert (models["native"].instructions, models["native"].voice) == ("From the file.", "cedar")
+    assert models["native"].language == "de" and models["native"].owned
+    assert isinstance(models["local-cascade"].engine, CascadeEngine)
+    flags = build_models(stt="mock", llm="mock", tts="mock", vad="energy", instructions="Hi.")
+    assert list(flags) == ["cascade"] and isinstance(flags["cascade"].engine, CascadeEngine)
+    assert flags["cascade"].instructions == "Hi."
+    for kwargs in ({"engines": ["mock", "mock"]}, {"vad": "energy"}, {"llm": "mock"},
+                   {"engines": [str(tmp_path / "missing.yaml")]}):  # fmt: skip
+        with pytest.raises(ConfigurationError):
+            build_models(**kwargs)
+    with pytest.raises(ConfigurationError, match="unknown protocol"):
+        build_server(build_models(None), ServeOptions(protocol="sip"))
+
+
+def test_van_serve_runs_the_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    async def serve_briefly(self: RealtimeServer) -> None:
+        async with httpx.AsyncClient(trust_env=False) as http:
+            seen["health"] = (await http.get(f"http://127.0.0.1:{self.port}/health")).json()
+        seen["url"], seen["keys"] = self.url, len(self._keys)
+        await self.aclose()
+
+    monkeypatch.setattr(RealtimeServer, "serve_forever", serve_briefly)
+    args = ["serve", "-e", "local=mock", "--port", "0", "--api-key", "k", "--max-sessions", "2"]
+    result = CliRunner().invoke(cli_app, args)
+    assert result.exit_code == 0, result.output
+    assert seen["health"]["models"] == ["local"] and seen["health"]["max_sessions"] == 2
+    assert seen["keys"] == 1 and seen["url"].startswith("ws://127.0.0.1:")
+    assert "/v1/realtime" in ANSI.sub("", result.output)
+    bad = CliRunner().invoke(cli_app, ["serve", "--protocol", "sip", "--port", "0"])
+    assert bad.exit_code == 2 and "unknown protocol" in ANSI.sub("", bad.output)
