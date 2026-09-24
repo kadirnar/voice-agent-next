@@ -105,6 +105,8 @@ _ABANDON_GRACE = 5.0
 """Seconds a cancelled context keeps its slot while its ``isFinal`` is awaited."""
 _SENTENCE_END = re.compile(r"(?:[.!?…]+[\"'”’)\]]*|[。！？｡][」』”’）]*)$")
 _CLAUSE_END = re.compile(r"[,;:—–]$")
+_BREAKS = (" ", "\n", "\t", "\r", "。", "！", "？", "｡")
+"""Text is sent up to the last of these (whole words; CJK text has no spaces)."""
 _TIME_BASE_DECIDE_AFTER = 0.5
 """Context audio (s) after which an alignment's time base is decided for good."""
 
@@ -1187,7 +1189,7 @@ class _ElevenLabsSynthesizeStream(SynthesizeStream):
         segment.text.append(text)
         segment.pending += text
         # send whole words only: a partial word waits for the rest of it
-        cut = max(segment.pending.rfind(c) for c in (" ", "\n", "\t", "\r")) + 1
+        cut = max(segment.pending.rfind(c) for c in _BREAKS) + 1
         if cut <= 0:
             return
         chunk, segment.pending = segment.pending[:cut], segment.pending[cut:]

@@ -465,6 +465,18 @@ async def test_raw_tokens_are_sent_at_word_boundaries(tts_server: FakeTTSServer)
     assert audio_of(items).duration == pytest.approx(5 * WORD)
 
 
+async def test_cjk_text_is_sent_sentence_by_sentence(tts_server: FakeTTSServer) -> None:
+    tts = make_tts(tts_server, model="eleven_flash_v2_5", language="zh")
+    stream = tts.stream()
+    for token in ["你好", "。", "今天", "天气", "很好", "。", "再见"]:
+        stream.push_text(token)
+    await wait_until(lambda: len(tts_server.texts()) == 2)
+    stream.end_input()
+    await collect_tts(stream)
+    await tts.aclose()
+    assert [t for _, t, _ in tts_server.texts()] == ["你好。 ", "今天天气很好。 ", "再见 "]
+
+
 async def test_first_clause_is_flushed_and_the_rest_at_the_end(
     tts_server: FakeTTSServer,
 ) -> None:
