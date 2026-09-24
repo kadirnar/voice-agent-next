@@ -8,7 +8,9 @@ host.
 into Chat Completions messages:
 
 * ``system``/``developer`` messages keep their role (``developer`` can be mapped to
-  ``system`` for servers whose chat templates only know ``system``);
+  ``system`` for servers whose chat templates only know ``system``) and, by default, their
+  position; ``system_messages`` moves them for chat templates that only accept one
+  leading system message;
 * ``user`` content becomes a plain string, or a list of ``text``/``image_url``/
   ``input_audio`` parts when it carries media;
 * consecutive assistant text and :class:`~voice_agent_next.chat.FunctionCall` items
@@ -28,7 +30,7 @@ from __future__ import annotations
 import base64
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 from ...audio.frame import AudioFrame
 from ...audio.wav import wav_bytes
@@ -45,7 +47,16 @@ from ...llm import ToolChoice
 from ...tools import FunctionTool
 from ...utils.log import logger
 
-__all__ = ["audio_content_part", "to_chat_messages", "to_chat_tools", "to_tool_choice"]
+__all__ = [
+    "SystemMessagePolicy",
+    "audio_content_part",
+    "to_chat_messages",
+    "to_chat_tools",
+    "to_tool_choice",
+]
+
+SystemMessagePolicy: TypeAlias = Literal["keep", "merge", "as_user"]
+"""Where ``system``/``developer`` messages go (see :func:`to_chat_messages`)."""
 
 
 def to_chat_tools(tools: Sequence[FunctionTool]) -> list[dict[str, Any]]:
@@ -88,6 +99,7 @@ def to_chat_messages(
     *,
     developer_role: Literal["developer", "system"] = "developer",
     audio_input: bool = False,
+    system_messages: SystemMessagePolicy = "keep",
 ) -> list[dict[str, Any]]:
     """Convert a chat context to Chat Completions ``messages``.
 
@@ -97,6 +109,13 @@ def to_chat_messages(
             ``"developer"``; most OpenAI-compatible servers only know ``"system"``.
         audio_input: send :class:`AudioContent` as ``input_audio`` parts. When False
             (text-only models), the audio's transcript is sent instead, if it has one.
+        system_messages: ``"keep"`` leaves system/developer messages where they are.
+            Many chat templates (Qwen, Gemma, … served by llama.cpp, vLLM or LM Studio)
+            reject a system message after the first message, which the cascade sends for
+            per-response instructions. ``"merge"`` joins them all into one leading system
+            message; ``"as_user"`` merges only the leading ones and sends later ones as
+            user messages (adjacent user messages are then joined, for templates that
+            require alternating roles).
     """
     items = list(ctx.items if isinstance(ctx, ChatContext) else ctx)
     outputs: dict[str, FunctionCallOutput] = {}
@@ -169,7 +188,44 @@ def to_chat_messages(
     orphans = [cid for cid in outputs if cid not in answered]
     if orphans:
         logger.debug("dropping tool outputs without a matching call: %s", orphans)
-    return messages
+    if system_messages == "keep":
+        return messages
+    return _place_system_messages(messages, as_user=system_messages == "as_user")
+
+
+def _place_system_messages(
+    messages: list[dict[str, Any]], *, as_user: bool
+) -> list[dict[str, Any]]:
+    system: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
+    for message in messages:
+        if message["role"] not in ("system", "developer"):
+            rest.append(message)
+        elif not as_user or not rest:  # merged into the leading system message
+            system.append(message)
+        else:
+            rest.append({"role": "user", "content": message["content"]})
+    out: list[dict[str, Any]] = []
+    if system:
+        text = "\n\n".join(m["content"] for m in system)
+        out.append({"role": system[0]["role"], "content": text})
+    for message in rest:
+        prev = out[-1] if out else None
+        if as_user and prev is not None and prev["role"] == message["role"] == "user":
+            prev["content"] = _join_user_content(prev["content"], message["content"])
+        else:
+            out.append(message)
+    return out
+
+
+def _join_user_content(a: str | list[dict[str, Any]], b: str | list[dict[str, Any]]) -> Any:
+    if isinstance(a, str) and isinstance(b, str):
+        return f"{a}\n\n{b}"
+
+    def parts(c: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [{"type": "text", "text": c}] if isinstance(c, str) else list(c)
+
+    return parts(a) + parts(b)
 
 
 def _to_message(

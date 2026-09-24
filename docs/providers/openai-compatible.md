@@ -55,6 +55,17 @@ Classes live in `voice_agent_next.providers.<spec>`.
 Differences from `openai`: `max_tokens` is sent as `max_tokens`, and `developer`
 messages are sent with the `system` role, which chat templates understand.
 
+**System messages and strict chat templates.** Many chat templates (Qwen, Gemma, … as
+rendered by llama.cpp `--jinja`, vLLM and LM Studio) reject a system message that is not
+the first message, which is what per-response instructions (`generate_reply(instructions=...)`)
+produce. `system_message_policy` controls this:
+
+| policy | effect | default for |
+|---|---|---|
+| `"keep"` | system messages stay where they are | OpenAI, hosted APIs, Ollama |
+| `"merge"` | all system messages are joined into one leading system message | `llamacpp`, `vllm`, `lmstudio` |
+| `"as_user"` | the leading system prompt stays; later system messages are sent as user messages (adjacent user messages are joined, for templates that require alternating roles) | — |
+
 ## Local servers
 
 Start the model before the first turn with `await llm.warmup()`, or
@@ -192,7 +203,6 @@ class MyHostLLM(OpenAICompatibleLLM):
 
 ## Known limitations
 
-* Messages are sent in order. Some strict chat templates (certain models on llama.cpp or
-  vLLM) reject a `system` message that is not the first one, e.g. per-response
-  instructions from `generate_reply(instructions=...)`.
+* With `system_message_policy="keep"` on a strict chat template, per-response instructions
+  fail the request; the local hosts that render model templates default to `"merge"`.
 * One completion per request: `n` greater than 1 (via `extra`) is not supported.

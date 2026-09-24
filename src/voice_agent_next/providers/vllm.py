@@ -28,6 +28,7 @@ class VllmLLM(OpenAICompatibleLLM):
     """vLLM ``vllm serve`` (default port 8000)."""
 
     provider = "vllm"
+    SYSTEM_MESSAGE_POLICY = "merge"  # Jinja chat templates: one leading system message
     DEFAULT_MODEL = None
     DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
     BASE_URL_ENV = ("VLLM_BASE_URL",)

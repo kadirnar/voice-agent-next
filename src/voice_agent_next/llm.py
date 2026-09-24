@@ -41,8 +41,12 @@ ToolChoice: TypeAlias = Literal["auto", "required", "none"] | str
 @dataclass(slots=True)
 class CompletionUsage:
     prompt_tokens: int = 0
+    """The whole prompt, including cache reads and writes."""
     completion_tokens: int = 0
     cached_tokens: int = 0
+    """Prompt tokens read from the provider's prompt cache (discounted)."""
+    cache_creation_tokens: int = 0
+    """Prompt tokens written to the prompt cache (Anthropic: billed at a premium)."""
 
     @property
     def total_tokens(self) -> int:
@@ -211,6 +215,7 @@ class LLMStream(ABC):
                 prompt_tokens=usage.prompt_tokens,
                 completion_tokens=usage.completion_tokens,
                 cached_tokens=usage.cached_tokens,
+                cache_creation_tokens=usage.cache_creation_tokens,
                 tokens_per_second=(usage.completion_tokens / gen_time) if gen_time > 0 else 0.0,
                 cancelled=self._cancelled,
                 error=None if self._error is None else repr(self._error),

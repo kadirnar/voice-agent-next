@@ -109,8 +109,6 @@ class AnthropicUsage(CompletionUsage):
     (``cache_creation_tokens``) + cache reads (``cached_tokens``).
     """
 
-    cache_creation_tokens: int = 0
-
     @property
     def uncached_prompt_tokens(self) -> int:
         """Prompt tokens billed at the base input price (neither read nor written)."""

@@ -42,7 +42,7 @@ from voice_agent_next.errors import (
     RateLimitError,
 )
 from voice_agent_next.llm import ChatChunk
-from voice_agent_next.metrics import LLMMetrics, TurnMetrics
+from voice_agent_next.metrics import LLMMetrics, TurnMetrics, UsageSummary
 from voice_agent_next.providers.anthropic import (
     CONTINUE_PLACEHOLDER,
     START_PLACEHOLDER,
@@ -328,7 +328,11 @@ async def test_streams_text_with_usage_and_sends_a_cached_request(api: FakeAnthr
     (m,) = metrics
     assert (m.provider, m.model, m.error, m.cancelled) == ("anthropic", MODEL, None, False)
     assert (m.prompt_tokens, m.completion_tokens, m.cached_tokens) == (4342, 9, 4100)
+    assert m.cache_creation_tokens == 230  # cache writes are priced apart from reads
     assert m.ttft is not None and m.ttft >= 0
+    usage = UsageSummary()
+    usage.add(m)
+    assert (usage.llm_cached_tokens, usage.llm_cache_creation_tokens) == (4100, 230)
 
 
 async def test_tool_use_with_fragmented_json_yields_one_complete_call(

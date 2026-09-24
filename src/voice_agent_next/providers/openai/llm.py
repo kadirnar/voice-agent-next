@@ -50,7 +50,7 @@ from ...utils.clock import now
 from ...utils.deps import require
 from ...utils.ids import new_id
 from ...utils.log import logger
-from ._format import to_chat_messages, to_chat_tools, to_tool_choice
+from ._format import SystemMessagePolicy, to_chat_messages, to_chat_tools, to_tool_choice
 
 __all__ = ["OpenAICompatibleLLM", "OpenAILLM"]
 
@@ -120,6 +120,12 @@ class OpenAILLM(LLM):
             ``"max_tokens"`` for every other server.
         developer_role: role used for ``developer`` messages. Default: ``"developer"``
             for OpenAI, ``"system"`` for other servers.
+        system_message_policy: ``"keep"`` system messages in place, ``"merge"`` them into
+            one leading system message, or send later ones ``"as_user"`` — for chat
+            templates that reject a system message after the first message (see
+            :func:`~voice_agent_next.providers.openai._format.to_chat_messages`).
+            Default: the host's ``SYSTEM_MESSAGE_POLICY`` (``"merge"`` for llama.cpp,
+            vLLM and LM Studio).
         include_usage: request token usage at the end of the stream (``stream_options``).
         strip_thinking: drop a leading ``<think>…</think>`` block from the streamed text.
         timeout: HTTP timeout in seconds, applied to connecting and to each read (the
@@ -151,6 +157,9 @@ class OpenAILLM(LLM):
     """Request parameters this host sends by default (see ``extra``)."""
     PRELOAD_ON_WARMUP: ClassVar[bool] = False
     """:meth:`warmup` also runs a 1-token completion (servers that load models on demand)."""
+    SYSTEM_MESSAGE_POLICY: ClassVar[SystemMessagePolicy] = "keep"
+    """Default ``system_message_policy``: ``"merge"`` for hosts that render the model's own
+    (often strict) chat template."""
     NOT_FOUND_HINT: ClassVar[str] = "check the model id and base_url"
     """Appended to HTTP 404 errors; ``{model}`` is replaced by the model id."""
 
@@ -169,6 +178,7 @@ class OpenAILLM(LLM):
         capabilities: LLMCapabilities | None = None,
         max_tokens_param: MaxTokensParam | None = None,
         developer_role: DeveloperRole | None = None,
+        system_message_policy: SystemMessagePolicy | None = None,
         include_usage: bool = True,
         strip_thinking: bool = True,
         timeout: float = 60.0,
@@ -194,6 +204,9 @@ class OpenAILLM(LLM):
         )
         self._developer_role: DeveloperRole = developer_role or (
             "developer" if official else "system"
+        )
+        self.system_message_policy: SystemMessagePolicy = (
+            system_message_policy or self.SYSTEM_MESSAGE_POLICY
         )
         self._max_tokens_param: MaxTokensParam = max_tokens_param or (
             "max_completion_tokens" if official else "max_tokens"
@@ -292,6 +305,7 @@ class OpenAILLM(LLM):
                 ctx,
                 developer_role=self._developer_role,
                 audio_input=self.capabilities.audio_input,
+                system_messages=self.system_message_policy,
             ),
             "stream": True,
         }

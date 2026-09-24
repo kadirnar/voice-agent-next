@@ -27,6 +27,7 @@ class LlamaCppLLM(OpenAICompatibleLLM):
     """llama.cpp ``llama-server`` (default port 8080)."""
 
     provider = "llamacpp"
+    SYSTEM_MESSAGE_POLICY = "merge"  # Jinja chat templates: one leading system message
     DEFAULT_MODEL = None
     DEFAULT_BASE_URL = "http://127.0.0.1:8080/v1"
     BASE_URL_ENV = ("LLAMACPP_BASE_URL",)

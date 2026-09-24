@@ -137,8 +137,9 @@ the API does not allow with `max_tokens=0`.
 
 **Checking hits.** The final chunk's `usage` is an `AnthropicUsage`. `prompt_tokens` is the
 whole prompt, `cached_tokens` the part read from the cache, `cache_creation_tokens` the
-part written, and `uncached_prompt_tokens` the rest. `LLMMetrics` carries `prompt_tokens`
-and `cached_tokens`.
+part written, and `uncached_prompt_tokens` the rest. `LLMMetrics` (and the session's
+`UsageSummary`) carry all three, so cost estimates can price reads, writes and uncached input
+separately.
 
 ## Thinking
 
