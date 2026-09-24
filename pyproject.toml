@@ -64,6 +64,11 @@ smart-turn = ["onnxruntime>=1.19"]
 # --- local STT / TTS / LLM ------------------------------------------------------
 faster-whisper = ["faster-whisper>=1.1"]
 kokoro = ["kokoro-onnx>=0.6.1; python_version < '3.14'"]  # upstream caps Requires-Python <3.14
+# CPU-only torch (see [tool.uv.sources]); no torch wheels for Intel macOS since torch 2.3
+pocket-tts = [
+  "pocket-tts>=3.3,<4; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
+  "torch>=2.5; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
+]
 sherpa-onnx = ["sherpa-onnx>=1.10"]
 # --- cloud providers (Deepgram, Cartesia, AssemblyAI, ElevenLabs... use raw WS/HTTP) --
 anthropic = ["anthropic>=0.60"]
@@ -97,6 +102,16 @@ dev = [
   "types-PyYAML>=6.0",
   "soxr>=0.5",
 ]
+
+[tool.uv.sources]
+# Linux/Windows: CPU wheels (~200 MB) instead of the multi-GB CUDA build; macOS wheels on PyPI
+# are CPU/MPS already.
+torch = [{ index = "pytorch-cpu", marker = "sys_platform != 'darwin'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/voice_agent_next"]
