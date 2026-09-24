@@ -58,6 +58,13 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus, InvalidURI
 from ...audio.frame import AudioFrame
 from ...chat import ChatContext, ChatMessage, FunctionCall, FunctionCallOutput
 from ...engine import EngineCapabilities, EngineConnection, EngineOptions, S2SEngine
+from ...engines.rotation import (
+    AudioBuffer,
+    AudioReplay,
+    ConversationRecorder,
+    QuietTracker,
+    RotationPolicy,
+)
 from ...errors import (
     AuthenticationError,
     ConfigurationError,
@@ -69,6 +76,7 @@ from ...errors import (
 )
 from ...events import (
     EngineErrorEvent,
+    EngineEvent,
     EngineStatus,
     EngineUsage,
     InputCommitted,
@@ -82,7 +90,7 @@ from ...events import (
     ResponseText,
     ResponseToolCall,
 )
-from ...metrics import EngineMetrics
+from ...metrics import EngineMetrics, RotationMetrics
 from ...registry import register_provider
 from ...tools import FunctionTool
 from ...utils.aio import BackgroundTasks, cancel_and_wait
@@ -140,6 +148,7 @@ _MAX_TRACKED_ITEMS: Final = 256
 _RECONNECT_WINDOW: Final = 60.0
 _CANCEL_TIMEOUT: Final = 2.0
 _FINISH_TIMEOUT: Final = 10.0
+_ROTATION_CHECK_INTERVAL: Final = 0.05
 _TRIGGER_TTL: Final = 30.0
 """A response request older than this that never started a response is forgotten."""
 _UNSET: Final[Any] = object()
@@ -541,6 +550,11 @@ class OpenAIRealtimeEngine(S2SEngine):
         reconnect_backoff: delay before the first attempt (doubles per attempt, max 10 s).
         expiry_warning: emit ``EngineStatus("expiring")`` this many seconds before the
             provider session limit.
+        rotation: session rotation policy (see ``docs/concepts/session-rotation.md``):
+            before the session limit the conversation moves to a new session prepared in
+            the background (make-before-break) at a quiet moment, and after a drop the new
+            session is re-seeded with the carried-over history. Default:
+            ``RotationPolicy()`` (5 min ahead of OpenAI's 60 min limit, truncated history).
         refine_speech_end: locate the real speech end from the sent audio levels (see the
             module docs); ``False`` reports ``audio_end_ms`` unchanged.
     """
@@ -572,6 +586,7 @@ class OpenAIRealtimeEngine(S2SEngine):
         reconnect_backoff: float = 0.5,
         expiry_warning: float = 60.0,
         refine_speech_end: bool = True,
+        rotation: RotationPolicy | None = None,
     ) -> None:
         prof = get_profile(profile)
         td = prof.default_turn_detection if turn_detection is _UNSET else turn_detection
@@ -636,6 +651,7 @@ class OpenAIRealtimeEngine(S2SEngine):
         self.reconnect_backoff = reconnect_backoff
         self.expiry_warning = expiry_warning
         self.refine_speech_end = refine_speech_end
+        self.rotation = rotation or RotationPolicy()
         self._connections: set[OpenAIRealtimeConnection] = set()
 
     def request_headers(self) -> dict[str, str]:
@@ -680,12 +696,29 @@ class _AudioItem:
     audio_ms: float = 0.0
 
 
-class OpenAIRealtimeConnection(EngineConnection):
-    """A live Realtime session on one WebSocket, reconnected after transient failures.
+@dataclass
+class _Standby:
+    """A configured and seeded session waiting to take over (make-before-break)."""
 
-    A reconnect starts a *new* provider session (the conversation context is not carried
-    over yet); it is announced with ``EngineStatus("reconnecting"/"reconnected")`` and any
-    response in flight ends with ``ResponseDone(status="failed")``.
+    ws: ClientConnection
+    early: list[dict[str, Any]]
+    """Server events received while it was set up (``session.created``...)."""
+    version: tuple[int, int]
+    carried: int
+
+
+class OpenAIRealtimeConnection(EngineConnection):
+    """A live Realtime conversation on one WebSocket session at a time.
+
+    **Rotation.** Ahead of the provider's session limit (``expires_at``) the next session
+    is opened, configured and seeded with the carried-over conversation in the
+    background; it takes over at a quiet moment (nobody speaking, nothing playing, no
+    tool running) or, at the latest, ``rotation.force_margin`` seconds before the limit.
+    **Reconnect.** After a drop a new session is opened with backoff and re-seeded the
+    same way; the response in flight ends with ``ResponseDone(status="failed")``.
+    Both are announced with ``EngineStatus("reconnecting"/"reconnected")`` and reported
+    as :class:`~voice_agent_next.metrics.RotationMetrics`; user audio is buffered during
+    the switch and the not-yet-committed audio is re-sent, so none is lost.
     """
 
     engine: OpenAIRealtimeEngine
@@ -713,6 +746,27 @@ class OpenAIRealtimeConnection(EngineConnection):
         self._reconnect_times: deque[float] = deque()
         self._audio_offset = 0.0
         self._levels = _LevelTracker()
+        # ---- rotation (engines/rotation.py)
+        self._policy = engine.rotation
+        self._recorder = ConversationRecorder(options.chat_ctx)
+        self._tracker = QuietTracker()
+        self._replay = AudioReplay(self._policy.replay)
+        self._buffer = AudioBuffer(self._policy.max_buffered_audio)
+        self._reader: asyncio.Task[str] | None = None
+        self._monitor: asyncio.Task[None] | None = None
+        self._preparing: asyncio.Task[None] | None = None
+        self._standby: _Standby | None = None
+        self._switching = False
+        self._switch_done = asyncio.Event()
+        self._switch_done.set()
+        self._config_version = 0
+        self._session_opened = now()
+        self._session_limit: float | None = None
+        self._rotation_pending: str | None = None
+        self._rotation_deadline: float | None = None
+        self._deferred_request: tuple[dict[str, Any], float] | None = None
+        self.rotations = 0
+        """Number of session switches (planned rotations and reconnects) so far."""
         self._responses: dict[str, _Response] = {}
         self._finished: deque[str] = deque(maxlen=64)
         self._active: str | None = None
@@ -751,6 +805,7 @@ class OpenAIRealtimeConnection(EngineConnection):
         """Open the socket, configure the session and wait for ``session.updated``."""
         try:
             self._ws = await self._open_socket()
+            self._install_clock(self.input_audio_time)
             self._supervisor = asyncio.create_task(
                 self._supervise(), name=f"{self.engine.provider}-realtime"
             )
@@ -766,6 +821,9 @@ class OpenAIRealtimeConnection(EngineConnection):
             if self._startup_error is not None:
                 raise self._startup_error
             self._started = True
+            self._monitor = self._tasks.spawn(
+                self._rotation_monitor(), name=f"{self.engine.provider}-rotation"
+            )
         except BaseException:
             await self.aclose()
             raise
@@ -774,15 +832,19 @@ class OpenAIRealtimeConnection(EngineConnection):
         if self.closed:
             return
         self._closing = True
+        self._switch_done.set()  # release control calls waiting for a switch
         # stop the supervisor first: it can neither reconnect behind us nor dispatch events
         # that spawn new background tasks after they were cancelled
-        if self._supervisor is not None and self._supervisor is not asyncio.current_task():
-            await cancel_and_wait(self._supervisor)
+        current = asyncio.current_task()
+        tasks = [self._supervisor, self._reader, self._preparing]
+        await cancel_and_wait(*[t for t in tasks if t is not None and t is not current])
         await self._tasks.cancel_all()
         ws, self._ws = self._ws, None
-        if ws is not None:
-            with contextlib.suppress(Exception):
-                await ws.close()
+        standby, self._standby = self._standby, None
+        for sock in (ws, standby.ws if standby is not None else None):
+            if sock is not None:
+                with contextlib.suppress(Exception):
+                    await sock.close()
         self.engine._connections.discard(self)
         await super().aclose()
 
@@ -792,7 +854,7 @@ class OpenAIRealtimeConnection(EngineConnection):
         if _CONNECT_ACCEPTS_PROXY and _is_loopback(engine.url):
             kwargs["proxy"] = None  # never route local servers through a system proxy
         try:
-            ws = await ws_connect(
+            return await ws_connect(
                 engine.url,
                 additional_headers=engine.request_headers(),
                 open_timeout=engine.connect_timeout,
@@ -805,22 +867,42 @@ class OpenAIRealtimeConnection(EngineConnection):
             raise
         except Exception as exc:
             raise _handshake_error(exc, engine.provider, engine.url) from exc
-        # The server's audio clock (audio_start_ms/audio_end_ms) restarts with each session.
-        self._audio_offset = self.input_audio_time
-        self._levels.reset()
-        return ws
 
-    async def _configure(self, *, seed: bool) -> None:
-        await self._send({"type": "session.update", "session": self._session_payload(full=True)})
-        if seed and self.options.chat_ctx is not None:
-            await self._seed_history(self.options.chat_ctx)
+    def _install_clock(self, offset: float) -> None:
+        """The server's audio clock (``audio_start_ms``/``audio_end_ms``) restarts with each
+        session: its zero is input position ``offset``."""
+        self._audio_offset = offset
+        self._levels.reset()
+
+    async def _configure(
+        self,
+        *,
+        seed: bool,
+        ws: ClientConnection | None = None,
+        history: ChatContext | None = None,
+    ) -> None:
+        payload = {"type": "session.update", "session": self._session_payload(full=True)}
+        await self._send(payload, ws=ws)
+        ctx = history if history is not None else self.options.chat_ctx
+        if seed and ctx is not None:
+            await self._seed_history(ctx, ws=ws)
 
     async def _supervise(self) -> None:
         while True:
             ws = self._ws
             if ws is None:
                 return
-            reason = await self._read(ws)
+            reader = self._reader = asyncio.create_task(
+                self._read(ws), name=f"{self.engine.provider}-realtime-read"
+            )
+            try:
+                await asyncio.wait({reader})
+            except asyncio.CancelledError:
+                reader.cancel()
+                raise
+            if reader.cancelled() or ws is not self._ws:
+                continue  # a planned rotation moved the conversation to another socket
+            reason = reader.result()
             if self._closing:
                 return
             if not self._started:
@@ -855,10 +937,15 @@ class OpenAIRealtimeConnection(EngineConnection):
 
     async def _reconnect(self, reason: str) -> bool:
         engine = self.engine
+        started = now()
         self._reconnecting = True
         self._ws = None
+        self._buffer.reset_stats()
+        failed = len(self._responses)
         self._fail_responses(f"connection lost: {reason}")
         self._reset_server_state()
+        self._tracker.reset_server_state()
+        await self._discard_standby()
         last: Exception | None = self._fatal
         t = now()
         while self._reconnect_times and self._reconnect_times[0] < t - _RECONNECT_WINDOW:
@@ -890,13 +977,22 @@ class OpenAIRealtimeConnection(EngineConnection):
                     with contextlib.suppress(Exception):
                         await ws.close()
                     return False
-                self._ws = ws
+                # from here on control calls wait for the switch instead of being dropped,
+                # so what they add is either in the carried history or sent after it
+                self._begin_switch()
                 self._reconnecting = False
                 self._reconnect_times.append(now())
-                await self._configure(seed=False)
-                self._emit(
-                    EngineStatus(status="reconnected", detail=f"after {attempt + 1} attempt(s)")
-                )
+                history = await self._carried_history()
+                self._ws = ws
+                await self._configure(seed=True, ws=ws, history=history)
+                replayed = await self._deliver_audio(ws)
+                self._finish_switch(reason, planned=False, started=started,
+                                    attempts=attempt + 1, replayed=replayed,
+                                    carried=len(history), failed=failed)  # fmt: skip
+                self._end_switch()
+                deferred, self._deferred_request = self._deferred_request, None
+                if deferred is not None:  # a response request the drop swallowed
+                    await self._request_response(*deferred)
                 return True
         self._reconnecting = False
         error = last or ProviderConnectionError(
@@ -916,6 +1012,232 @@ class OpenAIRealtimeConnection(EngineConnection):
             self._expiry_task.cancel()
             self._expiry_task = None
 
+    # -------------------------------------------------------------------- rotation
+    def rotate(self, reason: str = "requested", *, deadline: float | None = None) -> None:
+        """Move the conversation to a new provider session at the next quiet moment (at the
+        latest at ``deadline``, a :func:`~voice_agent_next.utils.now` time)."""
+        if self._rotation_pending is None:
+            self._rotation_pending = reason
+        if deadline is not None:
+            current = self._rotation_deadline
+            self._rotation_deadline = deadline if current is None else min(current, deadline)
+
+    def _version(self) -> tuple[int, int]:
+        return self._recorder.version, self._config_version
+
+    async def _carried_history(self) -> ChatContext:
+        return await self._policy.carry_over(self._recorder.history)
+
+    async def _rotation_monitor(self) -> None:
+        while not self._closing:
+            await asyncio.sleep(_ROTATION_CHECK_INTERVAL)
+            try:
+                await self._check_rotation()
+            except Exception:
+                logger.exception("%s: rotation check failed", self.engine.provider)
+
+    async def _check_rotation(self) -> None:
+        if self._switching or self._reconnecting or self._ws is None or self._closing:
+            return
+        t = now()
+        rotate_at, force_at = self._policy.schedule(self._session_limit)
+        age = t - self._session_opened
+        if self._rotation_pending is None and rotate_at is not None and age >= rotate_at:
+            self._rotation_pending = "session_limit"
+        if self._rotation_pending is None:
+            return
+        if force_at is not None:
+            self.rotate(self._rotation_pending, deadline=self._session_opened + force_at)
+        forced = self._rotation_deadline is not None and t >= self._rotation_deadline
+        standby = self._standby
+        if forced:
+            await self._switch(self._rotation_pending, forced=True)
+        elif standby is None:
+            if self._preparing is None or self._preparing.done():
+                self._preparing = self._tasks.spawn(
+                    self._prepare(), name=f"{self.engine.provider}-prepare"
+                )
+        elif self._tracker.is_quiet(self._policy.quiet_period):
+            if standby.version == self._version():
+                await self._switch(self._rotation_pending, forced=False)
+            else:  # the conversation moved on since it was seeded: prepare it again
+                await self._discard_standby()
+
+    async def _open_standby(self) -> _Standby:
+        """Open, configure and seed the next session; wait until it is configured."""
+        version = self._version()
+        history = await self._carried_history()
+        ws = await self._open_socket()
+        early: list[dict[str, Any]] = []
+        try:
+            await self._configure(seed=True, ws=ws, history=history)
+            async with asyncio.timeout(self.engine.connect_timeout):
+                while True:
+                    raw = await ws.recv()
+                    event = json.loads(raw) if isinstance(raw, str) else None
+                    if not isinstance(event, dict):
+                        continue
+                    etype = self._aliases.get(str(event.get("type")), event.get("type"))
+                    if etype == "error":
+                        err = event.get("error")
+                        err = err if isinstance(err, Mapping) else {"message": str(err)}
+                        raise _server_error(err, self.engine.provider, "session.update")
+                    early.append(event)
+                    if etype == "session.updated":
+                        break
+        except BaseException as exc:
+            with contextlib.suppress(Exception):
+                await ws.close()
+            if isinstance(exc, TimeoutError):
+                raise RealtimeConnectTimeoutError(
+                    f"{self.engine.provider}: the next session was not configured in time",
+                    provider=self.engine.provider,
+                ) from exc
+            if isinstance(exc, ConnectionClosed):
+                raise ProviderConnectionError(
+                    f"{self.engine.provider}: the next session {_close_reason(exc)}",
+                    provider=self.engine.provider,
+                ) from exc
+            raise
+        return _Standby(ws, early, version, len(history))
+
+    async def _prepare(self) -> None:
+        """Make-before-break: set up the next session while the current one is in use."""
+        try:
+            standby = await self._open_standby()
+        except Exception as exc:
+            logger.warning("%s: could not prepare the next session: %s", self.engine.provider, exc)
+            self._emit(EngineErrorEvent(error=exc, recoverable=True))
+            await asyncio.sleep(self._policy.backoff)
+            return
+        if self._closing or self._switching or self._reconnecting or self._standby is not None:
+            with contextlib.suppress(Exception):
+                await standby.ws.close()
+            return
+        self._standby = standby
+
+    async def _discard_standby(self) -> None:
+        if self._preparing is not None and self._preparing is not asyncio.current_task():
+            await cancel_and_wait(self._preparing)
+        standby, self._standby = self._standby, None
+        if standby is not None:
+            self._tasks.spawn(standby.ws.close())
+
+    async def _switch(self, reason: str, *, forced: bool) -> None:
+        """Planned rotation: move the conversation to the standby session."""
+        if self._preparing is not None and self._preparing is not asyncio.current_task():
+            await cancel_and_wait(self._preparing)
+        started = now()
+        old = self._ws
+        self._begin_switch()
+        self._emit(EngineStatus(status="reconnecting", detail=reason))
+        standby, self._standby = self._standby, None
+        try:
+            if standby is None or standby.version != self._version():
+                if standby is not None:
+                    self._tasks.spawn(standby.ws.close())
+                standby = await self._open_standby()
+        except Exception as exc:
+            if isinstance(exc, (AuthenticationError, ConfigurationError)):
+                self._fatal = exc
+            logger.warning("%s: session rotation failed: %s", self.engine.provider, exc)
+            if self._ws is not None and not self._reconnecting:
+                await self._flush_buffer(self._ws)
+                self._end_switch()
+            self._emit(EngineErrorEvent(error=exc, recoverable=True))
+            self._emit(EngineStatus(status="resumed", detail=f"kept the session ({reason})"))
+            await asyncio.sleep(self._policy.backoff)  # the next check retries
+            return
+        reader = self._reader
+        if self._ws is not old or self._reconnecting or self._closing or old is None:
+            # the current socket dropped meanwhile: the reconnect takes over
+            self._tasks.spawn(standby.ws.close())
+            return
+        failed = len(self._responses)
+        self._fail_responses(f"session rotated ({reason})")  # only when forced
+        self._reset_server_state()
+        if failed:
+            self._tracker.reset_server_state()
+        self._ws = standby.ws  # the supervisor now reads the new socket
+        if reader is not None:
+            reader.cancel()
+        self._rotation_pending = self._rotation_deadline = None
+        for event in standby.early:
+            self._dispatch(event)
+        replayed = await self._deliver_audio(standby.ws)
+        self._finish_switch(reason, planned=True, started=started, attempts=1,
+                            replayed=replayed, carried=standby.carried, failed=failed)  # fmt: skip
+        self._end_switch()
+        if old is not None:
+            self._tasks.spawn(old.close())
+
+    def _begin_switch(self) -> None:
+        self._switching = True
+        self._switch_done.clear()
+        self._buffer.reset_stats()
+
+    def _end_switch(self) -> None:
+        self._switching = False
+        self._switch_done.set()
+
+    async def _deliver_audio(self, ws: ClientConnection) -> float:
+        """Re-send the recent uncommitted audio and the audio buffered during the switch."""
+        buffered = self._buffer.drain()
+        held = {id(f) for _, f in buffered}
+        replay = [(s, f) for s, f in self._replay.frames() if id(f) not in held]
+        frames = replay + buffered
+        self._install_clock(frames[0][0] if frames else self.input_audio_time)
+        for start, frame in frames:
+            await self._append_audio(start, frame, ws=ws)
+        await self._flush_buffer(ws)
+        return sum(f.duration for _, f in replay)
+
+    async def _flush_buffer(self, ws: ClientConnection) -> None:
+        while frames := self._buffer.drain():
+            for start, frame in frames:
+                await self._append_audio(start, frame, ws=ws)
+
+    def _finish_switch(
+        self,
+        reason: str,
+        *,
+        planned: bool,
+        started: float,
+        attempts: int,
+        replayed: float,
+        carried: int,
+        failed: int,
+    ) -> None:
+        engine = self.engine
+        self.rotations += 1
+        lost = self._buffer.dropped
+        if lost > 0:  # never a silent loss (research note 05, Pipecat #5305)
+            msg = f"{engine.provider}: {lost:.2f}s of user audio lost while reconnecting"
+            self._emit(
+                EngineErrorEvent(
+                    error=ProviderConnectionError(msg, provider=engine.provider), recoverable=True
+                )
+            )
+        detail = reason if planned else f"after {attempts} attempt(s)"
+        self._emit(EngineStatus(status="reconnected", detail=detail))
+        engine.emit(
+            "metrics",
+            RotationMetrics(
+                provider=engine.provider,
+                model=engine.model,
+                reason=reason,
+                planned=planned,
+                rotation=self.rotations,
+                gap=now() - started,
+                attempts=attempts,
+                buffered_audio=self._buffer.total,
+                replayed_audio=replayed,
+                lost_audio=lost,
+                carried_items=carried,
+                failed_responses=failed,
+            ),
+        )
+
     # --------------------------------------------------------------------- sending
     def _next_event_id(self, etype: str) -> str:
         self._event_seq += 1
@@ -925,10 +1247,15 @@ class OpenAIRealtimeConnection(EngineConnection):
             self._sent_types.popitem(last=False)
         return event_id
 
-    async def _send(self, event: dict[str, Any]) -> bool:
-        ws = self._ws
-        if ws is None or self._reconnecting or self._closing:
-            return False
+    async def _send(self, event: dict[str, Any], *, ws: ClientConnection | None = None) -> bool:
+        """Send ``event`` on ``ws`` (default: the current socket, after a switch in
+        progress). ``False`` when it could not be sent (closed or reconnecting)."""
+        if ws is None:
+            if self._switching and not self._closing:
+                await self._switch_done.wait()
+            ws = self._ws
+            if ws is None or self._reconnecting or self._closing:
+                return False
         etype = event["type"]
         if etype != "input_audio_buffer.append" and "event_id" not in event:
             event = {"event_id": self._next_event_id(etype), **event}
@@ -1013,7 +1340,7 @@ class OpenAIRealtimeConnection(EngineConnection):
                 cfg.setdefault("language", language.split("-")[0].lower())
         return cfg
 
-    async def _seed_history(self, ctx: ChatContext) -> None:
+    async def _seed_history(self, ctx: ChatContext, *, ws: ClientConnection | None = None) -> None:
         if not self._profile.text_input:
             if ctx.items:
                 logger.warning("%s: cannot seed chat history (no text items)", self.engine.provider)
@@ -1047,15 +1374,26 @@ class OpenAIRealtimeConnection(EngineConnection):
                     "call_id": item.call_id,
                     "output": item.output,
                 }
-            await self._send({"type": "conversation.item.create", "item": payload})
+            await self._send({"type": "conversation.item.create", "item": payload}, ws=ws)
 
     # -------------------------------------------------------------------- audio in
     async def _send_audio(self, frame: AudioFrame) -> None:
+        start = self.input_audio_time - frame.duration
+        self._replay.record(start, frame)
+        if self._switching or self._reconnecting or self._ws is None:
+            self._buffer.push(start, frame)  # delivered to the next session
+            return
+        await self._append_audio(start, frame)
+
+    async def _append_audio(
+        self, start: float, frame: AudioFrame, *, ws: ClientConnection | None = None
+    ) -> None:
         if self.engine.refine_speech_end and self.turn_detection is not None:
-            self._levels.push(self.input_audio_time, frame)
-        await self._send({"type": "input_audio_buffer.append", "audio": frame.to_base64()})
+            self._levels.push(start + frame.duration, frame)
+        await self._send({"type": "input_audio_buffer.append", "audio": frame.to_base64()}, ws=ws)
 
     async def commit_input(self) -> None:
+        self._replay.mark_committed(self.input_audio_time)
         await self._send({"type": "input_audio_buffer.commit"})
         await self._create_response()
 
@@ -1066,7 +1404,7 @@ class OpenAIRealtimeConnection(EngineConnection):
     async def send_text(self, text: str, *, respond: bool = True) -> None:
         if not self._profile.text_input:
             raise EngineError(f"the {self._profile.name} realtime backend accepts no text messages")
-        await self._send(
+        sent = await self._send(
             {
                 "type": "conversation.item.create",
                 "item": {
@@ -1076,6 +1414,8 @@ class OpenAIRealtimeConnection(EngineConnection):
                 },
             }
         )
+        if sent or self._reconnecting:  # a reconnect carries it over with the history
+            self._recorder.add_user_text(text)
         if respond:
             await self._create_response()
 
@@ -1122,12 +1462,16 @@ class OpenAIRealtimeConnection(EngineConnection):
 
     async def _request_response(self, event: dict[str, Any], trigger: float) -> None:
         """Send an event that makes the server start a response, timed from ``trigger``."""
+        event = {k: v for k, v in event.items() if k != "event_id"}
         event_id = self._next_event_id(event["type"])
         self._request_event = event_id
         self._pending_trigger = trigger
+        self._tracker.request()
         if not await self._send({"event_id": event_id, **event}):
             self._request_event = self._pending_trigger = None
             self._restore_instructions = False  # a reconnect re-sends the full configuration
+            if self._reconnecting:
+                self._deferred_request = (event, trigger)  # sent once reconnected
 
     async def cancel_response(self) -> None:
         if self._active is not None and self._profile.supports_cancel:
@@ -1161,6 +1505,7 @@ class OpenAIRealtimeConnection(EngineConnection):
         the server never rejects it. Returns ``None``: the server does not report the
         heard transcript (the session estimates it).
         """
+        self._recorder.truncate(item_id, audio_end_ms)
         if not self._profile.supports_truncate:
             return None
         for target, content_index, end_ms in self._truncation_plan(item_id, audio_end_ms):
@@ -1192,8 +1537,17 @@ class OpenAIRealtimeConnection(EngineConnection):
                 plan.append((iid, info.content_index, heard))
         return plan
 
+    async def interrupt(
+        self, item_id: str | None = None, played_ms: int | None = None
+    ) -> str | None:
+        heard = await super().interrupt(item_id, played_ms)
+        if not self.capabilities.truncation and item_id is not None and played_ms is not None:
+            self._recorder.truncate(item_id, played_ms)  # the server keeps it all; we do not
+        return heard
+
     async def send_tool_output(self, output: FunctionCallOutput, *, respond: bool = True) -> None:
-        await self._send(
+        self._tracker.tool_output(output.call_id, respond=respond)
+        sent = await self._send(
             {
                 "type": "conversation.item.create",
                 "item": {
@@ -1203,6 +1557,8 @@ class OpenAIRealtimeConnection(EngineConnection):
                 },
             }
         )
+        if sent or self._reconnecting:
+            self._recorder.add_tool_output(output)
         if respond:
             await self._create_response()
 
@@ -1215,10 +1571,16 @@ class OpenAIRealtimeConnection(EngineConnection):
             self.tools = list(tools)
         if instructions is None and tools is None:
             return
+        self._config_version += 1  # a prepared session has the old configuration
         patch = self._session_payload(full=False, instructions=instructions, tools=tools)
         await self._send({"type": "session.update", "session": patch})
 
     # ---------------------------------------------------------------------- events
+    def _emit(self, event: EngineEvent) -> None:
+        self._recorder.observe(event)
+        self._tracker.observe(event)
+        super()._emit(event)
+
     def _dispatch(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
         if not isinstance(etype, str):
@@ -1239,6 +1601,8 @@ class OpenAIRealtimeConnection(EngineConnection):
         if isinstance(expires_at, (int, float)) and expires_at > 0:
             # expires_at is a Unix timestamp, so the wall clock is the right reference here
             time_left = max(0.0, float(expires_at) - time.time())
+        self._session_opened = now()
+        self._session_limit = time_left
         if self._expiry_task is not None:
             self._expiry_task.cancel()
             self._expiry_task = None
@@ -1321,6 +1685,7 @@ class OpenAIRealtimeConnection(EngineConnection):
         td = self.turn_detection
         if not self._trigger_pending() and td is not None and td.get("create_response", True):
             self._pending_trigger = now()  # the server responds to this commit by itself
+        self._replay.mark_committed(self.input_audio_time)  # never replay an answered turn
         self._emit(InputCommitted(item_id=item_id))
 
     def _on_transcript_delta(self, ev: dict[str, Any]) -> None:
