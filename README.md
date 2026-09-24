@@ -2,7 +2,7 @@
 
 **Real-time speech-to-speech voice agents in Python — native S2S models and streaming cascades, local and cloud, on Linux, macOS and Windows, with a built-in benchmark suite.**
 
-> Status: **pre-alpha** — the core runtime works end-to-end with mock providers; real providers are landing issue by issue. See the [roadmap](ROADMAP.md) and the [research report](docs/research/REPORT.md).
+> Status: **alpha** — 35 providers (local and cloud), native speech-to-speech engines and streaming cascades behind one runtime, a benchmark suite; APIs may still change. See the [roadmap](ROADMAP.md) and the [research report](docs/research/REPORT.md).
 
 ## Why
 
@@ -42,8 +42,11 @@ async def main() -> None:
     # Native speech-to-speech model...
     session = AgentSession("openai/gpt-realtime")
     # ...or a cascade (any mix of local and cloud components):
-    # session = AgentSession(stt="deepgram/nova-3", llm="openai/gpt-4.1-mini",
-    #                        tts="cartesia/sonic-2", vad="silero", turn_detector="smart_turn")
+    # session = AgentSession(stt="deepgram/nova-3", llm="anthropic/claude-haiku-4-5",
+    #                        tts="cartesia", vad="silero", turn_detector="smart_turn")
+    # ...or fully offline:
+    # session = AgentSession(stt="faster-whisper/base", llm="ollama/qwen3.5:4b",
+    #                        tts="kokoro", vad="silero", turn_detector="smart_turn")
 
     await session.run(agent, create_transport("local"))  # microphone + speakers
 
@@ -58,6 +61,25 @@ van demo
 van providers      # what's available, what's missing
 van doctor         # environment check (audio devices, GPUs, API keys)
 ```
+
+## Providers
+
+Every component is addressed by a `provider/model` spec and installed through an extra; `van providers` shows what is ready on your machine.
+
+| | Local | Cloud |
+|---|---|---|
+| **Speech-to-speech engines** | any OpenAI-Realtime-compatible server: Speaches, LocalAI, vLLM-Omni | OpenAI Realtime, Gemini Live, Azure OpenAI Realtime, xAI Grok Voice, Qwen-Omni Realtime |
+| **STT** | faster-whisper (CPU int8 / CUDA) | Deepgram Nova-3 & Flux, Cartesia Ink |
+| **LLM** | Ollama, llama.cpp, vLLM, LM Studio | OpenAI, Anthropic Claude, Groq, Cerebras, Together, OpenRouter, DeepSeek, Fireworks, SambaNova |
+| **TTS** | Kokoro-82M (ONNX) | Cartesia Sonic, Deepgram Aura-2 |
+| **VAD & turn-taking** | Silero VAD v6, energy VAD, Smart Turn v3.2 | STT-native turn events (Deepgram Flux, Cartesia Ink) |
+| **Transports** | microphone/speakers (with WebRTC echo cancellation), files, loopback | WebSocket server + browser client |
+
+In progress ([roadmap](ROADMAP.md)): sherpa-onnx streaming STT/TTS, OpenAI STT/TTS, ElevenLabs, Gemini LLM/TTS, AssemblyAI, Moshi, MLX on Apple Silicon, WebRTC, telephony, and serving any engine over the OpenAI Realtime protocol.
+
+## Benchmarks
+
+`van bench latency` drives a simulated caller through the real runtime and measures voice-to-voice latency **on the call recording** (end of user speech → first agent audio), with a reproducibility manifest for every run. A fully local pipeline (Silero + Smart Turn + faster-whisper `base` + Ollama LFM2.5-1.2B + Kokoro) on a Ryzen 5 5600 CPU: **1.13 s p50 / 1.63 s p90**; the runtime itself adds ≈ 2 ms. Details and methodology: [docs/benchmarks/results.md](docs/benchmarks/results.md), [benchmarks/README.md](benchmarks/README.md).
 
 ## Architecture (short)
 
