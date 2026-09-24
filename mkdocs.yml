@@ -119,6 +119,7 @@ nav:
       - Endpointing: concepts/endpointing.md
       - Interruptions: concepts/interruptions.md
       - Preemptive generation: concepts/preemptive-generation.md
+      - Omni models: concepts/omni-models.md
       - Tools: concepts/tools.md
       - Failover: concepts/failover.md
       - Observability: concepts/observability.md
@@ -129,6 +130,7 @@ nav:
           - OpenAI Realtime (+ compatible): providers/openai-realtime.md
           - Gemini Live: providers/gemini-live.md
           - Moshi and PersonaPlex: providers/moshi.md
+          - LFM2.5-Audio (omni, local): providers/liquid-audio.md
       - Cloud:
           - OpenAI: providers/openai.md
           - Anthropic: providers/anthropic.md
