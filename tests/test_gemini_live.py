@@ -449,18 +449,42 @@ def quiet_noise(seconds: float, seed: int = 1) -> list[AudioFrame]:
     return [AudioFrame(data[i : i + 320].tobytes(), 16_000) for i in range(0, len(data), 320)]
 
 
+async def sleep_at_least(seconds: float) -> None:
+    """``asyncio.sleep`` that never returns early.
+
+    On Windows with Python < 3.13 the loop clock has a 15.6 ms resolution and a timer due
+    within that resolution fires on the next wake-up, so a short sleep ends as soon as any
+    socket I/O completes. Loop until a ``perf_counter`` deadline instead.
+    """
+    from voice_agent_next.utils import now
+
+    deadline = now() + seconds
+    await asyncio.sleep(0)
+    while (delay := deadline - now()) > 0:
+        await asyncio.sleep(delay)
+
+
 class Feeder:
-    """Streams frames into the engine in the background (about 5x real time)."""
+    """Streams frames into the engine in the background at ``speed`` x real time, paced
+    against ``perf_counter`` deadlines (see :func:`sleep_at_least`)."""
 
-    def __init__(self, conn: GeminiLiveConnection, frames: list[AudioFrame]) -> None:
+    def __init__(
+        self, conn: GeminiLiveConnection, frames: list[AudioFrame], speed: float = 5.0
+    ) -> None:
         self.sent = bytearray()
-        self._task = asyncio.create_task(self._run(conn, frames))
+        self._task = asyncio.create_task(self._run(conn, frames, speed))
 
-    async def _run(self, conn: GeminiLiveConnection, frames: list[AudioFrame]) -> None:
+    async def _run(
+        self, conn: GeminiLiveConnection, frames: list[AudioFrame], speed: float
+    ) -> None:
+        from voice_agent_next.utils import now
+
+        start, streamed = now(), 0.0
         for frame in frames:
             await conn.send_audio(frame)
             self.sent += frame.data
-            await asyncio.sleep(0.004)
+            streamed += frame.duration
+            await sleep_at_least(start + streamed / speed - now())
 
     async def done(self) -> bytes:
         await self._task
@@ -566,24 +590,37 @@ async def test_dropped_connection_is_resumed_and_buffered_audio_delivered(
     server = await fake()
     conn, events = await connect(server, resume_replay=0.05)
     first = server.connection
-    feeder = Feeder(conn, quiet_noise(2.5, seed=7))
-    await wait_for(lambda: len(feeder.sent) > 16_000)
-    await first.issue_handle()  # a fresh resumption point mid-stream
-    handle_pos = first.session.handles[first.handles[-1]]
-    await wait_for(lambda: len(feeder.sent) > 48_000)
+    # The engine replays what was sent since the handle *plus* the audio sent within
+    # `resume_replay` seconds (wall clock) before it arrived, which may still be in flight.
+    # So the pre-handle audio must be clearly older than that margin when the handle comes;
+    # otherwise replaying it is correct (and timing-dependent: coarse timers on Windows).
+    before = quiet_noise(0.5, seed=7)
+    for frame in before:
+        await conn.send_audio(frame)
+    before_bytes = b"".join(f.data for f in before)
+    await wait_for(lambda: len(first.audio) == len(before_bytes))  # all of it arrived
+    await sleep_at_least(0.3)  # >> resume_replay
+    handle = await first.issue_handle()  # a fresh resumption point mid-stream
+    assert handle is not None
+    handle_pos = first.session.handles[handle]
+    await wait_for(lambda: conn.resumption_handle == handle)
+    feeder = Feeder(conn, quiet_noise(2.0, seed=8))
+    await wait_for(lambda: len(feeder.sent) > 32_000)
     await server.drop(1011, "Internal error encountered.")
     await events.wait(lambda: resumed(events))
-    sent = await feeder.done()
+    after = await feeder.done()
     second = server.connections[1]
-    await wait_for(lambda: sent.endswith(bytes(second.audio)) and len(second.audio) > 0)
-    await asyncio.sleep(0.2)
+    await wait_for(lambda: len(second.audio) >= len(after), timeout=10)
     await conn.aclose()
 
     (reconnecting, done_status) = events.of(EngineStatus)
     assert reconnecting.status == "reconnecting" and "1011" in (reconnecting.detail or "")
-    assert done_status.status == "resumed" and second.resumed_from == first.handles[-1]
+    assert done_status.status == "resumed" and second.resumed_from == handle
+    sent = before_bytes + after
     start = assert_no_audio_lost(sent, bytes(first.audio), bytes(second.audio), handle_pos)
-    assert start > 0  # only the audio since the handle (plus a small margin) was replayed
+    # exactly the audio since the handle was replayed: nothing lost, nothing duplicated
+    assert start == handle_pos == len(before_bytes)
+    assert bytes(second.audio) == after
 
 
 async def test_expired_handle_falls_back_to_a_fresh_session_with_history(

@@ -43,6 +43,7 @@ from ..audio.frame import AudioFrame
 from ..providers.energy import EnergyVAD
 from ..providers.mock import synth_speech
 from ..utils.aio import cancel_and_wait
+from ..utils.clock import now
 from ..utils.ids import new_id
 from ..vad import VADEventType, VADOptions
 
@@ -68,6 +69,17 @@ _VERBATIM = re.compile(r'Say exactly the following, verbatim, and nothing else: 
 def _duration(seconds: float) -> str:
     """Seconds -> protobuf ``Duration`` JSON."""
     return f"{max(0.0, seconds):.3f}s"
+
+
+async def _sleep_until(deadline: float) -> None:
+    """Sleep until a ``perf_counter`` deadline. A plain short ``asyncio.sleep`` may return
+    early: on Windows with Python < 3.13 the loop clock has a 15.6 ms resolution and timers
+    due within it fire on any wake-up (e.g. socket I/O), so reply audio would run ahead."""
+    await asyncio.sleep(0)
+    delay = deadline - now()
+    while delay > 0:  # a deadline, not a polled condition
+        await asyncio.sleep(delay)
+        delay = deadline - now()
 
 
 def _words(text: str) -> list[str]:
@@ -439,6 +451,7 @@ class FakeConnection:
         words = _words(text)
         chunks = max(1, math.ceil(duration / server.chunk_duration))
         spoken = 0
+        began = now()
         for i in range(chunks):
             start = i * server.chunk_duration
             chunk = audio.slice(start, min(duration, start + server.chunk_duration))
@@ -455,7 +468,7 @@ class FakeConnection:
                     delta = {"text": words[spoken]}
                     await self.send({"serverContent": {"outputTranscription": delta}})
                     spoken += 1
-            await asyncio.sleep(server.chunk_duration * server.realtime_factor)
+            await _sleep_until(began + (i + 1) * server.chunk_duration * server.realtime_factor)
         return duration
 
 
