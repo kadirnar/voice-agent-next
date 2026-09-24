@@ -235,7 +235,7 @@ async def test_stream_sends_continuations_on_one_context(tts_server: FakeTTSServ
     shared = [{k: v for k, v in m.items() if k not in ("transcript", "continue")} for m in inputs]
     assert all(s == shared[0] for s in shared)
     assert shared[0]["model_id"] == "sonic-3.6"
-    assert shared[0]["voice"] == {"mode": "id", "id": DEFAULT_VOICE}
+    assert shared[0]["voice"] == {"id": DEFAULT_VOICE}
     assert shared[0]["output_format"] == {
         "container": "raw",
         "encoding": "pcm_s16le",
@@ -338,7 +338,7 @@ async def test_stream_options_are_sent_with_every_input(tts_server: FakeTTSServe
 
     for msg in tts_server.inputs():
         assert msg["model_id"] == "sonic-3.6-2026-08-27"
-        assert msg["voice"] == {"mode": "id", "id": "voice_custom"}
+        assert msg["voice"] == {"id": "voice_custom"}
         assert msg["output_format"]["sample_rate"] == 16_000
         assert msg["language"] == "fr"
         assert msg["generation_config"] == {"speed": 0.9, "volume": 1.5, "emotion": "calm"}
@@ -566,7 +566,7 @@ async def test_synthesize_uses_the_bytes_endpoint() -> None:
     assert json.loads(request.content) == {
         "model_id": "sonic-3.6",
         "transcript": "Hello world!",
-        "voice": {"mode": "id", "id": "voice_1"},
+        "voice": {"id": "voice_1"},
         "output_format": {"container": "raw", "encoding": "pcm_s16le", "sample_rate": 24_000},
         "language": "en",
         "generation_config": {"speed": 1.2},

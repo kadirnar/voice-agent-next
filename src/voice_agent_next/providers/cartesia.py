@@ -360,7 +360,7 @@ class CartesiaTTS(TTS):
         """Fields shared by ``/tts/bytes`` and every WebSocket input."""
         request: dict[str, Any] = {
             "model_id": self.model,
-            "voice": {"mode": "id", "id": voice or self.voice},
+            "voice": {"id": voice or self.voice},
             "output_format": {
                 "container": "raw",
                 "encoding": "pcm_s16le",
