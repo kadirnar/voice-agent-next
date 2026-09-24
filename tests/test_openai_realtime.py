@@ -288,7 +288,7 @@ async def test_handshake_and_ga_session_update() -> None:
         instructions="You are a weather bot.",
         tools=[get_weather],
         voice="cedar",
-        language="en",
+        language="en-US",  # sent as ISO-639-1
         chat_ctx=history,
         extra={"audio": {"output": {"speed": 1.2}}},
     )
@@ -774,7 +774,7 @@ async def test_xai_profile_cumulative_transcripts_and_force_message() -> None:
     server = FakeRealtimeServer(dialect="xai", transcripts=["tell me a joke"], replies=["Why not?"])
     async with server:
         engine = XAIRealtimeEngine(base_url=server.url, api_key=KEY)
-        options = EngineOptions(instructions="Be funny.", language="en")
+        options = EngineOptions(instructions="Be funny.", language="es-MX")  # BCP-47 kept
         async with connected(engine, options) as (conn, rec):
             assert server.events("session.update")[0]["session"] == {
                 "instructions": "Be funny.",
@@ -784,7 +784,7 @@ async def test_xai_profile_cumulative_transcripts_and_force_message() -> None:
                 "audio": {
                     "input": {
                         "format": {"type": "audio/pcm", "rate": 24_000},
-                        "transcription": {"model": "grok-transcribe", "language_hint": "en"},
+                        "transcription": {"model": "grok-transcribe", "language_hint": "es-MX"},
                     },
                     "output": {"format": {"type": "audio/pcm", "rate": 24_000}},
                 },

@@ -974,10 +974,12 @@ class OpenAIRealtimeConnection(EngineConnection):
         if base is None:
             return None
         cfg = dict(base)
-        language = self.options.language
+        language = (self.options.language or "").strip().replace("_", "-")
         if language and self._profile.transcription_language:
-            key = "language_hint" if self._profile.dialect == "xai" else "language"
-            cfg.setdefault(key, language)
+            if self._profile.dialect == "xai":  # BCP-47 hint, regional variants matter
+                cfg.setdefault("language_hint", language)
+            else:  # ISO-639-1 ("en-US" -> "en")
+                cfg.setdefault("language", language.split("-")[0].lower())
         return cfg
 
     async def _seed_history(self, ctx: ChatContext) -> None:
