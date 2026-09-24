@@ -680,11 +680,120 @@ async def test_manual_turn_detection(fake: Callable[..., Any]) -> None:
     assert kinds[0] == "activityStart" and kinds[-1] == "activityEnd"
     assert set(kinds[1:-1]) == {"audio"}
     started, stopped = events.of(InputSpeechStarted)[0], events.of(InputSpeechStopped)[0]
-    assert started.audio_time == 0.0 and stopped.audio_time == pytest.approx(0.6, abs=0.03)
+    assert started.audio_time == pytest.approx(0.0, abs=0.03)
+    assert stopped.audio_time == pytest.approx(0.6, abs=0.03)
     order = events.kinds()
     assert order.index("InputCommitted") < order.index("ResponseStarted")
     assert len(events.of(InputCommitted)) == 1
     assert [e.text for e in events.of(InputTranscript) if e.is_final] == ["push to talk"]
+
+
+async def test_manual_turns_with_a_continuous_microphone(fake: Callable[..., Any]) -> None:
+    """Audio keeps flowing after commit_input() (AgentSession forwards every frame): only
+    speech opens an activity, so the requested answer is not interrupted."""
+    server = await fake(replies=["One moment, please."], realtime_factor=1.0)
+    conn, events = await connect(server, EngineOptions(turn_detection=False))
+    await push(conn, AudioFrame.silence(0.3, 16_000))  # silence: no activity, nothing sent
+    assert not any("realtimeInput" in m for m in server.connections[0].messages)
+    await push(conn, synth_speech(0.6, 16_000))
+    await conn.commit_input()
+    await events.wait(lambda: bool(events.of(ResponseAudio)))
+    await push(conn, AudioFrame.silence(1.0, 16_000))  # the mic stays open while it answers
+    await events.wait(lambda: bool(events.of(ResponseDone)), timeout=5)
+    await conn.aclose()
+
+    kinds = [next(iter(m["realtimeInput"])) for m in server.connection.messages if "realtimeInput" in m]  # fmt: skip
+    assert kinds.count("activityStart") == 1 and kinds.count("activityEnd") == 1
+    assert kinds[-1] == "activityEnd"  # the trailing silence was not sent
+    assert events.of(ResponseDone)[0].status == "completed"
+    assert len(events.of(InputSpeechStarted)) == 1
+    # the pre-roll carried the audio from before the detected speech start
+    assert len(server.connection.audio) == round(0.9 * 16_000) * 2
+
+
+async def test_fresh_session_replays_only_the_unanswered_audio(fake: Callable[..., Any]) -> None:
+    server = await fake(replies=["Hello!", "Again?"])
+    conn, events = await connect(server, session_resumption=False)
+    await say(conn)
+    await events.wait(lambda: bool(events.of(ResponseDone)))
+    await wait_for(lambda: bool(events.of(ResponseDone)) and not conn._server_turn_open)
+    await conn.send_text("Note: I am in Paris.", respond=False)
+    noise = quiet_noise(0.5, seed=3)
+    for frame in noise:
+        await conn.send_audio(frame)
+    await asyncio.sleep(0.05)
+    await server.drop()
+    await events.wait(lambda: resumed(events))
+    await asyncio.sleep(0.3)
+    await conn.aclose()
+
+    assert [s for s, _ in statuses(events)] == ["reconnecting", "reconnected"]
+    fresh = server.connections[1]
+    assert "sessionResumption" not in fresh.setup
+    # the answered turn is re-seeded as text, never replayed as audio or text again
+    seeded = fresh.client_contents[0]["turns"]
+    assert seeded[0] == {"role": "user", "parts": [{"text": "hello"}]}
+    assert seeded[-1] == {"role": "user", "parts": [{"text": "Note: I am in Paris."}]}
+    assert len(fresh.client_contents) == 1
+    new_audio = b"".join(f.data for f in noise)
+    replayed = bytes(fresh.audio)
+    assert replayed.endswith(new_audio)  # the audio after the answered turn was replayed...
+    before = replayed[: len(replayed) - len(new_audio)]
+    assert before == bytes(len(before)) and len(before) < 0.6 * 32_000  # ...not its speech
+    assert fresh.user_turns == [] and len(events.of(ResponseStarted)) == 1
+
+
+async def test_go_away_from_the_replaced_connection_is_ignored(fake: Callable[..., Any]) -> None:
+    server = await fake()
+    conn, events = await connect(server)
+    await conn.update(instructions="Rotate now.")  # rotation starts (idle)
+    await server.go_away(time_left=2.2, abort=False)  # the old connection says goodbye meanwhile
+    await events.wait(lambda: resumed(events))
+    await asyncio.sleep(0.8)  # a stale deadline (~0.2 s) would force another rotation
+    await conn.aclose()
+    assert ("expiring", "go_away") in statuses(events)  # received while switching...
+    assert len(server.connections) == 2  # ...and not applied to the new connection
+
+
+async def test_a_connection_that_keeps_dying_is_fatal(fake: Callable[..., Any]) -> None:
+    server = await fake()
+    conn, events = await connect(server, max_reconnect_attempts=3)
+    server.drop_after_setup = (1007, "Request contains an invalid argument.")
+    await server.drop(1007, "Request contains an invalid argument.")
+    await events.wait(lambda: conn.closed, timeout=10)
+    errors = [e for e in events.items if type(e).__name__ == "EngineErrorEvent"]
+    assert errors and not errors[-1].recoverable
+    assert 3 <= len(server.connections) <= 6  # bounded, not an endless reconnect loop
+
+
+async def test_output_of_a_withdrawn_call_is_not_sent(fake: Callable[..., Any]) -> None:
+    filler = "Let me look that up for you, this could take a little while, please hold on."
+    server = await fake(replies=[FakeReply(filler, [FakeToolCall("lookup", {"q": "x"})])],
+                        realtime_factor=1.0)  # fmt: skip
+    conn, events = await connect(server, TOOLS)
+    await say(conn)
+    await events.wait(lambda: len(events.of(ResponseAudio)) > 5)
+    call = events.of(ResponseToolCall)[0].call
+    await push(conn, synth_speech(0.4, 16_000))  # barge-in withdraws the call
+    await events.wait(lambda: bool(events.of(ToolCallCancelled)))
+    await conn.send_tool_output(FunctionCallOutput(call_id=call.call_id, output="too late"))
+    await asyncio.sleep(0.1)
+    await conn.aclose()
+    assert server.connection.tool_responses == []
+
+
+async def test_text_sent_before_a_handle_is_not_replayed(fake: Callable[..., Any]) -> None:
+    server = await fake(replies=["Paris."])
+    conn, events = await connect(server)
+    await conn.send_text("Capital of France?")
+    await events.wait(lambda: bool(events.of(ResponseDone)))
+    await wait_for(lambda: len(server.connection.handles) == 2)  # issued after the answer
+    await server.drop()
+    await events.wait(lambda: resumed(events))
+    await asyncio.sleep(0.2)
+    await conn.aclose()
+    assert server.connections[1].client_contents == []  # the resumed state already has it
+    assert len(events.of(ResponseStarted)) == 1
 
 
 async def test_commit_input_flushes_server_vad(fake: Callable[..., Any]) -> None:
@@ -915,6 +1024,8 @@ async def test_session_voice_to_voice_matches_external_measurement(
     heard = transport.played_log[0].start_time - speech_end  # what the simulated user measured
     assert m.voice_to_voice == pytest.approx(0.4, abs=0.15)  # the fake server's VAD silence
     assert m.voice_to_voice == pytest.approx(heard, abs=0.08)
+    (engine_metrics,) = [x for x in rec.of("metrics") if isinstance(x, EngineMetrics)]
+    assert engine_metrics.ttfb == pytest.approx(m.voice_to_voice, abs=0.05)  # from speech end
 
 
 async def test_session_continues_across_a_go_away_rotation(fake: Callable[..., Any]) -> None:

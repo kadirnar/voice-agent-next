@@ -125,6 +125,10 @@ _TEXT_HOLD = 1.0
 """Max time agent transcript deltas wait for the user's (late) transcript at turn start."""
 _LATE_TRANSCRIPT_GRACE = 1.0
 """Input transcription arriving this soon after the answer still belongs to its turn."""
+_DROP_WINDOW = 60.0
+"""More than ``max_reconnect_attempts`` unexpected closes within this window are fatal."""
+_PREROLL = 0.5
+"""Manual turns: audio kept from before the detected speech start (sent after activityStart)."""
 _MAX_SEED_TURNS = 100
 
 
@@ -449,12 +453,17 @@ class _Outgoing:
     """A serialized client message."""
 
     data: str
-    replayable: bool
-    """Re-sent to a resumed connection if it was sent after the latest handle."""
+    kind: str
+    """``audio``, ``content``, ``activity_start``, ``activity_end``, ``tool`` or ``control``."""
     audio_start: float | None = None
     """Input-stream position of the first sample (audio messages only)."""
     audio_duration: float = 0.0
     sent_at: float = 0.0
+
+    @property
+    def replayable(self) -> bool:
+        """May be re-sent to a new connection (tool results and controls never are)."""
+        return self.kind not in ("tool", "control")
 
 
 @dataclass
@@ -523,6 +532,7 @@ class GeminiLiveConnection(EngineConnection):
         self._replay: deque[_Outgoing] = deque()
         self._replay_audio = 0.0
         self._stream_base: float | None = None
+        self._drops: deque[float] = deque()
         self.connections = 0
         """Number of WebSocket connections opened so far."""
         self.resumptions = 0
@@ -533,6 +543,11 @@ class GeminiLiveConnection(EngineConnection):
         self._pending_rotation: str | None = None
         self._rotation_deadline: float | None = None
         self._rotation_retry_at: float | None = None
+        self._rotation_failures = 0
+        self._switch_from_epoch = 0
+        self._saved_deadline: float | None = None
+        self._replaced_go_away: float | None = None
+        self._msg_epoch = 0
         # ---- server turn state
         self._server_turn_open = False
         self._gen: _Generation | None = None
@@ -565,6 +580,7 @@ class GeminiLiveConnection(EngineConnection):
             self._vad = EnergyVAD(sample_rate=engine.input_sample_rate, options=opts).stream()
         self._local_speaking = False
         self._local_speech_end: float | None = None
+        self._preroll: deque[tuple[float, AudioFrame]] = deque()
         self._out_resampler = StreamResampler(engine.output_sample_rate, 1)
 
     # ------------------------------------------------------------------ properties
@@ -738,6 +754,7 @@ class GeminiLiveConnection(EngineConnection):
         from websockets.exceptions import ConnectionClosed
 
         for first in early:
+            self._msg_epoch = epoch
             self._dispatch(first)
         code: int | None
         try:
@@ -746,6 +763,7 @@ class GeminiLiveConnection(EngineConnection):
                     return
                 message = _decode(raw)
                 if message is not None:
+                    self._msg_epoch = epoch
                     self._dispatch(message)
             code, reason = ws.close_code, ws.close_reason or ""
         except ConnectionClosed as exc:
@@ -757,9 +775,19 @@ class GeminiLiveConnection(EngineConnection):
         if self._closed or epoch != self._epoch:
             return
         error = _close_error(code, reason)
-        if isinstance(error, AuthenticationError):
-            self._fail(error)
+        t = now()
+        self._drops.append(t)
+        while self._drops and t - self._drops[0] > _DROP_WINDOW:
+            self._drops.popleft()
+        if (
+            isinstance(error, AuthenticationError)
+            or len(self._drops) > self._e.max_reconnect_attempts
+        ):
+            self._fail(error)  # bad credentials, or the connection keeps dying
             return
+        if not error.retryable:  # the server rejected something we sent: replay audio only
+            self._replay = deque(e for e in self._replay if e.kind == "audio")
+            self._replay_audio = sum(e.audio_duration for e in self._replay)
         logger.warning("gemini-live: connection closed unexpectedly (%s %s)", code, reason)
         self._start_rotation(f"connection closed ({code} {reason})".strip())
 
@@ -780,13 +808,13 @@ class GeminiLiveConnection(EngineConnection):
         self,
         payload: dict[str, Any],
         *,
-        replayable: bool,
+        kind: str,
         audio: tuple[float, float] | None = None,
     ) -> None:
         if self._closed:
             return
         start, duration = audio if audio is not None else (None, 0.0)
-        entry = _Outgoing(json.dumps(payload), replayable, start, duration)
+        entry = _Outgoing(json.dumps(payload), kind, start, duration)
         ws = self._ws
         if self._switching or ws is None:
             self._queue(entry)
@@ -829,18 +857,18 @@ class GeminiLiveConnection(EngineConnection):
             logger.warning("gemini-live: reconnect buffer full, dropped %.2fs of audio", dropped)
 
     def _trim_replay(self) -> None:
-        """A new handle arrived: keep only what the resumed state may be missing -- the
-        audio sent in the last ``resume_replay`` seconds, minus speech already answered."""
+        """A new handle arrived: keep only what the resumed state may lack -- the audio sent
+        in the last ``resume_replay`` seconds (in flight), minus speech already answered.
+        Text and activity messages sent before the handle are part of it."""
         cutoff = now() - self._e.resume_replay
-        while self._replay:
-            head = self._replay[0]
-            answered = (
-                head.audio_start is not None
-                and head.audio_start + head.audio_duration <= self._answered_until
-            )
-            if head.sent_at >= cutoff and not answered:
-                break
-            self._replay_audio -= self._replay.popleft().audio_duration
+        self._replay = deque(
+            e
+            for e in self._replay
+            if e.audio_start is not None
+            and e.sent_at >= cutoff
+            and e.audio_start + e.audio_duration > self._answered_until
+        )
+        self._replay_audio = sum(e.audio_duration for e in self._replay)
 
     # ----------------------------------------------------------------- rotation
     def _request_rotation(self, reason: str, *, deadline: float | None = None) -> None:
@@ -863,11 +891,11 @@ class GeminiLiveConnection(EngineConnection):
         ):
             self._pending_rotation = "max_connection_age"
         reason = self._pending_rotation
-        if reason is None:
+        if reason is None or (self._rotation_retry_at is not None and t < self._rotation_retry_at):
             return
         if self._rotation_deadline is not None and t >= self._rotation_deadline:
             self._start_rotation(f"{reason} (deadline)")
-        elif (self._rotation_retry_at is None or t >= self._rotation_retry_at) and self._is_idle():
+        elif self._is_idle():
             self._start_rotation(reason)
 
     def _is_idle(self) -> bool:
@@ -875,8 +903,11 @@ class GeminiLiveConnection(EngineConnection):
             return False
         if self._user_speaking or self._local_speaking or self._activity_open:
             return False
-        if now() - self._last_input_transcript_at < 0.5:
+        t = now()
+        if t - self._last_input_transcript_at < 0.5:
             return False
+        if self._requested_at is not None and t - self._requested_at < _REQUEST_TTL:
+            return False  # a requested response has not started yet
         return not self._e.session_resumption or (self._resumable and self._handle is not None)
 
     def _start_rotation(self, reason: str) -> None:
@@ -885,6 +916,9 @@ class GeminiLiveConnection(EngineConnection):
         if self._rotation_task is not None and not self._rotation_task.done():
             return  # the running rotation re-checks the new connection before finishing
         self._switching = True
+        self._switch_from_epoch = self._epoch
+        self._saved_deadline = self._rotation_deadline
+        self._replaced_go_away = None
         self._pending_rotation = None
         self._rotation_deadline = None
         self._rotation_retry_at = None
@@ -910,7 +944,7 @@ class GeminiLiveConnection(EngineConnection):
                 if (  # a planned rotation failed but the current connection still works
                     current is not None
                     and current.state is State.OPEN
-                    and await self._keep_current(current, reason, exc, retry_in=delay)
+                    and await self._keep_current(current, reason, exc)
                 ):
                     return
                 if rejected and handle is not None:
@@ -930,8 +964,9 @@ class GeminiLiveConnection(EngineConnection):
             self._switch(ws, early, resumed=handle is not None)
             if old is not None and old is not ws:
                 self._retire(old)
-            if await self._flush(ws) and ws.state is State.OPEN:
+            if await self._flush(ws, resumed=handle is not None) and ws.state is State.OPEN:
                 self._switching = False  # outbox empty; no await since the check
+                self._rotation_failures = 0
                 if handle is not None:
                     self.resumptions += 1
                 status: EngineStatusKind = "resumed" if handle is not None else "reconnected"
@@ -974,26 +1009,50 @@ class GeminiLiveConnection(EngineConnection):
 
         self._tasks.spawn(close(), name="gemini-live-close-old")
 
-    async def _keep_current(
-        self, ws: ClientConnection, reason: str, error: Exception, *, retry_in: float
-    ) -> bool:
-        """Abort a planned rotation and carry on with ``ws`` (retried later if sensible)."""
+    async def _keep_current(self, ws: ClientConnection, reason: str, error: Exception) -> bool:
+        """Abort a planned rotation and carry on with ``ws``; retry later with backoff."""
         if not await self._flush_outbox(ws):
             return False
         self._switching = False  # outbox empty; no await since the check
+        self._rotation_failures += 1
         logger.warning("gemini-live: could not rotate (%s); keeping the current connection", error)
-        if not (isinstance(error, ProviderError) and not error.retryable):
-            self._pending_rotation = reason.removesuffix(" (deadline)")
-            self._rotation_retry_at = now() + retry_in
+        base = reason.removesuffix(" (deadline)")
+        deadline = self._saved_deadline if base == "go_away" else None
+        if self._replaced_go_away is not None:  # the kept connection announced its end meanwhile
+            base = "go_away"
+            late = self._replaced_go_away
+            deadline = late if deadline is None else min(deadline, late)
+        retryable = not (isinstance(error, ProviderError) and not error.retryable)
+        if retryable or deadline is not None:
+            self._pending_rotation = base
+            self._rotation_deadline = deadline
+            backoff = min(0.5 * 2 ** (self._rotation_failures - 1), 30.0)
+            self._rotation_retry_at = now() + backoff
         self._emit(EngineErrorEvent(error=error, recoverable=True))
         self._emit(EngineStatus(status="resumed", detail=f"kept the current connection ({reason})"))
         return True
 
-    async def _flush(self, ws: ClientConnection) -> bool:
-        """Replay audio sent since the handle, then the messages queued during the switch."""
+    async def _flush(self, ws: ClientConnection, *, resumed: bool) -> bool:
+        """Send the new connection what it lacks, then the messages queued meanwhile.
+
+        A resumed session gets the audio sent since the latest handle; a fresh one (its text
+        history re-seeded) only the audio of the unanswered user turn.
+        """
         replay = list(self._replay)
         self._replay.clear()
         self._replay_audio = 0.0
+        if not resumed:
+            floor = max(self._answered_until, self._last_commit_pos)
+            replay = [
+                e
+                for e in replay
+                if e.audio_start is not None and e.audio_start + e.audio_duration > floor
+            ]
+        if self._manual:  # re-open the user's activity on the new connection if needed
+            replay = [e for e in replay if e.kind not in ("activity_start", "activity_end")]
+            if self._activity_open:
+                start = json.dumps({"realtimeInput": {"activityStart": {}}})
+                replay.insert(0, _Outgoing(start, "activity_start"))
         for i, entry in enumerate(replay):
             if not await self._deliver(ws, entry):
                 for rest in replay[i:]:
@@ -1021,36 +1080,71 @@ class GeminiLiveConnection(EngineConnection):
 
     # --------------------------------------------------------------- audio input
     async def _send_audio(self, frame: AudioFrame) -> None:
-        end = self.input_audio_time
-        start = end - frame.duration
+        start = self.input_audio_time - frame.duration
+        speech_start: float | None = None
+        speech_end: float | None = None
         if self._vad is not None:
             for ev in self._vad.push_audio(frame):
                 if ev.type == VADEventType.START_OF_SPEECH:
                     self._local_speaking = True
+                    speech_start = ev.audio_time - ev.speech_duration
                 elif ev.type == VADEventType.END_OF_SPEECH:
                     self._local_speaking = False
-                    self._local_speech_end = ev.audio_time - ev.silence_duration
-        if self._manual and not self._activity_open:
-            self._activity_open = True
-            await self._send({"realtimeInput": {"activityStart": {}}}, replayable=True)
-            self._on_user_activity_start(start)
+                    speech_end = ev.audio_time - ev.silence_duration
+                    self._local_speech_end = speech_end
+        if self._manual:
+            await self._manual_audio(frame, start, speech_start, speech_end)
+        else:
+            await self._send_frame(frame, start)
+
+    async def _send_frame(self, frame: AudioFrame, start: float) -> None:
         audio = {"data": frame.to_base64(), "mimeType": f"audio/pcm;rate={frame.sample_rate}"}
-        await self._send(
-            {"realtimeInput": {"audio": audio}}, replayable=True, audio=(start, frame.duration)
-        )
+        payload = {"realtimeInput": {"audio": audio}}
+        await self._send(payload, kind="audio", audio=(start, frame.duration))
+
+    async def _manual_audio(
+        self, frame: AudioFrame, start: float, speech_start: float | None, speech_end: float | None
+    ) -> None:
+        """Manual turns: an activity opens when the user starts to speak (local VAD; with
+        ``local_vad=False`` on the first frame) and closes on :meth:`commit_input`. Audio
+        outside activities is not sent, except a short pre-roll before the speech start."""
+        if not self._activity_open:
+            self._preroll.append((start, frame))
+            while self._preroll and self._preroll[0][0] < start + frame.duration - _PREROLL:
+                self._preroll.popleft()
+            if speech_start is None and self._vad is not None:
+                return
+            self._activity_open = True
+            await self._send({"realtimeInput": {"activityStart": {}}}, kind="activity_start")
+            self._on_user_activity_start(speech_start if speech_start is not None else start)
+            preroll, self._preroll = list(self._preroll), deque()
+            for position, pending in preroll:
+                await self._send_frame(pending, position)
+            return
+        user = self._user
+        if speech_start is not None:  # the user speaks again within the same activity
+            self._on_user_activity_start(speech_start)
+            if user is not None and not user.committed:
+                user.stopped, user.speech_end = False, None
+        await self._send_frame(frame, start)
+        if speech_end is not None and self._user_speaking:
+            self._user_speaking = False
+            if user is not None and not user.committed:
+                user.stopped, user.speech_end = True, speech_end
+            self._emit(InputSpeechStopped(audio_time=speech_end))
 
     async def commit_input(self) -> None:
         """Manual turns: send ``activityEnd``. Automatic VAD: ``audioStreamEnd`` flushes the
         server's end-of-speech wait (hybrid VAD)."""
         if not self._manual:
-            await self._send({"realtimeInput": {"audioStreamEnd": True}}, replayable=False)
+            await self._send({"realtimeInput": {"audioStreamEnd": True}}, kind="control")
             return
         user = self._user if self._user is not None and not self._user.committed else None
         if not self._activity_open and user is None:
             return  # nothing was said since the last commit
         if self._activity_open:
             self._activity_open = False
-            await self._send({"realtimeInput": {"activityEnd": {}}}, replayable=True)
+            await self._send({"realtimeInput": {"activityEnd": {}}}, kind="activity_end")
         if user is not None and user.speech_end is None:
             user.speech_end = self.input_audio_time
         self._commit_user(user)
@@ -1064,15 +1158,13 @@ class GeminiLiveConnection(EngineConnection):
         self.chat_ctx.add_message("user", text)
         if respond:
             await self._prepare_request()
-        elif self._server_turn_open:
-            self._self_interrupt = True  # if the server stops talking, it was not the user
         content = {"turns": [{"role": "user", "parts": [{"text": text}]}], "turnComplete": respond}
-        await self._send({"clientContent": content}, replayable=True)
+        await self._send({"clientContent": content}, kind="content")
 
     async def create_response(self, *, instructions: str | None = None) -> None:
         turns = [{"role": "user", "parts": [{"text": instructions}]}] if instructions else []
         await self._prepare_request()
-        await self._send({"clientContent": {"turns": turns, "turnComplete": True}}, replayable=True)
+        await self._send({"clientContent": {"turns": turns, "turnComplete": True}}, kind="content")
 
     async def _prepare_request(self) -> None:
         # a clientContent turn interrupts any ongoing generation: not a user barge-in
@@ -1120,7 +1212,7 @@ class GeminiLiveConnection(EngineConnection):
             response["scheduling"] = "WHEN_IDLE" if respond else "SILENT"
         if respond:
             self._requested_at = now()
-        await self._send({"toolResponse": {"functionResponses": [response]}}, replayable=False)
+        await self._send({"toolResponse": {"functionResponses": [response]}}, kind="tool")
 
     async def update(
         self, *, instructions: str | None = None, tools: list[FunctionTool] | None = None
@@ -1358,6 +1450,7 @@ class GeminiLiveConnection(EngineConnection):
             return
         for call_id in ids:
             self._pending_calls.pop(call_id, None)
+        self._stale_calls.update(ids)  # a late result must not reach the server
         self._emit(ToolCallCancelled(call_ids=ids))
 
     def _on_resumption_update(self, update: Mapping[str, Any]) -> None:
@@ -1373,8 +1466,11 @@ class GeminiLiveConnection(EngineConnection):
     def _on_go_away(self, go_away: Mapping[str, Any]) -> None:
         time_left = _parse_duration(go_away.get("timeLeft"))
         self._emit(EngineStatus(status="expiring", detail="go_away", time_left=time_left))
-        budget = max(0.0, (time_left or 0.0) - self._e.go_away_margin)
-        self._request_rotation("go_away", deadline=now() + budget)
+        deadline = now() + max(0.0, (time_left or 0.0) - self._e.go_away_margin)
+        if self._switching and self._msg_epoch <= self._switch_from_epoch:
+            self._replaced_go_away = deadline  # from the connection being replaced right now
+            return
+        self._request_rotation("go_away", deadline=deadline)
 
     def _on_usage(self, u: Mapping[str, Any]) -> None:
         usage = _usage(u)
@@ -1436,7 +1532,9 @@ class GeminiLiveConnection(EngineConnection):
             user.speech_end = end
         user.committed = True
         self._last_commit_pos = self.input_audio_time
-        self._turn_trigger = now()
+        # Gemini commits voice turns implicitly: time the response from the end of speech
+        wall = self.audio_time_to_wall(user.speech_end) if user.speech_end is not None else None
+        self._turn_trigger = wall if wall is not None else now()
         self._emit(InputCommitted(item_id=user.item_id))
         if self.chat_ctx.get(user.item_id) is None:  # keep the history in conversation order
             self.chat_ctx.add_message("user", user.text, id=user.item_id)

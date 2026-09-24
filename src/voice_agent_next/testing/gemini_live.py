@@ -381,15 +381,18 @@ class FakeConnection:
             reply = self.server._next_reply(None)
             if scheduling == "INTERRUPT":
                 await self._barge_in()
-                self._start_reply(reply)
-            elif self.generating:
-                self._queued = reply
-            else:
-                self._start_reply(reply)
+            self._start_reply(reply)  # WHEN_IDLE: queued behind the current reply
 
     # ------------------------------------------------------------------ replies
     def _start_reply(self, reply: FakeReply, *, late_transcript: Sequence[str] = ()) -> None:
-        self._reply_task = asyncio.create_task(self._reply(reply, list(late_transcript)))
+        """Start a model turn, or queue it behind the running one (never two at once)."""
+        if self.generating:
+            self._queued = reply
+            return
+        self._launch(reply, list(late_transcript))
+
+    def _launch(self, reply: FakeReply, late_transcript: list[str]) -> None:
+        self._reply_task = asyncio.create_task(self._reply(reply, late_transcript))
 
     async def _reply(self, reply: FakeReply, late_transcript: list[str]) -> None:
         if self._resumption:
@@ -427,7 +430,7 @@ class FakeConnection:
             await self.issue_handle()
         queued, self._queued = self._queued, None
         if queued is not None:
-            self._start_reply(queued)
+            self._launch(queued, [])  # this task is finishing: the next turn starts now
 
     async def _speak(self, text: str, late_transcript: list[str]) -> float:
         server = self.server
@@ -470,7 +473,8 @@ class FakeGeminiLiveServer:
         late_transcription: send the user's transcript after the first reply audio.
         realtime_factor: pacing of reply audio (0 = as fast as possible, 1 = real time).
         reject_status: reject the WebSocket handshake with this HTTP status.
-        close_after_setup: ``(code, reason)`` to close with right after ``setup``.
+        close_after_setup: ``(code, reason)`` to close with instead of ``setupComplete``.
+        drop_after_setup: ``(code, reason)`` to close with right after ``setupComplete``.
     """
 
     def __init__(
@@ -490,6 +494,7 @@ class FakeGeminiLiveServer:
         vad_options: VADOptions | None = None,
         reject_status: int | None = None,
         close_after_setup: tuple[int, str] | None = None,
+        drop_after_setup: tuple[int, str] | None = None,
     ) -> None:
         self.replies = replies
         self.transcripts = list(transcripts or [])
@@ -507,6 +512,7 @@ class FakeGeminiLiveServer:
         )
         self.reject_status = reject_status
         self.close_after_setup = close_after_setup
+        self.drop_after_setup = drop_after_setup
         self.sessions: list[FakeSession] = []
         self.connections: list[FakeConnection] = []
         self.setups: list[dict[str, Any]] = []
@@ -649,4 +655,6 @@ class FakeGeminiLiveServer:
         self.connections.append(conn)
         await conn.send({"setupComplete": {}})
         await conn.issue_handle()
+        if self.drop_after_setup is not None:
+            await ws.close(*self.drop_after_setup)
         await conn._run()
