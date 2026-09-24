@@ -1013,6 +1013,8 @@ class _SignalingServer:
         self.offer_path = offer_path
         self.config_path = config_path
         self.request_timeout = request_timeout
+        self.reuse_port = False
+        """Bind with ``SO_REUSEPORT`` (several worker processes share the port)."""
         self.server: asyncio.Server | None = None
         self._handlers: set[asyncio.Task[Any]] = set()
 
@@ -1020,8 +1022,9 @@ class _SignalingServer:
         if self.server is not None:
             return
         self.server = await asyncio.start_server(
-            self._serve, self.host, self.port, ssl=self.ssl, limit=_MAX_HEADER
-        )
+            self._serve, self.host, self.port, ssl=self.ssl, limit=_MAX_HEADER,
+            reuse_port=self.reuse_port or None,
+        )  # fmt: skip
         for sock in self.server.sockets:
             self.port = int(sock.getsockname()[1])
             break
