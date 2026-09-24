@@ -13,8 +13,8 @@ itself. Three strategies, all :class:`~voice_agent_next.audio.processing.AudioPr
 * nothing (headphones): there is no acoustic echo path.
 
 :func:`create_echo_canceller` picks one from a mode name. Every processor needs the audio
-that is actually played as its reference: feed it to :meth:`AudioProcessor.process_render`
-from exactly one place (the transport's playback callback when it has one). See
+that is played as its reference: feed it to :meth:`AudioProcessor.process_render` from
+exactly one place (the transport's playback callback when it has one). See
 ``docs/audio-processing.md``.
 """
 
@@ -37,20 +37,28 @@ from .resample import Resampler
 __all__ = [
     "EchoMode",
     "HalfDuplexGate",
+    "ReferenceTiming",
     "WebRTCAudioProcessor",
     "create_echo_canceller",
 ]
 
 EchoMode = Literal["auto", "aec", "webrtc", "half_duplex", "headphones", "none"]
+ReferenceTiming = Literal["played", "queued"]
 
 _APM_RATES = (8_000, 16_000, 32_000, 48_000)
 """Native WebRTC APM rates, accepted for ``processing_rate``."""
 _MAX_STREAM_DELAY_MS = 500
 """The APM rejects stream delays outside ``[0, 500]`` ms."""
-_DELAY_STEP_MS = 4
-"""AEC3 aligns in 4 ms blocks: estimated delay hints are rounded to this step."""
 _MAX_PENDING_RENDER = 1.0
 """Seconds of reference audio kept while no microphone audio is being processed."""
+_MAX_PACED = 100
+"""10 ms frames of ``"queued"`` reference kept waiting for the capture stream (1 s)."""
+_PACED_LEAD = 3
+"""10 ms reference frames a paced (``"queued"``) reference may run ahead of the capture.
+
+AEC3 flushes its render buffer when the reference stays more than 8 blocks (32 ms) ahead
+of the capture, after which any pause in the reference makes it lose its delay estimate.
+"""
 
 
 def _load_rtc() -> Any:
@@ -114,6 +122,7 @@ class _RenderPath:
     def __init__(self, rate: int) -> None:
         self.rate = rate
         self.samples = rate // 100
+        self.silence = bytes(self.samples * 2)
         self.converter = _Converter(rate, 1)
         self.chunker = FrameChunker(rate, 1, samples_per_frame=self.samples)
 
@@ -131,11 +140,11 @@ class WebRTCAudioProcessor(AudioProcessor):
       The only added latency is the framing remainder, at most 10 ms (zero when input
       frames are multiples of 10 ms) plus < 1 ms per resampling stage; it is reported by
       :attr:`latency` and subtracted from the returned frame's ``timestamp``;
-    * :meth:`process_render` only queues the reference audio (cheap and non-blocking, safe
-      to call from a real-time playback callback on another thread); it is resampled to
-      the capture processing rate and fed to the APM right before the next capture audio.
-      While no reference audio arrives, silence is fed so that AEC3 keeps its delay
-      estimate between agent turns.
+    * :meth:`process_render` only queues the reference (cheap and non-blocking, safe to
+      call from a real-time playback callback on another thread); it is converted to mono
+      at the capture processing rate and handed to the APM on the capture path, right
+      before the microphone audio that may contain its echo. While no reference arrives,
+      silence is fed, so AEC3 keeps its delay estimate between agent turns.
 
     Args:
         echo_cancellation: cancel the played audio (:meth:`process_render`) from the mic.
@@ -144,10 +153,17 @@ class WebRTCAudioProcessor(AudioProcessor):
             hurts transcription and turn detection.
         high_pass_filter: remove DC offset and low-frequency rumble.
         auto_gain_control: normalize the microphone level.
+        reference: how :meth:`process_render` is called. ``"played"`` (default): with audio
+            as it is being played, e.g. from a transport's playback callback; the reference
+            goes to AEC3 as it arrives and AEC3 tracks delay and clock drift itself.
+            ``"queued"``: with audio when it is queued for playback, possibly ahead of
+            time, as :class:`~voice_agent_next.session.AgentSession`'s playout loop does
+            (up to ``output_lookahead`` early); the reference is then released in step
+            with the capture stream, like a playing device would.
         delay_ms: fixed stream-delay hint (0-500 ms) between playing audio and hearing its
-            echo. ``None`` (default) estimates it from the device latencies reported with
-            :meth:`set_device_latency`, or else from the capture frames' timestamps. AEC3
-            refines the actual delay itself; the hint speeds up convergence.
+            echo. ``None`` (default) uses the device latencies reported with
+            :meth:`set_device_latency`, or no hint. AEC3 estimates the actual delay itself
+            (up to ~500 ms); a wrong hint only slows down its first second.
         processing_rate: force the APM rate (8000, 16000, 32000 or 48000). ``None`` keeps
             the capture rate whenever possible (no resampling).
 
@@ -162,9 +178,12 @@ class WebRTCAudioProcessor(AudioProcessor):
         noise_suppression: bool = True,
         high_pass_filter: bool = True,
         auto_gain_control: bool = True,
+        reference: ReferenceTiming = "played",
         delay_ms: int | None = None,
         processing_rate: int | None = None,
     ) -> None:
+        if reference not in ("played", "queued"):
+            raise ValueError(f"reference must be 'played' or 'queued', got {reference!r}")
         if delay_ms is not None and not 0 <= delay_ms <= _MAX_STREAM_DELAY_MS:
             raise ValueError(f"delay_ms must be within [0, {_MAX_STREAM_DELAY_MS}], got {delay_ms}")
         if processing_rate is not None and processing_rate not in _APM_RATES:
@@ -174,10 +193,11 @@ class WebRTCAudioProcessor(AudioProcessor):
         self.noise_suppression = noise_suppression
         self.high_pass_filter = high_pass_filter
         self.auto_gain_control = auto_gain_control
+        self.reference: ReferenceTiming = reference
         self.delay_ms = delay_ms
         self.processing_rate = processing_rate
         self._lock = threading.Lock()  # capture path + every APM call
-        self._pending_lock = threading.Lock()  # render queue (touched by process_render)
+        self._pending_lock = threading.Lock()  # reference queue (touched by process_render)
         self._pending: deque[AudioFrame] = deque()
         self._pending_duration = 0.0
         self._input_latency: float | None = None
@@ -191,19 +211,10 @@ class WebRTCAudioProcessor(AudioProcessor):
         self._capture: _CapturePath | None = None
         self._render: _RenderPath | None = None
         self._render_lead = 0  # reference frames fed minus capture frames processed
-        self._capture_delay: float | None = None  # smoothed (t_process - t_capture), seconds
+        self._paced: deque[bytes] = deque()  # "queued" reference frames not released yet
         self._applied_delay_ms: int | None = None
 
     # ------------------------------------------------------------------ public API
-    @property
-    def _enabled(self) -> bool:
-        return (
-            self.echo_cancellation
-            or self.noise_suppression
-            or self.high_pass_filter
-            or self.auto_gain_control
-        )
-
     @property
     def latency(self) -> float:
         """Seconds of delay this processor currently adds to the capture stream."""
@@ -212,7 +223,7 @@ class WebRTCAudioProcessor(AudioProcessor):
 
     @property
     def stream_delay_ms(self) -> int | None:
-        """Delay hint last passed to the APM (``None`` before the first echo-cancelled frame)."""
+        """Delay hint last passed to the APM (``None`` if none was set)."""
         return self._applied_delay_ms
 
     def set_device_latency(
@@ -220,8 +231,8 @@ class WebRTCAudioProcessor(AudioProcessor):
     ) -> None:
         """Report audio device latencies in seconds (e.g. ``sounddevice`` ``stream.latency``).
 
-        Transports call this after opening their devices; the stream-delay hint then is
-        ``input_latency + output_latency`` unless ``delay_ms`` was given.
+        Transports call this after opening their devices; unless ``delay_ms`` was given,
+        the APM's stream-delay hint becomes ``input_latency + output_latency``.
         """
         for name, value in (("input_latency", input_latency), ("output_latency", output_latency)):
             if value is not None and not (math.isfinite(value) and value >= 0):
@@ -233,13 +244,13 @@ class WebRTCAudioProcessor(AudioProcessor):
                 self._output_latency = output_latency
 
     def process_render(self, frame: AudioFrame) -> None:
-        """Queue audio that is being played (the echo reference). Never blocks on processing."""
+        """Queue audio that is played (the echo reference). Never blocks on processing."""
         if not frame or not self.echo_cancellation:
             return
         with self._pending_lock:
             self._pending.append(frame)
             self._pending_duration += frame.duration
-            # nobody consumes the queue while the microphone is not processed: keep it bounded
+            # nothing consumes the queue while the microphone is not processed: bound it
             while self._pending_duration > _MAX_PENDING_RENDER and len(self._pending) > 1:
                 self._pending_duration -= self._pending.popleft().duration
 
@@ -282,12 +293,21 @@ class WebRTCAudioProcessor(AudioProcessor):
         self.reset()
 
     # ------------------------------------------------------------------- internals
+    @property
+    def _enabled(self) -> bool:
+        return (
+            self.echo_cancellation
+            or self.noise_suppression
+            or self.high_pass_filter
+            or self.auto_gain_control
+        )
+
     def _configure(self, fmt: AudioFormat) -> _CapturePath:
-        rate = _processing_rate(fmt.sample_rate, self.processing_rate)
         if self._capture is not None:
             logger.debug("capture format changed to %s: resetting audio processing", fmt)
             self._dispose_apm()
             self._init_state()
+        rate = _processing_rate(fmt.sample_rate, self.processing_rate)
         self._capture = _CapturePath(fmt, rate)
         self._render = _RenderPath(rate)
         return self._capture
@@ -311,8 +331,8 @@ class WebRTCAudioProcessor(AudioProcessor):
 
     def _dispose_apm(self) -> None:
         apm, self._apm = self._apm, None
-        # livekit frees the native module on garbage collection only; after interpreter
-        # shutdown started that raises, so release it explicitly when the handle is exposed
+        # livekit frees the native module on garbage collection only, which fails once
+        # interpreter shutdown has begun: release it explicitly when the handle is exposed
         dispose = getattr(getattr(apm, "_ffi_handle", None), "dispose", None)
         if callable(dispose):
             try:
@@ -341,7 +361,12 @@ class WebRTCAudioProcessor(AudioProcessor):
         assert render is not None
         for frame in frames:
             for chunk in render.chunker.push(render.converter.push(frame)):
-                self._feed_render(render, chunk.data)
+                if self.reference == "queued":
+                    self._paced.append(chunk.data)
+                else:
+                    self._feed_render(render, chunk.data)
+        while len(self._paced) > _MAX_PACED:
+            self._paced.popleft()
 
     def _feed_render(self, render: _RenderPath, data: bytes) -> None:
         apm = self._ensure_apm()
@@ -362,9 +387,11 @@ class WebRTCAudioProcessor(AudioProcessor):
         if self.echo_cancellation:
             render = self._render
             assert render is not None
+            while self._paced and self._render_lead < _PACED_LEAD:
+                self._feed_render(render, self._paced.popleft())
             while self._render_lead <= 0:  # nothing is playing: the reference is silence
-                self._feed_render(render, bytes(render.samples * 2))
-            self._update_stream_delay(apm, chunk)
+                self._feed_render(render, render.silence)
+            self._update_stream_delay(apm)
         buf = bytearray(chunk.data)
         frame = self._rtc.AudioFrame(
             buf, chunk.sample_rate, chunk.channels, chunk.samples_per_channel
@@ -376,22 +403,14 @@ class WebRTCAudioProcessor(AudioProcessor):
             return chunk
         return AudioFrame(bytes(buf), chunk.sample_rate, chunk.channels, chunk.timestamp)
 
-    def _update_stream_delay(self, apm: Any, chunk: AudioFrame) -> None:
-        if chunk.timestamp is not None:
-            age = now() - chunk.timestamp  # t_process - t_capture for this chunk
-            if 0.0 <= age <= 1.0:  # ignore timestamps from another clock
-                prev = self._capture_delay
-                self._capture_delay = age if prev is None else prev + 0.05 * (age - prev)
+    def _update_stream_delay(self, apm: Any) -> None:
         if self.delay_ms is not None:
             delay_ms = self.delay_ms
+        elif self._input_latency is not None or self._output_latency is not None:
+            total = (self._input_latency or 0.0) + (self._output_latency or 0.0)
+            delay_ms = min(_MAX_STREAM_DELAY_MS, round(total * 1000))
         else:
-            capture = self._input_latency
-            if capture is None:
-                capture = self._capture_delay or 0.0
-            total_ms = (capture + (self._output_latency or 0.0)) * 1000.0
-            # quantized to AEC3's 4 ms blocks so that jitter does not cause an FFI call per frame
-            delay_ms = _DELAY_STEP_MS * round(total_ms / _DELAY_STEP_MS)
-            delay_ms = min(_MAX_STREAM_DELAY_MS, max(0, delay_ms))
+            return  # no hint: AEC3 finds the delay on its own
         if delay_ms != self._applied_delay_ms and self._call(apm.set_stream_delay_ms, delay_ms):
             self._applied_delay_ms = delay_ms
 
@@ -467,13 +486,14 @@ def create_echo_canceller(
     noise_suppression: bool = True,
     high_pass_filter: bool = True,
     auto_gain_control: bool = True,
+    reference: ReferenceTiming = "played",
     delay_ms: int | None = None,
     processing_rate: int | None = None,
     tail: float = 0.3,
 ) -> AudioProcessor | None:
     """Create the echo-control processor for audio played through loudspeakers.
 
-    Modes:
+    Modes (:data:`EchoMode`):
 
     * ``"auto"``: :class:`WebRTCAudioProcessor` when the ``aec`` extra (``livekit``) is
       installed, otherwise ``None`` with a warning;
@@ -482,7 +502,7 @@ def create_echo_canceller(
     * ``"half_duplex"``: :class:`HalfDuplexGate` with ``tail`` (no barge-in);
     * ``"headphones"`` / ``"none"``: ``None``, there is no echo to remove.
 
-    The remaining keyword arguments configure :class:`WebRTCAudioProcessor`.
+    The other keyword arguments configure :class:`WebRTCAudioProcessor`.
     """
     if mode not in _MODES:
         raise ValueError(f"unknown echo mode {mode!r}; expected one of {', '.join(_MODES)}")
@@ -494,6 +514,7 @@ def create_echo_canceller(
         "noise_suppression": noise_suppression,
         "high_pass_filter": high_pass_filter,
         "auto_gain_control": auto_gain_control,
+        "reference": reference,
         "delay_ms": delay_ms,
         "processing_rate": processing_rate,
     }
