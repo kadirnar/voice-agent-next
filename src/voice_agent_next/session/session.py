@@ -76,6 +76,9 @@ if TYPE_CHECKING:
 
 __all__ = ["AgentSession", "SessionOptions"]
 
+_MAX_ONSET_LAG = 0.5
+"""Upper bound (s) on how long after its onset an engine reports user speech."""
+
 
 @dataclass(slots=True)
 class SessionOptions:
@@ -701,7 +704,10 @@ class AgentSession(EventEmitter):
         return fallback
 
     async def _on_user_speech_started(self, ev: InputSpeechStarted) -> None:
-        start = min(self._wall_time(ev.audio_time, ev.timestamp), now())
+        # where speech began; an onset mapped earlier than the VAD could plausibly report it
+        # comes from a gap in the input stream, not from speech
+        start = self._wall_time(ev.audio_time, ev.timestamp)
+        start = min(max(start, ev.timestamp - _MAX_ONSET_LAG), now())
         barge = self._barge
         if barge is not None:
             barge.overlap.speech_started(start)  # the same overlap goes on
