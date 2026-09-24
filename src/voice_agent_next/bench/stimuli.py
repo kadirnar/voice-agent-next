@@ -307,7 +307,43 @@ BUILTIN_SCENARIOS: dict[str, dict[str, Any]] = {
             {"id": "repeat", "text": "Can you repeat that?", "duration": 0.6},
             {"id": "thanks", "text": "Thanks, that is all.", "duration": 0.6},
         ],
-    }
+    },
+    "turn-taking-smoke": {
+        "name": "turn-taking-smoke",
+        "version": 1,
+        "description": (
+            "T4 turn-taking battery, smoke tier: plain questions, questions with a mid-turn "
+            "pause, and a backchannel, a cough and a real interruption spoken over the "
+            "agent's reply; deterministic synthetic speech and noise (no models)."
+        ),
+        "sample_rate": 16_000,
+        "chunk": 0.02,
+        "loudness_dbfs": -20.0,
+        "lead_in": 0.5,
+        "stimuli": "synthetic",
+        "reply_timeout": 6.0,
+        "gap_after_reply": 0.5,
+        "turns": [
+            {"id": "hello", "text": "Hi there.", "duration": 0.6, "category": "question"},
+            {"id": "time", "text": "What time is it?", "duration": 0.8},
+            {"id": "order", "category": "pause", "parts": [
+                {"text": "Where is my order?", "duration": 0.8, "pause": 0.6},
+                {"text": "I placed it last week.", "duration": 0.9}]},
+            {"id": "policy", "text": "Tell me about your return policy.", "duration": 1.0},
+            {"id": "uh-huh", "text": "Uh-huh.", "duration": 0.35, "barge_in": 1.0,
+             "expect_reply": False, "category": "backchannel"},
+            {"id": "table", "category": "pause", "parts": [
+                {"text": "Book a table for two.", "duration": 0.7, "pause": 0.9},
+                {"text": "At seven tonight.", "duration": 0.7}]},
+            {"id": "hours", "text": "What are your opening hours?", "duration": 1.0},
+            {"id": "cough", "source": "noise", "duration": 0.3, "barge_in": 1.0,
+             "expect_reply": False, "category": "noise"},
+            {"id": "refund", "text": "How long does a refund take?", "duration": 1.0},
+            {"id": "interrupt", "text": "Sorry, wait. Can I pay by card?", "duration": 1.4,
+             "barge_in": 1.0, "category": "interruption"},
+            {"id": "yes", "text": "Yes.", "duration": 0.3},
+        ],
+    },
 }
 
 

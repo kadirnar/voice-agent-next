@@ -68,7 +68,8 @@ class TurnTiming:
     start: float
     """Acoustic start of the clip."""
     reply_start: float | None = None
-    """Start of the first agent audio played after the user started speaking."""
+    """Start of the first agent audio played after the user started speaking (after the
+    user stopped, for ``barge_in`` turns)."""
     reply_end: float | None = None
     """End of the last agent audio played before the next turn."""
     missed: bool = False
@@ -79,6 +80,12 @@ class TurnTiming:
     @property
     def speech_start(self) -> float:
         return self.start + self.stimulus.speech_start
+
+    @property
+    def reply_after(self) -> float:
+        """Agent audio starting from here counts as the reply: the user's onset, or, for a
+        turn spoken over the agent (``barge_in``), the end of the user's speech."""
+        return self.speech_end if self.stimulus.barge_in is not None else self.speech_start
 
     @property
     def speech_end(self) -> float:
@@ -248,7 +255,7 @@ class CallerEmulator:
         for played in log[self._scanned :]:
             end = played.start_time + played.frame.duration
             self._agent_end = max(self._agent_end, end)
-            if turn is not None and played.start_time >= turn.speech_start:
+            if turn is not None and played.start_time >= turn.reply_after:
                 if turn.reply_start is None:
                     turn.reply_start = played.start_time
                 turn.reply_end = end if turn.reply_end is None else max(turn.reply_end, end)
