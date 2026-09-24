@@ -427,3 +427,18 @@ async def test_cascade_turn_audio_keeps_pauses_and_audio_detector_runs_before_fi
     await session.aclose()
     # the second prediction covers speech + pause + resumed speech (>= 0.6 + 0.55 + 0.6 s)
     assert detector.durations[1] >= 1.7
+
+
+async def test_file_transport_streams_exact_lengths_without_float_drift(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Regression: 11.0 s at 16 kHz in 20 ms frames used to stall on a rounding-empty slice."""
+    from voice_agent_next.audio import write_wav
+
+    src = tmp_path / "in.wav"
+    write_wav(src, synth_speech(11.0, 16_000))
+    transport = FileTransport(src, realtime=False, trailing_silence=0.5, hold=0.0)
+    await transport.start()
+    frames = [f async for f in transport.audio_input()]
+    await transport.aclose()
+    assert all(f for f in frames)  # never an empty frame
+    assert sum(f.samples_per_channel for f in frames) >= 16_000 * 11.5
+    assert sum(f.samples_per_channel for f in frames) < 16_000 * 11.6

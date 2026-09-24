@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 from collections.abc import AsyncIterator
 
@@ -70,41 +71,50 @@ class FileTransport(Transport):
         self.emit("disconnected")
 
     async def audio_input(self) -> AsyncIterator[AudioFrame]:
-        rate = self._audio.sample_rate
+        audio = self._audio
+        rate = audio.sample_rate
+        step = max(1, round(self.frame_duration * rate))  # samples per frame
+        bps = audio.format.bytes_per_sample
         start = now()
-        t = 0.0
+        sent = 0  # samples yielded so far (integer positions: no float drift)
 
-        async def pace(sent: float, realtime: bool) -> None:
-            delay = start + sent - now()
+        async def pace(realtime: bool) -> None:
+            delay = start + sent / rate - now()
             if realtime and delay > 0:
                 await asyncio.sleep(delay)
             else:
                 await asyncio.sleep(0)
 
+        def silence() -> AudioFrame:
+            return AudioFrame(bytes(step * bps), rate, 1, now())
+
         # 1) the recorded user speech, then 2) trailing silence so VAD can end the turn
-        end_of_speech = self._audio.duration
-        while t < end_of_speech + self.trailing_silence and not self._closed.is_set():
-            if t < end_of_speech:
-                frame = self._audio.slice(t, min(t + self.frame_duration, end_of_speech))
-            else:
-                frame = AudioFrame.silence(self.frame_duration, rate)
-            frame.timestamp = now()
+        total = audio.samples_per_channel
+        for pos in range(0, total, step):
+            if self._closed.is_set():
+                return
+            data = audio.data[pos * bps : min(pos + step, total) * bps]
+            frame = AudioFrame(data, rate, 1, now())
             yield frame
-            t += frame.duration
-            await pace(t, self.realtime)
+            sent += frame.samples_per_channel
+            await pace(self.realtime)
+        for _ in range(math.ceil(self.trailing_silence * rate / step)):
+            if self._closed.is_set():
+                return
+            yield silence()
+            sent += step
+            await pace(self.realtime)
         # 3) keep sending silence (always in real time) until the agent has been quiet
         #    for `hold` seconds, so its reply is fully written to the output file
         hold_start = now()
-        start = now() - t  # re-anchor pacing to wall clock
+        start = hold_start - sent / rate  # re-anchor pacing to the wall clock
         while not self._closed.is_set():
             quiet_since = max(hold_start, self._last_write)
             if now() - quiet_since >= self.hold or now() - hold_start >= self.max_wait:
                 break
-            frame = AudioFrame.silence(self.frame_duration, rate)
-            frame.timestamp = now()
-            yield frame
-            t += frame.duration
-            await pace(t, True)
+            yield silence()
+            sent += step
+            await pace(True)
 
     async def write_audio(self, frame: AudioFrame) -> None:
         self._last_write = now()
