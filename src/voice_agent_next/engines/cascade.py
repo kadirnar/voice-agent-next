@@ -799,7 +799,9 @@ class CascadeConnection(EngineConnection):
         status: ResponseStatus = "completed"
         error: str | None = None
         stream: LLMStream | _Prefetch | None = None
-        msg = message or ChatMessage(role="assistant", content=[""], id=new_id("item_"))
+        if message is None:
+            message = ChatMessage(role="assistant", content=[""], id=new_id("item_"))
+        msg = message
         item_id = msg.id
         output.emit(ResponseStarted(response_id=rid))
         try:
