@@ -20,7 +20,16 @@ from typing import Any
 
 import pytest
 
-from voice_agent_next import AudioFrame, ChatContext, create, function_tool
+from voice_agent_next import (
+    Agent,
+    AgentSession,
+    AgentState,
+    AudioFrame,
+    CascadeOptions,
+    ChatContext,
+    create,
+    function_tool,
+)
 from voice_agent_next.chat import AudioContent
 from voice_agent_next.errors import (
     AuthenticationError,
@@ -31,14 +40,17 @@ from voice_agent_next.errors import (
     RateLimitError,
 )
 from voice_agent_next.llm import ChatChunk
-from voice_agent_next.metrics import LLMMetrics
+from voice_agent_next.metrics import LLMMetrics, TurnMetrics
 from voice_agent_next.providers.anthropic import (
     CONTINUE_PLACEHOLDER,
     START_PLACEHOLDER,
     AnthropicLLM,
     AnthropicUsage,
 )
+from voice_agent_next.providers.energy import EnergyVAD
+from voice_agent_next.providers.mock import MockSTT, MockTTS, synth_speech
 from voice_agent_next.registry import get_provider
+from voice_agent_next.transports import LoopbackTransport
 
 anthropic = pytest.importorskip("anthropic")
 # anthropic >= 1.0 is built on httpx2 (the maintained httpx fork); 0.x used httpx.
@@ -894,6 +906,96 @@ async def test_aclose_closes_the_owned_client() -> None:
         assert not owned.client.is_closed()
     assert owned.client.is_closed()
     await owned.aclose()  # idempotent
+
+
+# ------------------------------------------------------------- inside the cascade
+
+
+async def test_cascade_session_greeting_then_tool_round_trip(api: FakeAnthropicAPI) -> None:
+    """A real AgentSession + CascadeEngine turn: greeting, speech, tool call, spoken answer."""
+    looked_up: list[str] = []
+
+    @function_tool
+    async def lookup_weather(city: str) -> str:
+        """Weather lookup."""
+        looked_up.append(city)
+        return f"sunny in {city}"
+
+    api.reply(
+        stream_response(
+            [
+                message_start(),
+                *text_block(0, "Let me check."),
+                *tool_block(1, "toolu_w1", "lookup_weather", '{"city": ', '"Paris"}'),
+                *message_end("tool_use", output_tokens=30),
+            ]
+        ),
+        stream_response(
+            [message_start(), *text_block(0, "It is sunny in Paris."), *message_end("end_turn", 8)]
+        ),
+    )
+    session = AgentSession(
+        stt=MockSTT(transcripts=["weather in paris?"]),
+        llm=make_llm(api),
+        tts=MockTTS(),
+        vad=EnergyVAD(),
+        cascade_options=CascadeOptions(min_endpointing_delay=0.0),
+    )
+    turns: list[TurnMetrics] = []
+    session.on("metrics", lambda m: turns.append(m) if isinstance(m, TurnMetrics) else None)
+    transport = LoopbackTransport()
+
+    async def wait_for(predicate: Callable[[], bool]) -> None:
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+    await session.start(
+        Agent("You are a weather bot.", tools=[lookup_weather], greeting="Welcome."), transport
+    )
+    await asyncio.wait_for(
+        wait_for(
+            lambda: session.agent_state == AgentState.LISTENING and bool(transport.played_log)
+        ),
+        5,
+    )
+    await transport.play_user_audio(synth_speech(0.8, 16_000), realtime=False)
+    await transport.play_user_audio(AudioFrame.silence(0.6, 16_000), realtime=False)
+    await asyncio.wait_for(wait_for(lambda: len(turns) == 1), 5)
+    await session.aclose()
+
+    assert looked_up == ["Paris"]
+    first, second = api.body(0), api.body(1)
+    assert first["system"][0]["text"] == "You are a weather bot."
+    assert [t["name"] for t in first["tools"]] == ["lookup_weather"]
+    assert [(m["role"], m["content"][0]["text"]) for m in first["messages"]] == [
+        ("user", START_PLACEHOLDER),  # the greeting was spoken before any user input
+        ("assistant", "Welcome."),
+        ("user", "weather in paris?"),
+    ]
+    assert second["messages"][-2] == {
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "Let me check."},
+            {
+                "type": "tool_use",
+                "id": "toolu_w1",
+                "name": "lookup_weather",
+                "input": {"city": "Paris"},
+            },
+        ],
+    }
+    assert second["messages"][-1] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_w1",
+                "content": "sunny in Paris",
+                "cache_control": EPHEMERAL,
+            }
+        ],
+    }
+    assert turns[0].tool_calls == 1
 
 
 # --------------------------------------------------------------------- integration
