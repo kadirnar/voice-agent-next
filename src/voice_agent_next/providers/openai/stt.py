@@ -921,23 +921,22 @@ class _TranscriptionStream(STTStream):
         the uncommitted audio. The server clock restarts with the replayed audio."""
         self._needs_replay = False
         self._in_speech = self._awaiting_commit = False
-        pending, self._pending = list(self._pending), deque()
-        resend = [s for s in pending if s.manual and s.kept and not s.done]
-        replayed = sum(s.kept for s in [*resend, self._open]) / (2 * self._oa.sample_rate)
-        self._origin = self._position - replayed
-        for seg in pending:
+        resend: list[_Segment] = []
+        for seg in self._pending:  # the queue keeps its order: a failure here loses nothing
             if seg.item_id is not None:
                 seg.partial = self._partials.pop(seg.item_id, seg.partial)
-            if seg not in resend:
+            if seg.manual and seg.kept and not seg.done:
+                seg.item_id = None  # a new item on the new session
+                seg.event_id = self._next_event_id()
+                resend.append(seg)
+            else:
                 seg.done = True  # keep its place; its partial text is the best we have
-                self._pending.append(seg)
-                continue
-            await self._resend(ws, seg)
-            seg.item_id = None
-            seg.event_id = self._next_event_id()
-            self._pending.append(seg)
-            await self._send(ws, {"event_id": seg.event_id, "type": "input_audio_buffer.commit"})
+        replayed = sum(s.kept for s in [*resend, self._open]) / (2 * self._oa.sample_rate)
+        self._origin = self._position - replayed
         self._drain()
+        for seg in resend:
+            await self._resend(ws, seg)
+            await self._send(ws, {"event_id": seg.event_id, "type": "input_audio_buffer.commit"})
         await self._resend(ws, self._open)
 
     async def _resend(self, ws: ClientConnection, seg: _Segment) -> None:
@@ -1121,10 +1120,14 @@ class _TranscriptionStream(STTStream):
             return
         err = ev.get("error")
         message = err.get("message") if isinstance(err, Mapping) else err
+        seg = self._find(item_id)
+        if seg is None:  # a turn discarded before its commit: retract its partial text
+            self._partials.pop(item_id, None)
+            logger.debug("%s: uncommitted item %s discarded: %s", self._oa.provider, item_id, err)
+            return
         logger.warning(
             "%s: transcription of %s failed: %s", self._oa.provider, item_id, message or err
         )
-        seg = self._find(item_id) or self._claim(item_id)
         seg.done = True  # the final carries the partial text
         self._drain()
 
@@ -1158,8 +1161,8 @@ class _TranscriptionStream(STTStream):
             text.strip(),
             language=seg.language or self._hint,
             confidence=_confidence(seg.logprobs),
-            start_time=seg.start,
-            end_time=seg.end,
+            start_time=round(seg.start, 6),
+            end_time=None if seg.end is None else round(seg.end, 6),
         )
         self._emit(STTEvent(STTEventType.FINAL_TRANSCRIPT, transcript, item_id))
         if not seg.manual and self._oa.semantic_vad:

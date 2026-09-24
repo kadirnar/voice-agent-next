@@ -385,7 +385,7 @@ async def test_transcribe_with_a_realtime_only_model_uses_a_session() -> None:
 # ---------------------------------------------------------------- errors / reconnect
 async def test_a_dropped_connection_resends_the_pending_commit() -> None:
     async with FakeTranscriptionServer(
-        transcripts=["Lost then found."], drop_after_commits=1
+        transcripts=["Lost then found."], drop_on_commits=[(0, 1)]
     ) as server:
         stt = stt_for(server, model="gpt-4o-transcribe", reconnect_backoff=0.05)
         stream = stt.stream()
@@ -398,6 +398,44 @@ async def test_a_dropped_connection_resends_the_pending_commit() -> None:
     assert len(server.events("session.update", connection=1)) == 1  # configured again
     assert server.audio_bytes(connection=1) == round(0.4 * BYTES_PER_SECOND)  # re-sent
     assert len(server.events("input_audio_buffer.commit", connection=1)) == 1
+
+
+async def test_a_drop_during_the_replay_loses_nothing() -> None:
+    def script(seconds: float) -> str:
+        return "Alpha." if seconds < 0.4 else "Beta."
+
+    async with FakeTranscriptionServer(
+        transcripts=script, delays=[1.0], drop_on_commits=[(0, 2), (1, 1)]
+    ) as server:
+        stt = stt_for(server, model="gpt-4o-transcribe", reconnect_backoff=0.05)
+        stream = stt.stream()
+        stream.push_audio(speech(0.3))
+        stream.flush()  # committed on the first session, transcribed slowly
+        stream.push_audio(speech(0.5, offset=7200))
+        stream.flush()  # the first session drops here, the second one while replaying
+        events = await events_until(
+            stream, lambda ev: is_final(ev) and ev.text == "Beta.", timeout=10
+        )
+        await stream.aclose()
+    assert [ev.text for ev in events if is_final(ev)] == ["Alpha.", "Beta."]
+    assert len(server.handshakes) == 3
+    assert server.audio_bytes(connection=2) == round(0.8 * BYTES_PER_SECOND)
+    assert len(server.events("input_audio_buffer.commit", connection=2)) == 2
+
+
+async def test_a_failure_for_an_uncommitted_item_is_no_final() -> None:
+    async with FakeTranscriptionServer(transcripts=["Kept."]) as server:
+        stream = stt_for(server, model="gpt-4o-transcribe").stream()
+        await wait_until(lambda: bool(server.events("session.update")))
+        await server.push({"type": "conversation.item.input_audio_transcription.failed",
+                           "event_id": "e1", "item_id": "item_discarded", "content_index": 0,
+                           "error": {"type": "transcription_error", "code": "discarded",
+                                     "message": "turn discarded before commit"}})  # fmt: skip
+        stream.push_audio(speech(0.3))
+        stream.flush()
+        events = await events_until(stream, is_final)
+        await stream.aclose()
+    assert [ev.text for ev in events if is_final(ev)] == ["Kept."]
 
 
 async def test_an_expired_session_reconnects_and_keeps_the_open_audio() -> None:

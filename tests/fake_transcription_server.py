@@ -17,8 +17,9 @@ of a ``type: "transcription"`` session:
 * with ``turn_detection`` configured, an energy VAD emits ``speech_started`` /
   ``speech_stopped`` and commits by itself.
 
-Transcripts are scripted per committed item (``transcripts``); ``delays`` postpones the
-transcription of item *n* (to reorder completions).
+Transcripts are scripted per committed item (``transcripts``, or a function of the item's
+audio duration); ``delays`` postpones the transcription of item *n* (to reorder
+completions); ``drop_on_commits`` aborts chosen connections at a chosen commit.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ import contextlib
 import json
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any
@@ -69,34 +70,37 @@ class FakeTranscriptionServer:
     """Scripted transcription server. Use as ``async with FakeTranscriptionServer() as s``.
 
     Args:
-        transcripts: transcript of each committed item, in commit order (then ``"hello"``).
+        transcripts: transcript of each committed item, in commit order (then ``"hello"``),
+            or a function of the item's audio duration in seconds (evaluated at the commit
+            for non-streaming models).
         delays: seconds to wait before transcribing item *n* (default 0).
         fail_items: indexes of committed items whose transcription fails.
         api_key: reject handshakes without this key (401).
         reject_status: reject every handshake with this HTTP status.
         reject_session_update: error object sent instead of ``session.updated``.
-        drop_after_commits: abort the connection right after receiving this many commits
-            (before transcribing them), once.
+        drop_on_commits: ``(connection index, commit number)`` pairs: abort that connection
+            when it receives that commit (1-based), before transcribing it.
     """
 
     def __init__(
         self,
         *,
-        transcripts: Sequence[str] = (),
+        transcripts: Sequence[str] | Callable[[float], str] = (),
         delays: Sequence[float] = (),
         fail_items: Sequence[int] = (),
         api_key: str | None = None,
         reject_status: int | None = None,
         reject_session_update: dict[str, Any] | None = None,
-        drop_after_commits: int | None = None,
+        drop_on_commits: Sequence[tuple[int, int]] = (),
     ) -> None:
-        self.transcripts = list(transcripts)
+        self.script = transcripts if callable(transcripts) else None
+        self.transcripts = [] if callable(transcripts) else list(transcripts)
         self.delays = list(delays)
         self.fail_items = set(fail_items)
         self.api_key = api_key
         self.reject_status = reject_status
         self.reject_session_update = reject_session_update
-        self.drop_after_commits = drop_after_commits
+        self.drop_on_commits = set(drop_on_commits)
         self.handshakes: list[Handshake] = []
         self.received: list[dict[str, Any]] = []
         """Client events, per connection order (append payloads replaced by byte counts)."""
@@ -144,7 +148,9 @@ class FakeTranscriptionServer:
     def audio_bytes(self, connection: int | None = None) -> int:
         return sum(e["audio"] for e in self.events("input_audio_buffer.append", connection))
 
-    def next_transcript(self) -> str:
+    def next_transcript(self, seconds: float) -> str:
+        if self.script is not None:
+            return self.script(seconds)
         return self.transcripts.pop(0) if self.transcripts else "hello"
 
     async def push(self, event: dict[str, Any]) -> None:
@@ -328,7 +334,8 @@ class _Connection:
 
     def current_words(self) -> list[str]:
         if self.words is None:
-            self.words = re.findall(r"\S+\s*", self.server.next_transcript())
+            seconds = len(self.buffer) / (2 * RATE)
+            self.words = re.findall(r"\S+\s*", self.server.next_transcript(seconds))
         return self.words
 
     async def stream_words(self) -> None:
@@ -353,8 +360,7 @@ class _Connection:
             return
         self.commits += 1
         server = self.server
-        if server.drop_after_commits is not None and self.commits >= server.drop_after_commits:
-            server.drop_after_commits = None
+        if (self.index, self.commits) in server.drop_on_commits:
             self.ws.transport.abort()
             return
         await self.commit()
