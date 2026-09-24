@@ -121,6 +121,7 @@ nav:
       - Interruptions: concepts/interruptions.md
       - Preemptive generation: concepts/preemptive-generation.md
       - Tools: concepts/tools.md
+      - Handoffs and flows: concepts/handoffs.md
       - Failover: concepts/failover.md
       - Observability: concepts/observability.md
       - Audio processing: audio-processing.md
