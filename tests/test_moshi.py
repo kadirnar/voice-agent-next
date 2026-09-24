@@ -328,7 +328,9 @@ async def test_report_overlap_reports_speech_over_the_agent(fake: Callable[..., 
 
 
 async def test_cancel_mutes_the_agent_until_its_next_pause(fake: Callable[..., Any]) -> None:
-    server = await fake(greeting=" ".join(["word"] * 12), replies=["Second reply here"])
+    server = await fake(
+        greeting=" ".join(["word"] * 12), replies=["Second reply here"], words_per_second=8
+    )
     conn = await connect(MoshiEngine(url=server.url))
     events = Events(conn)
     await wait_for(lambda: len(events.of(ResponseText)) >= 2)
