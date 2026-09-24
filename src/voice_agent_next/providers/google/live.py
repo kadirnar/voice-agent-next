@@ -81,7 +81,7 @@ from ...events import (
 )
 from ...metrics import EngineMetrics
 from ...registry import register_provider
-from ...tools import FunctionTool
+from ...tools import FunctionTool, ToolScheduling
 from ...utils.aio import BackgroundTasks, cancel_and_wait
 from ...utils.clock import now
 from ...utils.ids import new_id
@@ -1195,6 +1195,15 @@ class GeminiLiveConnection(EngineConnection):
         return None  # no truncation: the session estimates what was heard
 
     async def send_tool_output(self, output: FunctionCallOutput, *, respond: bool = True) -> None:
+        await self._send_tool_response(output, "WHEN_IDLE" if respond else "SILENT")
+
+    async def send_async_tool_output(
+        self, output: FunctionCallOutput, *, scheduling: ToolScheduling = "when_idle"
+    ) -> None:
+        await self._send_tool_response(output, scheduling.upper())
+
+    async def _send_tool_response(self, output: FunctionCallOutput, scheduling: str) -> None:
+        respond = scheduling != "SILENT"
         self.chat_ctx.append(output)
         if output.call_id in self._stale_calls:
             logger.warning(
@@ -1210,7 +1219,7 @@ class GeminiLiveConnection(EngineConnection):
             "response": {key: _tool_result(output.output)},
         }
         if self._e.tool_behavior == "non_blocking":
-            response["scheduling"] = "WHEN_IDLE" if respond else "SILENT"
+            response["scheduling"] = scheduling
         if respond:
             self._requested_at = now()
         await self._send({"toolResponse": {"functionResponses": [response]}}, kind="tool")

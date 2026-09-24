@@ -35,6 +35,7 @@ from ..errors import (
     VoiceAgentError,
 )
 from ..hardware import ctranslate2_compute_type, select_ctranslate2_backend
+from ..models import ModelFile, register_model
 from ..registry import register_provider
 from ..stt import STT, STTCapabilities, Transcript, WordTiming
 from ..utils.clock import now
@@ -386,3 +387,44 @@ def _map_error(exc: Exception, action: str) -> VoiceAgentError:
     ):
         return ProviderConnectionError(message, provider=_PROVIDER, status_code=status)
     return ProviderError(message, provider=_PROVIDER, status_code=status)
+
+
+# faster_whisper.utils._MODELS: model name -> Hugging Face repository (fetched at "main"
+# into the HF cache by faster_whisper.download_model with these allow_patterns).
+_HF_REPOS = {
+    "large-v3-turbo": ("mobiuslabsgmbh/faster-whisper-large-v3-turbo", 1_621_665_983),
+    "large-v3": ("Systran/faster-whisper-large-v3", 3_090_835_702),
+    "distil-large-v3.5": ("distil-whisper/distil-large-v3.5-ct2", 1_516_479_656),
+    "medium": ("Systran/faster-whisper-medium", 1_530_571_735),
+    "small": ("Systran/faster-whisper-small", 486_212_372),
+    "small.en": ("Systran/faster-whisper-small.en", 486_098_798),
+    "base": ("Systran/faster-whisper-base", 147_882_941),
+    "base.en": ("Systran/faster-whisper-base.en", 147_769_510),
+    "tiny": ("Systran/faster-whisper-tiny", 78_203_619),
+    "tiny.en": ("Systran/faster-whisper-tiny.en", 78_090_594),
+}
+_ALLOW_PATTERNS = (
+    "config.json",
+    "preprocessor_config.json",
+    "model.bin",
+    "tokenizer.json",
+    "vocabulary.*",
+)
+for _name, (_repo, _size) in _HF_REPOS.items():
+    register_model(
+        _PROVIDER,
+        _name,
+        kind="stt",
+        files=[
+            ModelFile.from_hf_repo(
+                _repo,
+                patterns=_ALLOW_PATTERNS,
+                required=("model.bin", "config.json", "tokenizer.json"),
+                size=_size,
+            )
+        ],
+        license="MIT",
+        languages="en" if _name.endswith(".en") or _name.startswith("distil") else "99 languages",
+        description=f"Whisper {_name} (CTranslate2) from {_repo}",
+        aliases=("turbo",) if _name == "large-v3-turbo" else (),
+    )
