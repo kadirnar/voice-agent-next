@@ -33,7 +33,7 @@ the input into utterances at VAD end-of-speech and transcribes each one (one
 ```yaml
 # agent.yaml
 stt: {provider: faster_whisper/small, language: en}
-vad: energy          # use a neural VAD (Silero) for real microphones
+vad: silero          # pip install 'voice-agent-next[silero]'
 llm: ...
 tts: ...
 ```
@@ -195,7 +195,7 @@ A failed load is retried on the next call.
 * No partial transcripts: the final transcript arrives only after the VAD reports the end of
   speech.
 * Whisper can hallucinate short phrases ("Thank you.") on noise that the VAD let through.
-  Use a neural VAD, and tune `transcribe_options` (`no_speech_threshold`,
+  Use a neural VAD such as `silero`, and tune `transcribe_options` (`no_speech_threshold`,
   `log_prob_threshold`) or enable `vad_filter` if it happens.
 * A transcription that is already running finishes in its worker thread even when the
   turn is cancelled (its result is discarded).
