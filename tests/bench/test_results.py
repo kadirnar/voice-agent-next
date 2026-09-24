@@ -106,6 +106,23 @@ def test_summary_of_latency_items() -> None:
     assert rates["dead_air_rate"] == pytest.approx(2 / 4)  # the missed turn + 2450 ms
     assert counts["turns"] == 6 and counts["turns_measured"] == 4 and counts["warmup_turns"] == 2
     assert extra["spans_p50_ms"]["eou_delay"] == pytest.approx(400.0)
+    assert "cutoff_rate" not in rates and "false_commits" not in counts  # no fragments
+
+
+def test_cutoff_rate_counts_answered_mid_turn_fragments() -> None:
+    def item(turn: int, *, expect_reply: bool = True, cut_off: bool = False) -> LatencyItem:
+        return LatencyItem(
+            session=0, turn=turn, stimulus=f"t{turn}", expect_reply=expect_reply,
+            cut_off=cut_off, user_speech_start_s=turn, user_speech_end_s=turn + 0.5,
+            v2v_ms=500.0 if expect_reply else None,
+        )  # fmt: skip
+
+    items = [item(0), item(1, expect_reply=False, cut_off=True), item(2),
+             item(3, expect_reply=False), item(4, expect_reply=False), item(5)]  # fmt: skip
+    _, rates, counts, _ = summarize_latency(items, [{"false_commits": 2}], n_resamples=50)
+    assert rates["cutoff_rate"] == pytest.approx(1 / 3)
+    assert counts["fragments"] == 3 and counts["cut_offs"] == 1
+    assert counts["false_commits"] == 2
 
 
 def test_run_directory_round_trip(tmp_path: Path) -> None:
