@@ -525,6 +525,26 @@ def test_openai_requires_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
     assert llm.capabilities.image_input and llm.capabilities.tool_calling
 
 
+async def test_idle_connections_are_kept_between_turns(monkeypatch: pytest.MonkeyPatch) -> None:
+    import openai
+
+    created: list[dict[str, Any]] = []
+    real = openai.DefaultAsyncHttpxClient
+
+    def spy(**kwargs: Any) -> Any:
+        created.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", spy)
+    llm = OpenAILLM(api_key="k", keepalive_expiry=90.0)
+    [kwargs] = created
+    limits = kwargs["limits"]
+    assert limits.keepalive_expiry == 90.0  # httpx's default of 5 s drops it between turns
+    assert limits.max_connections == openai.DEFAULT_CONNECTION_LIMITS.max_connections
+    await llm.aclose()
+    assert llm._client.is_closed()
+
+
 def test_openai_key_is_never_sent_to_another_server(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
     llm = OpenAILLM(base_url="https://llm.example.com/v1", model="m")

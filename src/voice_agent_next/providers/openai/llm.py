@@ -126,12 +126,16 @@ class OpenAILLM(LLM):
             wait for the next streamed chunk).
         max_retries: SDK retries for connection errors and 408/409/429/5xx responses.
             Retries happen before the first token only.
+        keepalive_expiry: seconds an idle connection stays in the pool. Turns are often
+            more than httpx's default 5 s apart, and every new connection costs a TLS
+            handshake on the first token (and would make :meth:`warmup` pointless).
         client: a pre-built ``openai.AsyncOpenAI``-compatible client (for example
             ``openai.AsyncAzureOpenAI``). ``api_key``, ``base_url``, ``headers``,
-            ``timeout``, ``max_retries`` and ``http_client`` are then ignored, and the
-            client is not closed by :meth:`aclose`.
+            ``timeout``, ``max_retries``, ``keepalive_expiry`` and ``http_client`` are
+            then ignored, and the client is not closed by :meth:`aclose`.
         http_client: an ``httpx.AsyncClient`` for the SDK (proxies, custom transports,
-            tests). It is not closed by :meth:`aclose`.
+            tests). ``keepalive_expiry`` is then ignored, and it is not closed by
+            :meth:`aclose`.
     """
 
     provider = "openai"
@@ -169,6 +173,7 @@ class OpenAILLM(LLM):
         strip_thinking: bool = True,
         timeout: float = 60.0,
         max_retries: int = 1,
+        keepalive_expiry: float = 120.0,
         client: Any = None,
         http_client: Any = None,
     ) -> None:
@@ -215,6 +220,17 @@ class OpenAILLM(LLM):
                     f"{' or '.join(self.API_KEY_ENV)}"
                 )
             key = _PLACEHOLDER_API_KEY
+        self._owns_client = http_client is None
+        if http_client is None:
+            # the SDK's own defaults, with a longer keep-alive (Limits comes from the
+            # HTTP library the installed SDK uses: httpx or httpx2)
+            base = self._openai.DEFAULT_CONNECTION_LIMITS
+            limits = type(base)(
+                max_connections=base.max_connections,
+                max_keepalive_connections=base.max_keepalive_connections,
+                keepalive_expiry=keepalive_expiry,
+            )
+            http_client = self._openai.DefaultAsyncHttpxClient(limits=limits)
         self._client = self._openai.AsyncOpenAI(
             api_key=key,
             base_url=self.base_url,
@@ -223,7 +239,6 @@ class OpenAILLM(LLM):
             default_headers=dict(headers) if headers else None,
             http_client=http_client,
         )
-        self._owns_client = http_client is None
 
     # ----------------------------------------------------------- configuration hooks
     def _base_url_from_env(self) -> str | None:
