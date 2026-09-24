@@ -166,6 +166,8 @@ class TelephonyTransport(WebSocketServerTransport):
         self._unmarked = 0
         self._anchor_pos = 0
         self._anchor_t = 0.0
+        self._tail = b""
+        self._tail_flush: asyncio.TimerHandle | None = None
 
     # ------------------------------------------------------------------ properties
     @property
@@ -204,7 +206,9 @@ class TelephonyTransport(WebSocketServerTransport):
     async def aclose(self) -> None:
         if self._closed:
             return
-        if self.hangup_on_close and self._ready and not self.stopped:
+        self._cancel_tail_flush()
+        if self.hangup_on_close and self.connected and not self.stopped:
+            # (a provider that closed the socket itself ended the stream/call already)
             with contextlib.suppress(Exception):
                 await self.hangup()
         await super().aclose()
@@ -247,37 +251,34 @@ class TelephonyTransport(WebSocketServerTransport):
 
     # ------------------------------------------------------------------ audio API
     async def write_audio(self, frame: AudioFrame) -> None:
-        """Encode agent audio and queue it in ``frame_duration`` messages, plus a mark."""
+        """Encode agent audio and queue it in ``frame_duration`` messages, plus marks.
+
+        Audio is sent in whole frames; a partial tail waits for the next write and is
+        flushed (padded with silence for Vonage) shortly before playback would run dry.
+        """
         if not self.connected or self._closed:
             return
         out = self._out_resampler.push(frame)
         if not out:
             return
-        rate = out.sample_rate
-        step = max(1, round(self.frame_duration * rate)) * 2
-        data = out.data
-        if self.serializer.fixed_frames and len(data) % step:
-            data += bytes(step - len(data) % step)  # whole frames only: pad with silence
-        t = now()
-        if self._played(t) >= self._out_samples:  # idle: playback (re)starts now
-            self._anchor_pos, self._anchor_t = self._out_samples, t
-        for i in range(0, len(data), step):
-            piece = data[i : i + step]
-            self._outbox.send_nowait(
-                _Outgoing(self.serializer.encode_audio(piece), len(piece) // 2)
-            )
-        samples = len(data) // 2
-        self._out_samples += samples
-        self._unmarked += samples
-        self._play_end = max(self._play_end, t) + samples / rate
-        if self._unmarked >= self.mark_interval * rate:
-            self._send_mark()
+        data = self._tail + out.data if self._tail else out.data
+        step = self._frame_bytes
+        whole = len(data) - len(data) % step
+        self._tail = data[whole:]
+        self._cancel_tail_flush()
+        if whole:
+            self._enqueue_audio(data[:whole])
+        if self._tail:
+            delay = max(self.frame_duration, self._play_end - now() - self.frame_duration)
+            self._tail_flush = asyncio.get_running_loop().call_later(delay, self._flush_tail)
 
     async def clear_audio(self) -> None:
         """Drop queued agent audio and send the provider's clear message."""
         if not self._ready or self._closed:
             return
         self._drop_queued_audio()
+        self._cancel_tail_flush()
+        self._tail = b""
         # whatever the provider still buffered is discarded too: nothing is left to play
         # (the marks it flushes back carry names we no longer wait for)
         self._pending_marks.clear()
@@ -293,6 +294,44 @@ class TelephonyTransport(WebSocketServerTransport):
         if not self._ready:
             return 0.0
         return max(0.0, self._out_samples - self._played(now())) / self.output_format.sample_rate
+
+    # -------------------------------------------------------------- playout state
+    @property
+    def _frame_bytes(self) -> int:
+        return max(1, round(self.frame_duration * self.output_format.sample_rate)) * 2
+
+    def _enqueue_audio(self, data: bytes) -> None:
+        rate = self.output_format.sample_rate
+        t = now()
+        if self._played(t) >= self._out_samples:  # idle: playback (re)starts now
+            self._anchor_pos, self._anchor_t = self._out_samples, t
+        step = self._frame_bytes
+        for i in range(0, len(data), step):
+            piece = data[i : i + step]
+            payload = self.serializer.encode_audio(piece)
+            self._outbox.send_nowait(_Outgoing(payload, len(piece) // 2))
+        samples = len(data) // 2
+        self._out_samples += samples
+        self._unmarked += samples
+        self._play_end = max(self._play_end, t) + samples / rate
+        if self._unmarked >= self.mark_interval * rate:
+            self._send_mark()
+
+    def _flush_tail(self) -> None:
+        self._tail_flush = None
+        tail, self._tail = self._tail, b""
+        if not tail or not self.connected or self._closed:
+            return
+        if self.serializer.fixed_frames:
+            tail += bytes(self._frame_bytes - len(tail))  # whole frames only: pad
+        self._enqueue_audio(tail)
+        if self._unmarked:
+            self._send_mark()  # most likely the end of a response: mark it
+
+    def _cancel_tail_flush(self) -> None:
+        if self._tail_flush is not None:
+            self._tail_flush.cancel()
+            self._tail_flush = None
 
     # --------------------------------------------------------------- messages API
     def send_message_nowait(self, message: dict[str, Any]) -> None:
