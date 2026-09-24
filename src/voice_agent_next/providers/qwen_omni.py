@@ -68,7 +68,7 @@ class QwenOmniRealtimeEngine(OpenAIRealtimeEngine):
                     "qwen_omni needs workspace_id=... or DASHSCOPE_WORKSPACE_ID "
                     "(or base_url=wss://{WorkspaceId}.{region}.maas.aliyuncs.com/api-ws/v1)"
                 )
-            if not _HOST_PART.match(workspace) or not _HOST_PART.match(region):
+            if not _HOST_PART.fullmatch(workspace) or not _HOST_PART.fullmatch(region):
                 raise ConfigurationError(
                     f"invalid DashScope workspace/region: {workspace!r}, {region!r}"
                 )

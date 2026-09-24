@@ -5,9 +5,10 @@
 ``api-version``). The model is your *deployment name* (default:
 ``AZURE_OPENAI_DEPLOYMENT_NAME``, then ``gpt-realtime-2.1``).
 
-Authentication: ``AZURE_OPENAI_API_KEY`` (sent as the ``api-key`` header) or a Microsoft
-Entra ID token (``azure_ad_token=`` / ``AZURE_OPENAI_AD_TOKEN``, sent as
-``Authorization: Bearer``). See ``docs/providers/openai-realtime.md``.
+Authentication: a resource key (``api_key=`` / ``AZURE_OPENAI_API_KEY``, sent as the
+``api-key`` header) or a Microsoft Entra ID token (``azure_ad_token=`` /
+``AZURE_OPENAI_AD_TOKEN``, sent as ``Authorization: Bearer``). Explicit arguments win over
+the environment. See ``docs/providers/openai-realtime.md``.
 """
 
 from __future__ import annotations
@@ -26,15 +27,18 @@ DEFAULT_DEPLOYMENT = "gpt-realtime-2.1"
 
 
 def azure_realtime_base_url(endpoint: str) -> str:
-    """``https://<resource>.openai.azure.com`` -> ``wss://<resource>.openai.azure.com/openai/v1``."""
+    """``https://<resource>.openai.azure.com`` -> ``https://<resource>.openai.azure.com/openai/v1``.
+
+    The scheme is converted to ``wss://`` by
+    :func:`~voice_agent_next.providers.openai.realtime.realtime_url`.
+    """
     parts = urlsplit(endpoint.strip())
     if not parts.netloc:
         raise ConfigurationError(f"invalid Azure OpenAI endpoint {endpoint!r}")
-    scheme = {"https": "wss", "http": "ws"}.get(parts.scheme, parts.scheme)
     path = parts.path.rstrip("/")
     if not path.endswith("/openai/v1"):
-        path = (path.removesuffix("/openai") or "") + "/openai/v1"
-    return urlunsplit((scheme, parts.netloc, path, parts.query, ""))
+        path = path.removesuffix("/openai") + "/openai/v1"
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
 
 
 @register_provider(
@@ -51,7 +55,8 @@ class AzureOpenAIRealtimeEngine(OpenAIRealtimeEngine):
         model: deployment name (alias: ``deployment``).
         endpoint: ``https://<resource>.openai.azure.com`` (default: ``AZURE_OPENAI_ENDPOINT``).
         api_key: resource key (default: ``AZURE_OPENAI_API_KEY``).
-        azure_ad_token: Microsoft Entra ID bearer token (default: ``AZURE_OPENAI_AD_TOKEN``).
+        azure_ad_token: Microsoft Entra ID bearer token (default: ``AZURE_OPENAI_AD_TOKEN``,
+            used when no resource key is configured).
         **kwargs: any :class:`~voice_agent_next.providers.openai.realtime.OpenAIRealtimeEngine`
             option.
     """
@@ -79,10 +84,17 @@ class AzureOpenAIRealtimeEngine(OpenAIRealtimeEngine):
                 )
             base_url = azure_realtime_base_url(endpoint)
         request_headers = dict(headers or {})
-        api_key = api_key or os.environ.get("AZURE_OPENAI_API_KEY")
-        token = azure_ad_token or os.environ.get("AZURE_OPENAI_AD_TOKEN")
-        if not api_key and token:
+        # precedence: api_key= > azure_ad_token= > AZURE_OPENAI_API_KEY > AZURE_OPENAI_AD_TOKEN
+        token = None
+        if not api_key:
+            token = azure_ad_token or (
+                None
+                if os.environ.get("AZURE_OPENAI_API_KEY")
+                else os.environ.get("AZURE_OPENAI_AD_TOKEN")
+            )
+        if token:
             request_headers.setdefault("Authorization", f"Bearer {token}")
+            api_key = ""  # authenticated by the token: never fall back to the key variable
         super().__init__(
             model=deployment
             or model

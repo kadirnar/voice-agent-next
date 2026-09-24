@@ -139,6 +139,8 @@ _MAX_TRACKED_ITEMS: Final = 256
 _RECONNECT_WINDOW: Final = 60.0
 _CANCEL_TIMEOUT: Final = 2.0
 _FINISH_TIMEOUT: Final = 10.0
+_TRIGGER_TTL: Final = 30.0
+"""A response request older than this that never started a response is forgotten."""
 _UNSET: Final[Any] = object()
 
 
@@ -313,7 +315,7 @@ def realtime_url(
     path = parts.path.rstrip("/")
     if not path.endswith("/realtime"):
         path += "/realtime"
-    params = dict(parse_qsl(parts.query))
+    params = dict(parse_qsl(parts.query, keep_blank_values=True))
     if model:
         params["model"] = model
     params.update(query or {})
@@ -417,6 +419,12 @@ def _server_error(err: Mapping[str, Any], provider: str, context: str | None) ->
     if etype in ("server_error", "internal_error"):
         return ProviderError(msg, provider=provider, retryable=True)
     return ProviderError(msg, provider=provider)
+
+
+def _bound(items: dict[str, Any], limit: int = _MAX_TRACKED_ITEMS) -> None:
+    """Drop the oldest entries (dicts keep insertion order) of a per-item map."""
+    while len(items) > limit:
+        del items[next(iter(items))]
 
 
 def _close_reason(exc: ConnectionClosed) -> str:
@@ -582,8 +590,11 @@ class OpenAIRealtimeEngine(S2SEngine):
             input_sample_rate=input_sample_rate or prof.input_sample_rate,
             output_sample_rate=output_sample_rate or prof.output_sample_rate,
         )
-        self.api_key = api_key or next(
-            (v for v in (os.environ.get(e) for e in prof.api_key_env) if v), None
+        # api_key="" means "no key" (e.g. Azure Entra tokens): no environment fallback
+        self.api_key = (
+            api_key
+            if api_key is not None
+            else next((v for v in (os.environ.get(e) for e in prof.api_key_env) if v), None)
         )
         self.headers: dict[str, str] = dict(headers or {})
         auth_names = {"authorization", prof.auth_header.lower()}
@@ -692,6 +703,8 @@ class OpenAIRealtimeConnection(EngineConnection):
         self._finished: deque[str] = deque(maxlen=64)
         self._active: str | None = None
         self._pending_trigger: float | None = None
+        """When the next ``response.created`` was requested (commit / ``response.create``)."""
+        self._request_event: str | None = None
         self._restore_instructions = False
         self._audio_items: OrderedDict[str, _AudioItem] = OrderedDict()
         self._transcripts: dict[str, str] = {}
@@ -747,10 +760,11 @@ class OpenAIRealtimeConnection(EngineConnection):
         if self.closed:
             return
         self._closing = True
-        await self._tasks.cancel_all()
-        # stop the supervisor first so that no reconnect can open a new socket behind us
+        # stop the supervisor first: it can neither reconnect behind us nor dispatch events
+        # that spawn new background tasks after they were cancelled
         if self._supervisor is not None and self._supervisor is not asyncio.current_task():
             await cancel_and_wait(self._supervisor)
+        await self._tasks.cancel_all()
         ws, self._ws = self._ws, None
         if ws is not None:
             with contextlib.suppress(Exception):
@@ -883,24 +897,27 @@ class OpenAIRealtimeConnection(EngineConnection):
         self._transcripts.clear()
         self._call_names.clear()
         self._restore_instructions = False
-        self._pending_trigger = None
+        self._pending_trigger = self._request_event = None
         if self._expiry_task is not None:
             self._expiry_task.cancel()
             self._expiry_task = None
 
     # --------------------------------------------------------------------- sending
+    def _next_event_id(self, etype: str) -> str:
+        self._event_seq += 1
+        event_id = f"evt_{self._event_seq:06d}"
+        self._sent_types[event_id] = etype  # to name the request an error refers to
+        while len(self._sent_types) > _MAX_TRACKED_ITEMS:
+            self._sent_types.popitem(last=False)
+        return event_id
+
     async def _send(self, event: dict[str, Any]) -> bool:
         ws = self._ws
         if ws is None or self._reconnecting or self._closing:
             return False
         etype = event["type"]
-        if etype != "input_audio_buffer.append":
-            self._event_seq += 1
-            event_id = f"evt_{self._event_seq:06d}"
-            event = {"event_id": event_id, **event}
-            self._sent_types[event_id] = etype
-            while len(self._sent_types) > _MAX_TRACKED_ITEMS:
-                self._sent_types.popitem(last=False)
+        if etype != "input_audio_buffer.append" and "event_id" not in event:
+            event = {"event_id": self._next_event_id(etype), **event}
         try:
             await ws.send(json.dumps(event, separators=(",", ":"), ensure_ascii=False))
         except ConnectionClosed:
@@ -1055,18 +1072,15 @@ class OpenAIRealtimeConnection(EngineConnection):
 
     async def say(self, text: str) -> None:
         if self._profile.say_mode == "force_message":
+            trigger = now()
             await self._cancel_active_and_wait()
-            self._pending_trigger = now()
-            await self._send(
-                {
-                    "type": "conversation.item.create",
-                    "item": {
-                        "type": "force_message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": text}],
-                    },
-                }
-            )
+            item = {
+                "type": "force_message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            }
+            event = {"type": "conversation.item.create", "item": item}
+            await self._request_response(event, trigger)
             return
         await self._create_response(
             VERBATIM_INSTRUCTIONS.format(text=text), isolated=self._profile.isolated_say
@@ -1075,6 +1089,7 @@ class OpenAIRealtimeConnection(EngineConnection):
     async def _create_response(
         self, instructions: str | None = None, *, isolated: bool = False
     ) -> None:
+        trigger = now()  # the caller's view: waiting for a cancellation counts toward the TTFB
         await self._cancel_active_and_wait()
         body: dict[str, Any] = {}
         if instructions:
@@ -1086,8 +1101,19 @@ class OpenAIRealtimeConnection(EngineConnection):
                 self._restore_instructions = True
         if isolated:
             body["input"] = []
-        self._pending_trigger = now()
-        await self._send({"type": "response.create", **({"response": body} if body else {})})
+        event: dict[str, Any] = {"type": "response.create"}
+        if body:
+            event["response"] = body
+        await self._request_response(event, trigger)
+
+    async def _request_response(self, event: dict[str, Any], trigger: float) -> None:
+        """Send an event that makes the server start a response, timed from ``trigger``."""
+        event_id = self._next_event_id(event["type"])
+        self._request_event = event_id
+        self._pending_trigger = trigger
+        if not await self._send({"event_id": event_id, **event}):
+            self._request_event = self._pending_trigger = None
+            self._restore_instructions = False  # a reconnect re-sends the full configuration
 
     async def cancel_response(self) -> None:
         if self._active is not None and self._profile.supports_cancel:
@@ -1226,6 +1252,12 @@ class OpenAIRealtimeConnection(EngineConnection):
         code = err.get("code")
         source = self._sent_types.get(str(err.get("event_id") or ""))
         provider = self.engine.provider
+        if err.get("event_id") and err.get("event_id") == self._request_event:
+            # our response request was rejected: nothing will consume its trigger or patch
+            self._request_event = None
+            self._pending_trigger = None
+            if self._restore_instructions:
+                self._restore_session_instructions()
         if code in _IGNORED_ERROR_CODES:
             logger.debug("%s: ignoring %s (%s)", provider, code, err.get("message"))
             return
@@ -1238,8 +1270,6 @@ class OpenAIRealtimeConnection(EngineConnection):
             if ws is not None:
                 self._tasks.spawn(ws.close())
             return
-        if source == "response.create" and self._restore_instructions:
-            self._restore_session_instructions()
         exc = _server_error(err, provider, source)
         fatal = isinstance(exc, AuthenticationError)
         if fatal:
@@ -1275,7 +1305,7 @@ class OpenAIRealtimeConnection(EngineConnection):
     def _on_committed(self, ev: dict[str, Any]) -> None:
         item_id = ev.get("item_id") or new_id("item_")
         td = self.turn_detection
-        if self._pending_trigger is None and td is not None and td.get("create_response", True):
+        if not self._trigger_pending() and td is not None and td.get("create_response", True):
             self._pending_trigger = now()  # the server responds to this commit by itself
         self._emit(InputCommitted(item_id=item_id))
 
@@ -1296,6 +1326,7 @@ class OpenAIRealtimeConnection(EngineConnection):
 
     def _partial_transcript(self, item_id: str, text: str, language: Any) -> None:
         self._transcripts[item_id] = text
+        _bound(self._transcripts)
         if text.strip():
             self._emit(
                 InputTranscript(
@@ -1350,13 +1381,18 @@ class OpenAIRealtimeConnection(EngineConnection):
         patch = self._session_payload(full=False, instructions=self.instructions)
         self._tasks.spawn(self._send({"type": "session.update", "session": patch}))
 
+    def _trigger_pending(self) -> bool:
+        trigger = self._pending_trigger
+        return trigger is not None and now() - trigger < _TRIGGER_TTL
+
     def _response(self, response_id: str) -> _Response:
         """State of ``response_id``, starting it if the server skipped ``response.created``."""
         state = self._responses.get(response_id)
         if state is None:
-            trigger = self._pending_trigger if self._pending_trigger is not None else now()
-            self._pending_trigger = None
-            state = self._responses[response_id] = _Response(response_id, trigger)
+            trigger = self._pending_trigger if self._trigger_pending() else None
+            self._pending_trigger = self._request_event = None
+            state = _Response(response_id, now() if trigger is None else trigger)
+            self._responses[response_id] = state
             self._active = response_id
             self._emit(ResponseStarted(response_id=response_id))
         return state
@@ -1371,6 +1407,7 @@ class OpenAIRealtimeConnection(EngineConnection):
         item = ev.get("item") or {}
         if item.get("type") == "function_call" and item.get("id") and item.get("name"):
             self._call_names[str(item["id"])] = str(item["name"])
+            _bound(self._call_names)
 
     def _on_audio_delta(self, ev: dict[str, Any]) -> None:
         payload = ev.get("delta")
@@ -1424,6 +1461,7 @@ class OpenAIRealtimeConnection(EngineConnection):
         if not isinstance(call_id, str) or not isinstance(name, str) or call_id in state.calls:
             return
         state.calls.add(call_id)
+        self._call_names.pop(str(item.get("id") or ""), None)
         arguments = item.get("arguments")
         call = FunctionCall(
             name=name,

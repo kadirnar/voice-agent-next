@@ -180,8 +180,8 @@ the last voiced position before `audio_end_ms` (within the maximum hold), fallin
 `refine_speech_end=False` to report `audio_end_ms` unchanged. The session maps this position to
 the capture time, so `TurnMetrics.voice_to_voice` is comparable with other engines.
 
-`EngineMetrics` per response: `ttfb` = response trigger (turn commit, or our `response.create`)
-→ first audio delta, `duration`, token usage from `response.done.usage`
+`EngineMetrics` per response: `ttfb` = response trigger (turn commit, or the `create_response()`
+/ `say()` call, including any wait for the previous response to be cancelled) → first audio delta, `duration`, token usage from `response.done.usage`
 (`input_token_details`/`output_token_details`; Qwen's `*_tokens_details`), `cancelled`.
 
 ## Sessions, keepalive and reconnects
@@ -220,6 +220,9 @@ the capture time, so `TurnMetrics.voice_to_voice` is comparable with other engin
 * No context carry-over across reconnects or session rotation yet (#17).
 * xAI reports usage totals only, so `EngineUsage` token details stay 0 for xAI.
 * Qwen-Omni accepts no user text items: `send_text()` raises `EngineError` and an initial
-  `chat_ctx` cannot be seeded.
+  `chat_ctx` cannot be seeded. Without per-response instructions, `say()` and
+  `create_response(instructions=...)` patch the session prompt for one response: if the server
+  VAD starts a response for the user at that very moment, that response gets the one-off
+  instructions (a rejected request rolls the patch back immediately).
 * The Azure Voice Live, Kyutai Unmute (Opus audio) and LiteLLM proxy dialects are not profiled
   yet; `base_url=` + a custom `RealtimeProfile` covers servers that follow the GA or beta protocol.

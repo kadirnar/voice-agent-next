@@ -212,6 +212,8 @@ def test_configuration_errors(monkeypatch: pytest.MonkeyPatch) -> None:
         AzureOpenAIRealtimeEngine(api_key=KEY)
     with pytest.raises(ConfigurationError, match="DASHSCOPE_WORKSPACE_ID"):
         QwenOmniRealtimeEngine(api_key=KEY)
+    with pytest.raises(ConfigurationError, match="workspace"):
+        QwenOmniRealtimeEngine(api_key=KEY, workspace_id="ws-1\n")  # e.g. read from a file
     with pytest.raises(ConfigurationError, match="semantic_vad"):
         XAIRealtimeEngine(api_key=KEY, turn_detection="semantic_vad")
     with pytest.raises(ConfigurationError, match="unknown realtime profile"):
@@ -226,6 +228,13 @@ def test_configuration_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     azure = AzureOpenAIRealtimeEngine()
     assert azure.url == "wss://r.openai.azure.com/openai/v1/realtime?model=dep"
     assert azure.request_headers() == {"Authorization": "Bearer entra"}
+    # precedence: api_key= > azure_ad_token= > AZURE_OPENAI_API_KEY > AZURE_OPENAI_AD_TOKEN
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "env-key")
+    assert AzureOpenAIRealtimeEngine().request_headers() == {"api-key": "env-key"}
+    explicit = AzureOpenAIRealtimeEngine(azure_ad_token="tok")
+    assert explicit.request_headers() == {"Authorization": "Bearer tok"}
+    both = AzureOpenAIRealtimeEngine(api_key="k", azure_ad_token="tok")
+    assert both.request_headers() == {"api-key": "k"}
 
 
 def test_realtime_url() -> None:
@@ -235,6 +244,9 @@ def test_realtime_url() -> None:
     assert realtime_url("http://localhost:8000/v1/") == "ws://localhost:8000/v1/realtime"
     assert realtime_url("wss://h/v1/realtime?x=1", model="a/b", query={"duplex": "1"}) == (
         "wss://h/v1/realtime?x=1&model=a%2Fb&duplex=1"
+    )
+    assert realtime_url("wss://h/v1?debug=&x=1", model="m") == (
+        "wss://h/v1/realtime?debug=&x=1&model=m"  # blank parameters are kept
     )
 
 
@@ -274,6 +286,8 @@ def test_truncation_plan_spans_multiple_audio_items() -> None:
     assert conn._truncation_plan("a", 5000) == []  # everything was heard
     assert conn._truncation_plan("c", 501) == []  # clamped to the audio received
     assert conn._truncation_plan("unknown", 100) == []  # no audio: nothing to truncate
+    conn._pending_trigger = now() - 60  # a response request that never started a response
+    assert now() - conn._response("resp_late").trigger < 1.0  # forgotten, not a 60 s TTFB
 
 
 # -------------------------------------------------------------------- GA protocol
@@ -770,6 +784,22 @@ async def test_qwen_profile_speaks_the_beta_dialect() -> None:
             with pytest.raises(EngineError, match="no text"):
                 await conn.send_text("typed input")
         assert not rec.of(EngineErrorEvent)
+
+
+async def test_rejected_response_request_rolls_back_the_prompt_patch() -> None:
+    """Qwen (no per-response instructions): a rejected ``response.create`` restores the prompt."""
+    busy = {"type": "invalid_request_error", "code": "conversation_already_has_active_response",
+            "message": "Conversation already has an active response"}  # fmt: skip
+    async with FakeRealtimeServer(dialect="beta", reject_response_create=busy) as server:
+        engine = QwenOmniRealtimeEngine(base_url=server.url, api_key=KEY)
+        async with connected(engine, EngineOptions(instructions="Be helpful.")) as (conn, rec):
+            await conn.say("Hello!")
+            await wait_for(lambda: len(server.events("session.update")) == 3)
+            patched, restored = (e["session"] for e in server.events("session.update")[1:])
+            assert patched == {"instructions": VERBATIM_INSTRUCTIONS.format(text="Hello!")}
+            assert restored == {"instructions": "Be helpful."}
+            assert conn._pending_trigger is None and not conn._restore_instructions
+        assert not rec.of(ResponseStarted) and not rec.of(EngineErrorEvent)
 
 
 async def test_xai_profile_cumulative_transcripts_and_force_message() -> None:

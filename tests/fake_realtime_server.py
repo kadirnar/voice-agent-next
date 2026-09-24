@@ -123,6 +123,7 @@ class FakeRealtimeServer:
         api_key: reject handshakes without this key (401).
         reject_status: reject every handshake with this HTTP status.
         reject_session_update: error object sent instead of ``session.updated``.
+        reject_response_create: error object sent in reply to every ``response.create``.
     """
 
     def __init__(
@@ -144,6 +145,7 @@ class FakeRealtimeServer:
         api_key: str | None = None,
         reject_status: int | None = None,
         reject_session_update: dict[str, Any] | None = None,
+        reject_response_create: dict[str, Any] | None = None,
     ) -> None:
         self.replies: list[Reply] = list(replies)
         self.transcripts: list[str] = list(transcripts)
@@ -168,6 +170,7 @@ class FakeRealtimeServer:
         self.api_key = api_key
         self.reject_status = reject_status
         self.reject_session_update = reject_session_update
+        self.reject_response_create = reject_response_create
         self.handshakes: list[Handshake] = []
         self.received: list[dict[str, Any]] = []
         """Client events (``input_audio_buffer.append`` payloads replaced by byte counts)."""
@@ -557,6 +560,9 @@ class _Connection:
 
     # --------------------------------------------------------------- responses
     async def on_response_create(self, ev: dict[str, Any]) -> None:
+        if self.server.reject_response_create is not None:
+            await self.error(self.server.reject_response_create, ev)
+            return
         if self.active is not None:
             await self.error(
                 {
