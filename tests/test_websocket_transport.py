@@ -325,6 +325,7 @@ async def test_session_factory_failure_is_reported() -> None:
         (json.dumps({"type": "hello", "sample_rate": 4000}), "bad_hello"),
         (json.dumps({"type": "hello", "channels": 6}), "bad_hello"),
         (json.dumps({"type": "hello", "framing": "xml"}), "bad_hello"),
+        (json.dumps({"type": "hello", "framing": ["binary"]}), "bad_hello"),
         (None, "bad_hello"),  # nothing at all: hello timeout
     ],
 )

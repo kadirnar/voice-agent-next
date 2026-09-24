@@ -452,7 +452,7 @@ class WebSocketServerTransport(Transport):
                 "unsupported_codec", f"unsupported codec {codec!r}; use {CODEC!r}"
             )
         framing = hello.get("framing", "binary")
-        if framing not in _FRAMINGS:
+        if not isinstance(framing, str) or framing not in _FRAMINGS:
             raise _HandshakeError("bad_hello", f"`framing` must be one of {sorted(_FRAMINGS)}")
         rate = _int_field(hello, "sample_rate", self.input_format.sample_rate, _MIN_RATE, _MAX_RATE)
         channels = _int_field(hello, "channels", 1, 1, 2)
@@ -864,6 +864,7 @@ class WebSocketAgentServer:
             return
         session: AgentSession | None = None
         bridge: SessionBridge | None = None
+        reason = "user_disconnected"
         try:
             session = await _call_factory(self.session_factory, transport)
             agent = await _call_factory(self.agent_factory, transport)
@@ -874,6 +875,7 @@ class WebSocketAgentServer:
             await wait_first(session.wait_closed(), transport.wait_disconnected())
         except Exception as exc:
             logger.exception("WebSocket session %s failed", transport.session_id)
+            reason = "error"
             transport.send_message_nowait(
                 {
                     "type": "error",
@@ -886,7 +888,7 @@ class WebSocketAgentServer:
         finally:
             if session is not None:
                 with contextlib.suppress(Exception):
-                    await session.aclose("user_disconnected")  # no-op if already closed
+                    await session.aclose(reason)  # no-op if the session already closed
                 self._sessions.discard(session)
             if bridge is not None:
                 await bridge.aclose()
