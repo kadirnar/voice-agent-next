@@ -371,7 +371,7 @@ def _ollama_models(base_url: str) -> list[str] | None:
     if not root.startswith(("http://", "https://")):
         return None
     try:
-        with urllib.request.urlopen(f"{root}/api/tags", timeout=1.5) as response:  # noqa: S310
+        with urllib.request.urlopen(f"{root}/api/tags", timeout=1.5) as response:
             models = json.loads(response.read()).get("models", [])
         return [str(m.get("name") or m.get("model")) for m in models]
     except (OSError, ValueError, AttributeError):
