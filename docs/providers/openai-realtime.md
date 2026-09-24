@@ -197,6 +197,12 @@ the capture time, so `TurnMetrics.voice_to_voice` is comparable with other engin
   is re-based onto the input stream. Authentication failures are fatal; a server that keeps
   dropping the connection (more than `max_reconnect_attempts` reconnects per minute) ends the
   connection with a non-recoverable `EngineErrorEvent`.
+* Connection errors (from `connect()` and in `EngineErrorEvent`): HTTP 401/403 →
+  `AuthenticationError`, 429 → `RateLimitError`, refused or failed connections and 5xx →
+  `ProviderConnectionError`. A connection that cannot be opened within `connect_timeout` raises
+  `RealtimeConnectTimeoutError`, which is both a `ProviderTimeoutError` and a (retryable)
+  `ProviderConnectionError`: whether an unreachable server refuses at once or times out depends
+  on the OS (Windows retries a refused SYN for about 2 s), so handle both as connection failures.
 
 ## Latency notes
 
