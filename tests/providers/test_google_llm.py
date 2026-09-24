@@ -107,6 +107,11 @@ async def run(llm: GeminiLLM, ctx: ChatContext, **kwargs: Any) -> list[ChatChunk
     return [c async for c in llm.chat(ctx, **kwargs)]
 
 
+def b64(value: str) -> bytes:
+    """Bytes as the SDK sends them (URL-safe base64, which the API accepts)."""
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
 def done(value: str = "Done.", **counts: int) -> list[dict[str, Any]]:
     return [chunk(text(value), finish="STOP", usage=usage(10, 2, **counts))]
 
@@ -444,7 +449,7 @@ async def test_user_audio_is_sent_inline(api: FakeGeminiAPI) -> None:
     blob = part["inlineData"]
     # the SDK passes dict keys through as given; the API accepts either spelling
     assert blob.get("mimeType", blob.get("mime_type")) == "audio/wav"
-    assert base64.b64decode(blob["data"])[:4] == b"RIFF"
+    assert b64(blob["data"])[:4] == b"RIFF"
 
 
 # ------------------------------------------------------------------------ options
@@ -714,6 +719,34 @@ async def test_cascade_session_greeting_then_tool_round_trip(api: FakeGeminiAPI)
         ],
     }
     assert turns[0].tool_calls == 1
+
+
+async def test_half_cascade_sends_the_user_turn_as_audio(api: FakeGeminiAPI) -> None:
+    """No STT: the cascade hands the VAD-segmented user audio straight to Gemini."""
+    api.reply(model_info(MODEL), stream_response(done("I heard you.")))
+    session = AgentSession(
+        llm=make_llm(api),
+        tts=MockTTS(),
+        vad=EnergyVAD(),
+        cascade_options=CascadeOptions(min_endpointing_delay=0.0),
+    )
+    turns: list[TurnMetrics] = []
+    session.on("metrics", lambda m: turns.append(m) if isinstance(m, TurnMetrics) else None)
+    transport = LoopbackTransport()
+    await session.start(Agent("You are a helpful assistant."), transport)
+    await transport.play_user_audio(synth_speech(0.8, 16_000), realtime=False)
+    await transport.play_user_audio(AudioFrame.silence(0.6, 16_000), realtime=False)
+
+    async def wait_for(predicate: Callable[[], bool]) -> None:
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(wait_for(lambda: len(turns) == 1), 5)
+    await session.aclose()
+
+    (part,) = api.body(1)["contents"][0]["parts"]
+    wav = b64(part["inlineData"]["data"])
+    assert wav[:4] == b"RIFF" and len(wav) > 16_000  # about a second of 16 kHz speech
 
 
 # --------------------------------------------------------------------- integration
