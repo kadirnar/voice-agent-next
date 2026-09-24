@@ -8,7 +8,7 @@ local or cloud — that measures what the user *hears*. Design rationale:
 | Track | What | Status |
 | --- | --- | --- |
 | **T1 latency** | voice-to-voice latency on the call recording, cold start, dead air | `van bench latency` |
-| T2 ASR | WER/CER, RTFx, TTFS | planned (#41) |
+| **T2 ASR** | WER/CER, RTFx, final latency (TTFS), first partial, interim stability | `van bench asr` |
 | T3 TTS | TTFA, RTF, round-trip WER, MOS predictors | planned (#42) |
 | T4 VAD / turn-taking | eot-bench, barge-in battery | planned (#43) |
 | T5 S2S quality | Big Bench Audio, VoiceBench | planned (#44) |
@@ -32,6 +32,10 @@ van bench latency --config agent.yaml --scenario benchmarks/scenarios/latency-co
     --turns 40 --sessions 3
 
 van bench report bench-results/<run-id>   # re-render report.md from the result files
+
+# T2: any STT on pinned LibriSpeech / FLEURS smoke subsets (downloaded once, ~80 MB)
+van bench asr --stt faster-whisper/base
+van bench asr --stt sherpa-onnx/nemo-fastconformer-en-80ms --mode streaming
 
 # T7: what the runtime itself adds (mocks with known delays, offline, ~2 min)
 van bench overhead
@@ -164,6 +168,88 @@ frame). Quote text containing `?`, `:` or `,` inside `{...}` flow mappings.
   the client, agent and provider run when you publish numbers.
 * Check `summary.json → extra.sessions[].push_lag_max_ms`: the caller notes in the report
   when audio was delivered > 50 ms late (event-loop stalls inflate latencies).
+
+## T2: ASR (`van bench asr`)
+
+Accuracy, throughput and latency of any registered STT provider, on the same pinned data:
+
+```bash
+van bench asr --stt faster-whisper/base                          # batch, LibriSpeech smoke
+van bench asr --stt sherpa-onnx/nemo-fastconformer-en-80ms --mode streaming   # real time
+van bench asr --stt '{provider: faster-whisper, model: base, device: cpu}' \
+    -d fleurs-en-smoke -d fleurs-es-smoke -d fleurs-de-smoke -d fleurs-tr-smoke -d fleurs-zh-smoke
+van bench asr --stt deepgram/nova-3 --mode streaming -d my-calls/manifest.jsonl --language en
+van bench asr --stt mock --markdown        # print the per-dataset table (for PRs)
+```
+
+**Modes.** `batch` calls `STT.transcribe()` on each whole utterance (what a VAD-segmented
+cascade does with a non-streaming recognizer). `streaming` opens `STT.stream()` and pushes
+the audio in `--chunk-ms` chunks (default 20 ms), each delivered when its interval has
+elapsed like a capture device, at `--realtime-factor` × real time (1 = real time, the
+default; 2 = twice as fast; 0 = as fast as possible — then latencies are not real-time
+numbers). At the end of the file the harness calls `end_input()` (= `flush()` + end of
+input) — exactly what the cascade does when its VAD / turn detector ends the user's turn —
+and waits for the final transcript. A batch-only recognizer can be streamed through
+`StreamAdapter` with `--vad energy` (or another VAD spec). `--warmup` (default) calls
+`stt.warmup()` and transcribes one utterance unmeasured first.
+
+### T2 metrics
+
+| Metric | Definition |
+| --- | --- |
+| `wer` | **corpus** word error rate Σ(S+D+I) / ΣN over a dataset, after normalization (per dataset in `extra.datasets`; `rates.wer` pools all datasets) |
+| `cer` | corpus character error rate; the **headline** for languages written without spaces (zh, ja, ko, th, lo, my, km...), where whitespace is ignored |
+| `perfect_rate` | share of utterances without a single error |
+| `wer_pct`, `cer_pct` | per-utterance distributions (%) |
+| `rtfx` | Σ audio / Σ processing time (batch: `transcribe()` duration; streaming: first chunk → final). Only meaningful in batch mode or with `--realtime-factor 0` |
+| `ttfs_ms` | **final latency**: end of audio → final transcript. Streaming: the `end_input()`/`flush()` call → the last `FINAL_TRANSCRIPT` (Pipecat's TTFS, with the end of the file as the VAD stop); batch: the `transcribe()` duration. The STT's share of a voice agent's response time |
+| `first_partial_ms` | streaming: capture start of the first chunk → first non-empty interim transcript |
+| `interim_revision_rate` | streaming: share of interim updates that rewrite already-shown words instead of appending (the last word may still grow). 0 = interims only grow |
+| `processing_ms`, `rtf` | per-utterance processing time and processing / audio |
+
+**Normalization.** Reference and hypothesis go through the same normalizer before
+scoring (`--normalizer`, recorded in the manifest):
+
+* `auto` (default): Whisper's `EnglishTextNormalizer` for English — lower case, fillers
+  (`uh`, `um`, `hmm`) and bracketed spans removed, contractions and titles expanded
+  (`won't` → `will not`, `Mr` → `mister`), spelled-out numbers and currencies to digits
+  (`twenty one` → `21`, `$20 million` → `$20000000`), British → American spelling,
+  punctuation and diacritics removed. This is the Open ASR Leaderboard convention.
+  Other languages: Whisper's `BasicTextNormalizer` keeping combining marks
+  (`preserve_marks`, so Indic/Thai vowel signs survive): lower case, punctuation and
+  symbols removed. Numbers are **not** normalized outside English.
+* `whisper-english`, `whisper-basic` or `none` force one normalizer.
+
+The Whisper normalizers are vendored (`bench/_whisper_normalizer.py`, MIT, identical
+output to openai-whisper 20250625), so scoring needs no extra dependency.
+
+### Datasets
+
+| Dataset | Content | Download |
+| --- | --- | --- |
+| `librispeech-test-clean-smoke` (default) | 50 utterances (1.5–20 s, 409 s) of LibriSpeech test-clean, 10 speakers | first ~80 MB of the 347 MB archive |
+| `fleurs-{en,es,de,tr,zh}-smoke` | 10 distinct sentences (2–20 s) per language from the FLEURS test split | 4–8 MB each |
+| any `.jsonl` / `.json` / `.tsv` / `.csv` | your own data: `audio` (or `audio_filepath`, `path`, `file`, `wav`) + `text` (or `transcript`, `sentence`), optional `id`, `language`; NeMo manifests work as they are | – |
+
+The built-in subsets are pinned in `src/voice_agent_next/bench/data/asr_smoke.json`:
+source archive URL (FLEURS: a fixed Hugging Face commit), and per utterance the archive
+member, **SHA-256**, duration and reference text. The source archives are streamed and only
+the listed members are kept, verified and cached in `<cache>/datasets/<name>/`
+(`$VAN_CACHE_DIR`); the download stops after the last listed member. Later runs are
+offline (`VAN_OFFLINE=1` works). The manifest records a dataset hash over ids, references,
+languages and audio hashes, plus every file's SHA-256. `--limit N` keeps the first N
+utterances. Both corpora are CC BY 4.0 (LibriSpeech: Panayotov et al., 2015; FLEURS:
+Conneau et al., 2022). Non-English FLEURS sentences with digits (and Chinese sentences
+with Latin letters) are excluded, since only English numbers are normalized.
+`benchmarks/tools/make_asr_smoke_subsets.py` regenerates the subsets. FLAC audio
+(LibriSpeech) needs `soundfile`: `pip install 'voice-agent-next[bench]'`.
+
+**Reading the numbers.** 50 utterances give a WER confidence interval of roughly ±1–2
+points; the FLEURS subsets (10 utterances) are smoke tests for multilingual support, not
+rankings. Real-time streaming runs take as long as the audio (~7 min for LibriSpeech).
+The Markdown table (`--markdown`, also in `report.md` under "Results by dataset") has one
+row per dataset; the report also lists the utterances with the most errors (normalized
+reference vs. hypothesis).
 
 ## T7: framework overhead (`van bench overhead`)
 
@@ -304,6 +390,17 @@ results = asyncio.run(run_overhead_benchmark(OverheadOptions.for_tier("smoke", s
 print(results.summary.metrics["e2e.overhead_ms"].p50)
 gate = compare_to_baseline(load_baseline("benchmarks/baselines/overhead-ci.json"), results)
 print(gate.passed, gate.to_markdown())
+```
+
+```python
+from voice_agent_next.bench.asr_datasets import load_asr_dataset
+from voice_agent_next.bench.tracks.asr import AsrOptions, run_asr_benchmark
+
+data = load_asr_dataset("librispeech-test-clean-smoke")
+results = asyncio.run(
+    run_asr_benchmark("faster-whisper/base", data, AsrOptions(mode="batch"), out_dir="bench-results")
+)
+print(results.summary.rates["wer"], results.summary.extra["rtfx"])
 ```
 
 Building blocks for other tracks: `CallerEmulator` (caller), `DuplexRecording` (stereo

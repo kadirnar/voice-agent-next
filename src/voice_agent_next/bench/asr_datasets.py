@@ -214,7 +214,7 @@ def iter_tar_stream(
         with http.stream("GET", url) as resp:
             if resp.status_code != 200:
                 raise DownloadError(f"GET {url} failed with HTTP {resp.status_code}")
-            raw = _IterStream(resp.iter_raw(1 << 16))
+            raw = _IterStream(resp.iter_bytes(1 << 16))
             with tarfile.open(fileobj=io.BufferedReader(raw, 1 << 16), mode="r|*") as tar:
                 for member in tar:
                     if stats is not None:
