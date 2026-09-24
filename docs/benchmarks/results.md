@@ -57,6 +57,15 @@ These runs use the same scenario (`latency-local*.yaml`) and the same LLM and TT
 
 \* In the GPU run the LLM answered the refund question with a long first clause, and Kokoro (still on CPU) took 2.3–3.5 s to render it. The high p90 is TTS, not STT.
 
+**Kyutai Pocket TTS vs Kokoro, both on CPU (#76):** 12 turns each, two back-to-back pairs.
+
+| TTS | v2v p50 | v2v p90 | TTS first audio p50 |
+|---|---:|---:|---:|
+| Kokoro v1.0 (sentence-level) | 1,279–1,429 ms | 1,829–2,824 ms | 442–536 ms |
+| Pocket TTS (80 ms audio streaming) | **880–891 ms** | **991–1,184 ms** | **95–101 ms** |
+
+Audio-streaming TTS removes the clause-rendering wait. It is the largest single CPU improvement measured so far.
+
 **What this shows:** with a streaming or GPU recognizer, the end-of-turn delay reaches the cascade's fixed 0.4 s minimum endpointing delay. The next levers are:
 - a lower minimum delay for streaming STT;
 - speculative generation (#27, merged; it saves 190–290 ms on mock stacks with cloud-like LLM latencies, and is off by default);
