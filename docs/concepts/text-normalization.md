@@ -10,8 +10,8 @@ synthesis:
 | `The total is $42.50.` | The total is forty two dollars and fifty cents. |
 | `Your order number is 58213.` | Your order number is five eight two one three. |
 | `See you March 3rd at 4:30 PM.` | See you March third at four thirty pee em. |
-| `Signed on July 14, 2025.` | Signed on July fourteenth, twenty twenty five. |
-| `Call 555-0142.` | Call five-five-five, zero-one-four-two. |
+| `Signed on July 14, 2025.` | Signed on July fourteenth twenty twenty five. |
+| `Call 555-0142.` | Call five five five, zero one four two. |
 | `Mail anna.lee@example.com.` | Mail anna dot lee at example dot com. |
 | `Dr. Smith, e.g. at 7 AM` | Doctor Smith, for example at seven ay em |
 
@@ -98,8 +98,12 @@ A few spoken forms were chosen by round-trip tests on Pocket TTS, Kokoro and Pip
   "forty-two dollars" came back as "$40, $2".
 - Letters are written as letter names ("en why see", "ay em"). Bare capitals ("N Y C")
   are sometimes read as one word ("Nysi").
-- Phone number groups are hyphenated ("five-five-five, zero-one-four-two"). Pocket TTS
-  runs "five five five, zero" together.
+- No comma before a spoken year ("July fourteenth twenty twenty five"). With the comma,
+  Piper garbled the start of the sentence ("The contract" came back as "OnTract").
+- Phone number groups are hyphenated for Pocket TTS ("five-five-five, zero-one-four-two"),
+  which otherwise runs "five five five, zero" together. Piper reads the plain form
+  better, so hyphenation is an option (`EnglishNormalizer(hyphenate_digit_groups=True)`)
+  that only `pocket-tts` turns on.
 
 The normalizer leaves text it does not recognize unchanged. A four-digit number is read
 as a year only in a year context (`in 1999`). Elsewhere it is a cardinal (`1500 points`
@@ -173,13 +177,35 @@ The transcript and the chat history then show the spoken form too, so
 
 ## Measurements
 
-`van bench tts --texts smoke --stt faster-whisper/small.en --mode both`, on 20 texts, 8
-of them "hard text" with 17 entities. The same runs with `normalize: false` and
-`normalize: true`. `hardtext_acc` counts the entities that the round-trip ASR transcript
-got right. `rt_wer` is the round-trip word error rate on the original text, after Whisper
-English normalization.
+The runs used `van bench tts --texts smoke --stt faster-whisper/small.en --mode both --repeats 3`,
+once with `normalize: false` and once with `normalize: true`. The smoke set has 20 texts;
+12 of them contain 18 "hard text" entities (numbers, amounts, dates, times, a phone
+number, an e-mail address, a URL, abbreviations).
 
-MEASUREMENTS_TABLE
+- `hard text` is the share of those entities that the round-trip ASR transcript got
+  right.
+- `rt WER` is the round-trip word error rate against the original text, after Whisper
+  English normalization.
+
+Measured on a Ryzen 5 5600 CPU. Normalization does not change the real-time factor.
+
+| TTS | mode | hard text, off → on | rt WER, off → on |
+| --- | --- | ---: | ---: |
+| Pocket TTS (`alba`) | batch | 64.8 % → **96.3 %** | 6.9 % → **2.9 %** |
+| Pocket TTS (`alba`) | streaming | 61.1 % → **96.3 %** | 8.2 % → **2.9 %** |
+| Kokoro (`v1.0`, `af_heart`) | batch | 94.4 % → **100 %** | 4.0 % → **1.7 %** |
+| Kokoro (`v1.0`, `af_heart`) | streaming | 94.4 % → **100 %** | 3.9 % → **2.1 %** |
+| Piper (`en_US-libritts_r-medium`) | batch | 83.3 % → **90.7 %** | 6.4 % → **4.7 %** |
+| Piper (`en_US-libritts_r-medium`) | streaming | 83.3 % → **88.9 %** | 5.6 % → 5.7 % |
+
+What was still missed with normalization on:
+
+- Piper: the e-mail address ("anna dot lee at" came back as "Anna.Liam").
+- Pocket TTS, out of 3 repeats: the year once in each mode ("twenty twenty five" came
+  back as "2020-25"), the e-mail address once, and "NYC" once ("and why sea").
+
+Piper's sampling is random, so its WER varies by about ±1 point from run to run, even
+on texts that normalization does not change.
 
 ## Limitations
 
