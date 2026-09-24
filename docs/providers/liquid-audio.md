@@ -134,15 +134,32 @@ Kokoro, real-time paced, Silero VAD + Smart Turn v3.2). Hardware: AMD Ryzen 5 56
 (6 cores / 12 threads) with the Linux x64 runner, Q4_0, **CPU only**. The prebuilt Linux
 runner has no GPU backend, so the RTX 5070 Ti was idle.
 
-MEASUREMENTS
+| run (2026-09-24) | measured turns | v2v p50 | v2v p90 | session v2v p50 | response TTFB p50 | LLM first token p50 | end-of-turn p50 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| quiet machine, no silence trimming | 11 | **1,834 ms** | **1,958 ms** | 925 ms | 525 ms | 344 ms | 400 ms |
+| shared machine (load 5–9), trimming (default) | 23 | 1,845 ms | 3,954 ms | 1,367 ms | 967 ms | 409 ms | 401 ms |
+| shared machine (load 7–11), trimming, `threads: 6` | 23 | 1,947 ms | 2,221 ms | 1,197 ms | 796 ms | 401 ms | 401 ms |
+
+These are the first **native local speech-to-speech** numbers on this runtime: about
+1.8 s from the end of the user's speech to the agent's first audible word, on a CPU and
+with no STT or TTS. The fully local cascade (faster-whisper + LFM2.5-1.2B + Kokoro) takes
+1.1 s on the same machine, so the omni model is not faster yet. Its advantage is one small
+model that hears the user's tone.
+
+The p90 tails come from CPU contention: other jobs shared the machine during the later
+runs. A few turns then took 3–4 s to prefill. llama.cpp with every thread is sensitive to
+this; `server_options={"threads": 6}` (the physical cores) held up better.
 
 Where the time goes (p50): endpointing ≈ 400 ms (Silero pause + Smart Turn +
 `min_endpointing_delay`), then the model. Prefilling the user's audio and generating the
 first 80 ms of audio take ≈ 450–500 ms. After that the model opens every reply with
 0.4–0.9 s of near-silence (−52…−67 dBFS) before it starts to speak.
-`trim_leading_silence` drops that silence: it cannot be skipped entirely, because it has
-to be generated first, but it is generated about 2× faster than real time, so trimming it
-removes roughly half of it from the voice-to-voice latency.
+That silence is part of the recorded voice-to-voice time (the recording-vs-session
+residual ≈ 960 ms without trimming). `trim_leading_silence` drops it before it reaches the
+speaker, and the residual falls to ≈ 320 ms. It still has to be *generated* first, so the
+audible onset hardly moves in these runs. What trimming changes is the session's own
+metrics (`TurnMetrics`, TTFB): they now time the first spoken audio, not the first
+near-silent chunk, and they agree with the recording.
 
 Generation runs at ≈ 38 steps/s on this CPU, about 2× real time for audio. A reply is
 therefore fully generated about halfway through its playback, and barge-in truncation

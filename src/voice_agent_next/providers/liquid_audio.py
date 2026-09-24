@@ -557,10 +557,12 @@ class LiquidAudioLLM(LLM):
             included) stays in it, so the provider resets the context and replays the
             recent turns before a request could overflow it.
         trim_leading_silence: drop the near-silent audio the model emits before it starts
-            speaking — LFM2.5-Audio opens every reply with 0.4–0.9 s at −52…−67 dBFS, which
-            the caller would hear as extra latency. Chunks quieter than this level (dBFS)
+            speaking — LFM2.5-Audio opens every reply with 0.4–0.9 s at −52…−67 dBFS (dead
+            air in the recording). Chunks quieter than this level (dBFS)
             are dropped until the first louder one (the last 80 ms are kept as a lead-in),
-            for at most ``MAX_TRIM`` seconds. ``None`` keeps them.
+            for at most ``MAX_TRIM`` seconds. The silence still has to be generated, so this
+            mostly makes the session's TTFB metrics time the first *spoken* audio (and
+            match what the caller hears). ``None`` keeps them.
         timeout: HTTP timeout (connect and between streamed chunks).
     """
 

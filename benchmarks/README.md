@@ -132,6 +132,7 @@ Scenarios live in [`scenarios/`](scenarios):
 | `latency-smoke` (built-in default) | 10 short questions as synthetic speech, cycled; smoke tier / CI |
 | `latency-conversational` | 1–3.5 s turns; endpointing- and STT-sensitive engines |
 | `latency-tts` | stimuli synthesized with a TTS provider (swap `mock` for a real voice) |
+| `latency-local-omni` | six Kokoro-voiced questions for local omni models (LFM2.5-Audio via `liquid-audio`: no STT, no TTS) |
 
 ```yaml
 name: my-scenario
