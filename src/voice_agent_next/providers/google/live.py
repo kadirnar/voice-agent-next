@@ -326,7 +326,8 @@ class GeminiLiveEngine(S2SEngine):
         connect_timeout: WebSocket handshake + setup timeout.
         max_reconnect_attempts: consecutive failed reconnects before giving up.
         local_vad: run a cheap energy VAD on the sent audio to estimate where speech ended
-            (voice-to-voice metrics) and to rotate only while the user is silent.
+            (voice-to-voice metrics), to rotate only while the user is silent and, with
+            ``turn_detection=False``, to open a manual turn when the user starts speaking.
         extra_setup: extra ``setup`` fields (API camelCase), deep-merged last.
     """
 
