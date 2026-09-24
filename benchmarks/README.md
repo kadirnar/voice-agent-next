@@ -216,8 +216,9 @@ conditions and up to ~5 ms with injected delays. Most of it is asyncio timer lat
 `epoll` timeouts are rounded up to whole milliseconds, so every mock `sleep()` and every
 chunk the caller delivers ends up to 1 ms late (`delivery_lag_ms`). Session, transport
 and engine plumbing take well under a millisecond. On Windows with Python < 3.13, asyncio
-timers are ~16 ms coarse, so expect larger lag and jitter numbers there. That is why the
-gate keeps one baseline per OS.
+timers are ~16 ms coarse, so expect larger lag and jitter numbers there. A timer can also
+fire up to one tick early, so a mock delay can come in short and a single turn's
+`overhead_ms` can be slightly negative. That is why the gate keeps one baseline per OS.
 
 ### Tiers
 

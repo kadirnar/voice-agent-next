@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
@@ -22,6 +24,17 @@ app = typer.Typer(
 )
 console = Console()
 err = Console(stderr=True)
+
+
+def _tolerate_narrow_console() -> None:
+    """Replace characters the console encoding lacks (e.g. ``−``, ``µ`` on a cp1252
+    Windows console) instead of crashing with ``UnicodeEncodeError``."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(ValueError, OSError):
+                reconfigure(errors="replace")
+
 
 _TABLE_METRICS = (
     ("v2v_ms", "voice-to-voice (recording)"),
@@ -437,6 +450,7 @@ def overhead(
     )
     from ..errors import VoiceAgentError
 
+    _tolerate_narrow_console()
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",

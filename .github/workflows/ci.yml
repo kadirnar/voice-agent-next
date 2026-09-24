@@ -110,6 +110,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     env:
       COLUMNS: "160" # wide enough for the result tables in the log
+      PYTHONUTF8: "1" # the tables use −, µ and · (the Windows console defaults to cp1252)
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6

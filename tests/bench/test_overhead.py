@@ -301,7 +301,9 @@ def test_smoke_run_measures_the_framework_overhead(smoke: RunResults) -> None:
         v2v, overhead = m[f"e2e.{name}.v2v_ms"], m[f"e2e.{name}.overhead_ms"]
         assert overhead.n == 2 and v2v.p50 is not None and overhead.p50 is not None
         assert v2v.p50 == pytest.approx(injected, abs=60)
-        assert -5.0 < overhead.p50 < 60.0
+        # asyncio timers may fire one clock tick early (~16 ms on Windows), so the mocks'
+        # delays can come in a little short: overhead may be slightly negative there
+        assert -40.0 < overhead.p50 < 60.0
         assert v2v.p50 - overhead.p50 == pytest.approx(injected, abs=0.01)  # 3-digit rounding
         assert extra["e2e"]["conditions"][name]["injected_ms"] == pytest.approx(injected)
     assert m["e2e.overhead_ms"].n == 4 and smoke.summary.n == 4
