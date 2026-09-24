@@ -37,7 +37,16 @@ from voice_agent_next.errors import (
     ProviderTimeoutError,
     RateLimitError,
 )
-from voice_agent_next.events import ResponseAudio, ResponseDone, ResponseText
+from voice_agent_next.events import (
+    InputCommitted,
+    InputSpeechStarted,
+    InputSpeechStopped,
+    InputTranscript,
+    ResponseAudio,
+    ResponseDone,
+    ResponseStarted,
+    ResponseText,
+)
 from voice_agent_next.metrics import STTMetrics, TTSMetrics
 from voice_agent_next.providers.cartesia import (
     API_VERSION,
@@ -46,7 +55,7 @@ from voice_agent_next.providers.cartesia import (
     CartesiaTTS,
 )
 from voice_agent_next.providers.energy import EnergyVAD
-from voice_agent_next.providers.mock import MockLLM, MockSTT, synth_speech
+from voice_agent_next.providers.mock import MockLLM, MockSTT, MockTTS, synth_speech
 from voice_agent_next.registry import get_provider
 from voice_agent_next.stt import STTEvent, STTEventType, STTStream
 from voice_agent_next.tts import SynthesizedAudio, SynthesizeStream
@@ -804,6 +813,56 @@ async def test_stt_turn_mode_works_as_cascade_turn_source(stt_server: StartSTTSe
     await collect_stt(stream)
     await stream.aclose()
     assert fake.texts() == [json.dumps({"type": "close"})]
+
+
+async def test_ink_turn_events_drive_the_cascade_without_a_vad(
+    stt_server: StartSTTServer,
+) -> None:
+    async def one_turn(fake: FakeSTTServer, ws: ServerConnection) -> None:
+        started = False
+        async for msg in ws:
+            fake.received.append(msg)
+            if isinstance(msg, str):
+                break  # {"type": "close"}
+            if not started and fake.audio_bytes() >= 0.2 * 16_000 * 2:
+                started = True
+                for ev in TURN_EVENTS[:7]:  # one complete turn
+                    await ws.send(json.dumps({**ev, "request_id": "req_1"}))
+
+    fake = await stt_server(one_turn)
+    llm = MockLLM(responses=["Sure, what do you need?"])
+    stt = CartesiaSTT(api_key=KEY, base_url=fake.url)
+    engine = CascadeEngine(stt=stt, llm=llm, tts=MockTTS())  # no VAD: Ink drives the turns
+    conn = await engine.connect(EngineOptions())
+    events: list[object] = []
+
+    async def drain() -> None:
+        async for ev in conn.events():
+            events.append(ev)
+            if isinstance(ev, ResponseDone):
+                return
+
+    drainer = asyncio.create_task(drain())
+    audio = synth_speech(0.4, 16_000)
+    for n in range(20):
+        await conn.send_audio(audio.slice(n * 0.02, (n + 1) * 0.02))
+    await asyncio.wait_for(drainer, 5)
+    await conn.aclose()
+    await engine.aclose()
+
+    def first(kind: type) -> int:
+        return next(n for n, e in enumerate(events) if isinstance(e, kind))
+
+    assert (
+        first(InputSpeechStarted)
+        < first(InputSpeechStopped)
+        < first(InputCommitted)
+        < first(ResponseStarted)
+    )
+    finals = [e.text for e in events if isinstance(e, InputTranscript) and e.is_final]
+    assert finals == ["Hey can you help me?"]
+    last_user = llm.requests[0].last_message("user")
+    assert last_user is not None and last_user.text == "Hey can you help me?"
 
 
 async def manual_script(fake: FakeSTTServer, ws: ServerConnection) -> None:
