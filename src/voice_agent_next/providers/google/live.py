@@ -1218,15 +1218,10 @@ class GeminiLiveConnection(EngineConnection):
     def _on_output_text(self, text: str) -> None:
         gen = self._gen
         if gen is None:
-            last = self._last_gen
-            if (
-                last is not None
-                and last.server_complete
-                and now() - (last.ended_at or 0.0) < _LATE_TRANSCRIPT_GRACE
-            ):
-                gen = last  # a transcript straggler of a finished generation
-            else:
-                gen = self._open_generation()
+            # a straggler between generationComplete and turnComplete joins its response
+            last = self._turn_gens[-1] if self._turn_gens else None
+            straggler = last is not None and last.server_complete
+            gen = last if straggler else self._open_generation()
         if gen is None:
             return
         gen.text.append(text)
