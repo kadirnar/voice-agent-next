@@ -979,7 +979,7 @@ class OpenAIRealtimeConnection(EngineConnection):
                     return False
                 # from here on control calls wait for the switch instead of being dropped,
                 # so what they add is either in the carried history or sent after it
-                self._begin_switch()
+                self._begin_switch(reset=False)  # keep the outage's buffer statistics
                 self._reconnecting = False
                 self._reconnect_times.append(now())
                 history = await self._carried_history()
@@ -1171,10 +1171,11 @@ class OpenAIRealtimeConnection(EngineConnection):
         if old is not None:
             self._tasks.spawn(old.close())
 
-    def _begin_switch(self) -> None:
+    def _begin_switch(self, *, reset: bool = True) -> None:
         self._switching = True
         self._switch_done.clear()
-        self._buffer.reset_stats()
+        if reset:
+            self._buffer.reset_stats()
 
     def _end_switch(self) -> None:
         self._switching = False
