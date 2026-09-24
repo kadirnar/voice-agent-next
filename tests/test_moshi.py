@@ -216,7 +216,7 @@ async def test_handshake_flavors(fake: Callable[..., Any], flavor: str) -> None:
 
 async def test_connection_refused_is_a_connection_error() -> None:
     engine = MoshiEngine(url="ws://127.0.0.1:9", connect_timeout=5)
-    with pytest.raises(ProviderConnectionError, match="moshi.server"):
+    with pytest.raises(ProviderConnectionError, match=r"moshi\.server"):
         await engine.connect(EngineOptions())
 
 

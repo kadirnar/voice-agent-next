@@ -839,6 +839,11 @@ class MoshiConnection(EngineConnection):
             self._user_pending = False
             if not self._user_speaking and self._user_speech_end is not None:
                 trigger = self.audio_time_to_wall(self._user_speech_end)
+            if self._user_reported:
+                # the agent takes the floor while the user still talks: from here on the
+                # user's speech is an overlap (and a later stop must not end *this* turn)
+                self._user_reported = False
+                self._emit(InputSpeechStopped(audio_time=self.input_audio_time))
             self._emit(InputCommitted(item_id=new_id("item_")))
         resp = _AgentResponse(self._out_pos, trigger)
         self._resp = resp
