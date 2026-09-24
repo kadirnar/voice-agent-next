@@ -325,6 +325,13 @@ class OpenAILLM(LLM):
             if self._discover_model:
                 try:
                     page = await self._client.models.list()
+                except self._openai.APIStatusError as exc:
+                    if exc.status_code in (401, 403):
+                        raise self._map_error(exc) from exc
+                    raise ConfigurationError(
+                        f"{self.provider}: cannot list the models served at {self.base_url} "
+                        f"(GET /models: HTTP {exc.status_code}); pass model=..."
+                    ) from exc
                 except Exception as exc:
                     raise self._map_error(exc) from exc
                 ids = [str(m.id) for m in getattr(page, "data", None) or []]
@@ -351,7 +358,13 @@ class OpenAILLM(LLM):
             if self._discover_model:
                 await self._ensure_model()
             else:
-                await self._client.models.list()
+                try:
+                    await self._client.models.list()
+                except self._openai.APIStatusError as exc:
+                    if exc.status_code in (401, 403):
+                        raise
+                    # the server doesn't list models, but the connection is open now
+                    logger.debug("%s: GET /models failed: %s", self.provider, exc)
             if self.PRELOAD_ON_WARMUP:
                 await self._client.chat.completions.create(
                     model=self.model,

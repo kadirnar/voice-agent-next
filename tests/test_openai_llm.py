@@ -134,12 +134,15 @@ class FakeServer:
 
     replies: list[Reply] = field(default_factory=list)
     models: list[str] = field(default_factory=lambda: ["gpt-4.1-mini"])
+    models_status: int = 200
     requests: list[httpx.Request] = field(default_factory=list)
     streams: list[SSEStream] = field(default_factory=list)
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         if request.method == "GET" and request.url.path.endswith("/models"):
+            if self.models_status != 200:
+                return error_response(self.models_status, "no such route")
             data = [
                 {"id": m, "object": "model", "created": 0, "owned_by": "me"} for m in self.models
             ]
@@ -451,6 +454,26 @@ async def test_model_discovery_without_models_is_a_configuration_error() -> None
     llm = make_llm(FakeServer([SSEStream(TEXT_STREAM)], models=[]), cls=VllmLLM)
     with pytest.raises(ConfigurationError, match="lists no models"):
         await llm.chat(user_ctx()).collect()
+    server = FakeServer([SSEStream(TEXT_STREAM)], models_status=404)
+    llm = make_llm(server, cls=VllmLLM)
+    with pytest.raises(ConfigurationError, match=r"cannot list the models.*pass model="):
+        await llm.chat(user_ctx()).collect()
+    llm = make_llm(FakeServer([SSEStream(TEXT_STREAM)], models_status=401), cls=VllmLLM)
+    with pytest.raises(AuthenticationError):
+        await llm.chat(user_ctx()).collect()
+
+
+async def test_warmup_tolerates_servers_without_a_model_list(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    server = FakeServer([SSEStream(TEXT_STREAM)], models_status=404)
+    with caplog.at_level(logging.WARNING, logger="voice_agent_next"):
+        await make_llm(server).warmup()
+    assert "warmup failed" not in caplog.text
+    denied = FakeServer([SSEStream(TEXT_STREAM)], models_status=401)
+    with caplog.at_level(logging.WARNING, logger="voice_agent_next"):
+        await make_llm(denied).warmup()
+    assert "warmup failed" in caplog.text and "HTTP 401" in caplog.text
 
 
 async def test_warmup_opens_connection_and_preloads_local_models(
