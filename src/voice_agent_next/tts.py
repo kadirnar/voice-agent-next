@@ -58,6 +58,8 @@ class SynthesizedAudio:
     text: str | None = None
     """Text of the segment this audio belongs to (set on the segment's first chunk)."""
     words: list[WordTiming] | None = None
+    """Word timings in seconds relative to the start of this stream's audio (items may
+    carry words without audio)."""
     timestamp: float = field(default_factory=now)
 
 
@@ -369,9 +371,18 @@ class SentenceStreamAdapter(SynthesizeStream):
                     if stream is not None:
                         self._segment_text = sentence
                         try:
+                            base = self._audio_duration  # sentence start on this stream
                             async for chunk in stream:
+                                words = _shift_words(chunk.words, base)
                                 if chunk.frame:
-                                    self._push_audio(chunk.frame)
+                                    self._push_audio(chunk.frame, words=words)
+                                elif words:
+                                    self._send(
+                                        SynthesizedAudio(
+                                            chunk.frame, self._request_id, self._segment_id,
+                                            words=words,
+                                        )
+                                    )  # fmt: skip
                                 prefetch()
                         finally:
                             await stream.aclose()
@@ -401,3 +412,10 @@ class SentenceStreamAdapter(SynthesizeStream):
         finally:
             jobs.close()
             await cancel_and_wait(player)
+
+
+def _shift_words(words: list[WordTiming] | None, offset: float) -> list[WordTiming] | None:
+    """Word timings moved from a sentence's own timeline onto the stream's timeline."""
+    if not words:
+        return None
+    return [WordTiming(w.word, w.start + offset, w.end + offset, w.confidence) for w in words]

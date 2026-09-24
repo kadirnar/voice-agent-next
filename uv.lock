@@ -1143,8 +1143,8 @@ version = "0.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "espeakng-loader" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or python_full_version >= '3.14'" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and python_full_version < '3.14'" },
     { name = "onnxruntime" },
     { name = "phonemizer" },
 ]
@@ -2481,11 +2481,11 @@ google = [
     { name = "google-genai" },
 ]
 kokoro = [
-    { name = "kokoro-onnx" },
+    { name = "kokoro-onnx", marker = "python_full_version < '3.14'" },
 ]
 local = [
     { name = "faster-whisper" },
-    { name = "kokoro-onnx" },
+    { name = "kokoro-onnx", marker = "python_full_version < '3.14'" },
     { name = "onnxruntime" },
     { name = "sounddevice" },
     { name = "soxr" },
@@ -2532,7 +2532,7 @@ requires-dist = [
     { name = "google-genai", marker = "extra == 'google'", specifier = ">=1.30" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jiwer", marker = "extra == 'bench'", specifier = ">=3.0" },
-    { name = "kokoro-onnx", marker = "extra == 'kokoro'", specifier = ">=0.4" },
+    { name = "kokoro-onnx", marker = "python_full_version < '3.14' and extra == 'kokoro'", specifier = ">=0.6.1" },
     { name = "livekit", marker = "extra == 'aec'", specifier = ">=1.0" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "onnxruntime", marker = "extra == 'onnx'", specifier = ">=1.19" },

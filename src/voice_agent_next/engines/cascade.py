@@ -47,7 +47,7 @@ from ..events import (
 from ..llm import LLM
 from ..metrics import EngineMetrics, Metrics
 from ..registry import create
-from ..stt import STT, StreamAdapter, STTEventType
+from ..stt import STT, StreamAdapter, STTEventType, WordTiming
 from ..text.filters import tts_clean
 from ..text.sentences import SentenceSegmenter
 from ..tools import FunctionTool
@@ -86,6 +86,8 @@ class CascadeOptions:
 class _Spoken:
     segments: list[tuple[str, float]] = field(default_factory=list)
     """(text, start offset in seconds within the item's audio)."""
+    words: list[WordTiming] = field(default_factory=list)
+    """Word timings reported by the TTS (relative to the start of the item's audio)."""
     audio_duration: float = 0.0
     text: list[str] = field(default_factory=list)
 
@@ -189,6 +191,10 @@ class CascadeConnection(EngineConnection):
         self._final_event = asyncio.Event()
         self._endpoint_task: asyncio.Task[None] | None = None
         self._speech_end_wall: float | None = None
+        # STTs with built-in turn detection (Flux, Ink, AssemblyAI...) own the end of turn:
+        # the VAD then only drives speech start/stop (barge-in), never commits.
+        self._stt_turns = bool(engine.stt is not None and engine.stt.capabilities.end_of_turn)
+        self._last_final_end: float | None = None
         self._response_task: asyncio.Task[None] | None = None
         self._spoken: dict[str, _Spoken] = {}
 
@@ -239,7 +245,7 @@ class CascadeConnection(EngineConnection):
         wall = self.audio_time_to_wall(audio_time) if audio_time is not None else None
         self._speech_end_wall = wall if wall is not None else now()
         self._emit(InputSpeechStopped(audio_time=audio_time))
-        if self.options.turn_detection:
+        if self.options.turn_detection and not self._stt_turns:
             self._schedule_endpoint()
 
     def _schedule_endpoint(self) -> None:
@@ -309,6 +315,8 @@ class CascadeConnection(EngineConnection):
                         InputTranscript(item_id=self._turn_item_id, text=partial, is_final=False)
                     )
                 elif ev.type == STTEventType.FINAL_TRANSCRIPT:
+                    if ev.transcript is not None and ev.transcript.end_time is not None:
+                        self._last_final_end = ev.transcript.end_time
                     if ev.text.strip():
                         self._turn_finals.append(ev.text)
                         self._emit(
@@ -324,7 +332,9 @@ class CascadeConnection(EngineConnection):
                 elif ev.type == STTEventType.START_OF_SPEECH and self._vad is None:
                     self._on_speech_started(None)
                 elif ev.type == STTEventType.END_OF_SPEECH and self._vad is None:
-                    self._on_speech_stopped(None)
+                    # STT audio time = our input stream time (all audio goes to the STT)
+                    end = ev.transcript.end_time if ev.transcript else None
+                    self._on_speech_stopped(end if end is not None else self._last_final_end)
                 elif ev.type == STTEventType.END_OF_TURN and self.options.turn_detection:
                     if self._endpoint_task is not None and not self._endpoint_task.done():
                         self._endpoint_task.cancel()
@@ -389,7 +399,9 @@ class CascadeConnection(EngineConnection):
         if not isinstance(msg, ChatMessage) or msg.role != "assistant":
             return None
         end = audio_end_ms / 1000.0
-        if spoken is not None and spoken.segments:
+        if spoken is not None and spoken.words:  # word-exact: TTS reported word timings
+            heard = " ".join(w.word for w in spoken.words if w.start < end)
+        elif spoken is not None and spoken.segments:
             heard = " ".join(t for t, start in spoken.segments if start < end)
         elif spoken is not None and spoken.audio_duration > 0:
             full = "".join(spoken.text)
@@ -538,6 +550,8 @@ class CascadeConnection(EngineConnection):
         feeder = asyncio.create_task(feed(), name=f"cascade-feed-{rid}")
         try:
             async for audio in tts_stream:
+                if audio.words:
+                    spoken.words.extend(audio.words)
                 if aligned and audio.text:
                     spoken.segments.append((audio.text, spoken.audio_duration))
                     self._emit(
