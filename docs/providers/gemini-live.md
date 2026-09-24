@@ -69,6 +69,7 @@ $0.018/min; see the [pricing page](https://ai.google.dev/gemini-api/docs/pricing
 | `max_buffered_audio` | `30` | cap (seconds) on audio buffered while switching connections |
 | `connect_timeout` | `15` | handshake + setup timeout |
 | `max_reconnect_attempts` | `5` | consecutive failed reconnects before the connection fails |
+| `carry_over` | `TruncateHistory()` | how the conversation is fitted into a *fresh* session when resumption is impossible (`SummarizeHistory(llm)` summarizes older turns); see `docs/concepts/session-rotation.md` |
 | `local_vad` | `True` | cheap energy VAD on the sent audio: speech-end estimates, idle detection and the start of manual turns (never automatic end of turn) |
 | `base_url`, `api_version` | Google, `v1beta` | endpoint (proxies, tests) |
 | `extra_setup` | `{}` | extra `setup` fields in API camel case, deep-merged last (`EngineOptions.extra` too) |
@@ -140,8 +141,9 @@ while user audio is buffered, then the audio sent since the latest handle (minus
 was already answered) is replayed, so no user audio is lost. A planned rotation that fails
 keeps the current connection and retries later with backoff. If the handle is rejected
 (expired) or resumption is disabled, the engine starts a fresh session, re-seeds it with the
-user/assistant text history (`historyConfig.initialHistoryInClientContent`) and replays only
-the audio after the last answered turn. Tool calls that the new session cannot know about are
+user/assistant text history fitted by `carry_over` (`historyConfig.initialHistoryInClientContent`)
+and replays only the audio after the last answered turn. Every switch emits `RotationMetrics`
+(planned or not, resumed or re-seeded, gap, buffered/replayed/lost audio). Tool calls that the new session cannot know about are
 withdrawn with `ToolCallCancelled`. If the connection keeps dying (more than
 `max_reconnect_attempts` unexpected closes within a minute), the engine gives up with a
 non-recoverable `EngineErrorEvent`.

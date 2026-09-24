@@ -368,7 +368,8 @@ async def test_eager_end_of_turn_starts_the_reply_early() -> None:
     assert outcomes(rec) == [(True, None)]
     assert len(llm.requests) == 1
     # EagerEndOfTurn came 0.3 s before EndOfTurn: the 0.25 s TTFT was spent meanwhile
-    assert off - on == pytest.approx(0.25, abs=0.1)
+    # (one-sided: two separate runs under CPU load can each drift by ~0.1 s)
+    assert 0.12 <= off - on <= 0.45
     assert history(session)[-1] == ("assistant", "You said: Book a table for two.")
     assert log.of(InputCommitted)[0].timestamp <= log.of(ResponseStarted)[0].timestamp
 

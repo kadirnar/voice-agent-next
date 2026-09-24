@@ -4,6 +4,8 @@
 
 > Status: **alpha** — 52 providers (local and cloud), native speech-to-speech engines and streaming cascades behind one runtime, a benchmark suite; APIs may still change. See the [roadmap](ROADMAP.md) and the [research report](docs/research/REPORT.md).
 
+**Documentation:** [kadirnar.github.io/voice-agent-next](https://kadirnar.github.io/voice-agent-next/) (build it locally: `uv sync --group docs && uv run mkdocs serve`).
+
 ## Why
 
 Voice agents are built in two ways:
@@ -85,6 +87,8 @@ van demo
 van providers      # what's available, what's missing
 van doctor         # environment check (audio devices, GPUs, API keys)
 ```
+
+More runnable scenarios (local agent, OpenAI Realtime, Gemini Live, telephony, tools, benchmarks, each with an offline `--mock` mode): [examples/README.md](examples/README.md).
 
 ## Providers
 

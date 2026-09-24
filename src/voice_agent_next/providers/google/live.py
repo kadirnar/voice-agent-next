@@ -26,7 +26,11 @@ when the server sends ``goAway``, proactively after ``rotate_after`` seconds, af
 for an idle moment (no generation, no pending tool call, user silent, resumable handle)
 and are forced shortly before the ``goAway`` deadline. The switch is make-before-break:
 user audio is buffered while the new connection is set up, and the audio sent since the
-last handle (plus a small safety margin) is replayed, so no user audio is lost.
+last handle (plus a small safety margin) is replayed, so no user audio is lost. When the
+session cannot be resumed (expired handle, ``session_resumption=False``) the new session
+is seeded with the conversation so far, fitted by the ``carry_over`` strategy
+(:mod:`voice_agent_next.engines.rotation`). Every switch is reported as
+:class:`~voice_agent_next.metrics.RotationMetrics`.
 
 **Why raw websockets instead of google-genai:** the engine needs full control over the
 connection lifecycle (make-before-break rotation, replaying buffered audio into the new
@@ -54,6 +58,7 @@ from ...audio.frame import AudioFrame
 from ...audio.resample import StreamResampler
 from ...chat import ChatContext, ChatMessage, FunctionCall, FunctionCallOutput
 from ...engine import EngineCapabilities, EngineConnection, EngineOptions, S2SEngine
+from ...engines.rotation import HistoryCarryOver, TruncateHistory
 from ...errors import (
     AuthenticationError,
     ConfigurationError,
@@ -79,7 +84,7 @@ from ...events import (
     ResponseToolCall,
     ToolCallCancelled,
 )
-from ...metrics import EngineMetrics
+from ...metrics import EngineMetrics, RotationMetrics
 from ...registry import register_provider
 from ...tools import FunctionTool, ToolScheduling
 from ...utils.aio import BackgroundTasks, cancel_and_wait
@@ -325,6 +330,9 @@ class GeminiLiveEngine(S2SEngine):
         max_buffered_audio: cap on user audio buffered during a switch (seconds).
         connect_timeout: WebSocket handshake + setup timeout.
         max_reconnect_attempts: consecutive failed reconnects before giving up.
+        carry_over: how the conversation is fitted into a *fresh* session when the old
+            one cannot be resumed (default: :class:`TruncateHistory`; see
+            :class:`~voice_agent_next.engines.rotation.SummarizeHistory`).
         local_vad: run a cheap energy VAD on the sent audio to estimate where speech ended
             (voice-to-voice metrics), to rotate only while the user is silent and, with
             ``turn_detection=False``, to open a manual turn when the user starts speaking.
@@ -359,6 +367,7 @@ class GeminiLiveEngine(S2SEngine):
         max_reconnect_attempts: int = 5,
         local_vad: bool = True,
         extra_setup: Mapping[str, Any] | None = None,
+        carry_over: HistoryCarryOver | None = None,
     ) -> None:
         model = model or DEFAULT_MODEL
         if tool_behavior is None:
@@ -410,6 +419,7 @@ class GeminiLiveEngine(S2SEngine):
         self.max_reconnect_attempts = max_reconnect_attempts
         self.local_vad = local_vad
         self.extra_setup = dict(extra_setup or {})
+        self.carry_over: HistoryCarryOver = carry_over or TruncateHistory()
 
     def _resolve_api_key(self) -> str:
         key = self._api_key or next((os.environ[e] for e in API_KEY_ENV if os.environ.get(e)), "")
@@ -538,6 +548,15 @@ class GeminiLiveConnection(EngineConnection):
         """Number of WebSocket connections opened so far."""
         self.resumptions = 0
         """Number of connection switches that resumed the server-side session."""
+        self.rotations = 0
+        """Number of connection switches (rotations and reconnects) so far."""
+        self._rotation_planned = True
+        self._switch_started = 0.0
+        self._switch_buffered = 0.0
+        self._switch_lost = 0.0
+        self._switch_replayed = 0.0
+        self._switch_failed = 0
+        self._switch_carried = 0
         # ---- resumption / rotation
         self._handle: str | None = None
         self._resumable = False
@@ -617,8 +636,11 @@ class GeminiLiveConnection(EngineConnection):
             self._end_server_turn()
         await super().aclose()
 
-    async def _open(self, handle: str | None) -> tuple[ClientConnection, list[dict[str, Any]]]:
-        """Connect, send ``setup`` and wait for ``setupComplete``."""
+    async def _open(
+        self, handle: str | None, *, carry: bool = False
+    ) -> tuple[ClientConnection, list[dict[str, Any]]]:
+        """Connect, send ``setup`` and wait for ``setupComplete``. A fresh session is seeded
+        with the history (``carry``: fitted by the engine's ``carry_over`` strategy)."""
         from websockets.asyncio.client import connect
         from websockets.exceptions import (
             ConnectionClosed,
@@ -628,7 +650,11 @@ class GeminiLiveConnection(EngineConnection):
         )
 
         url, headers = self._e._endpoint()
-        turns = self._history_turns() if handle is None else []
+        turns: list[dict[str, Any]] = []
+        if handle is None:
+            ctx = await self._e.carry_over(self.chat_ctx) if carry else self.chat_ctx
+            turns = self._history_turns(ctx)
+        self._switch_carried = len(turns)
         setup = self._build_setup(handle, seed_history=bool(turns))
         try:
             ws = await connect(
@@ -723,16 +749,20 @@ class GeminiLiveConnection(EngineConnection):
         setup = _deep_merge(setup, opts.extra)
         return {"setup": setup}
 
-    def _history_turns(self) -> list[dict[str, Any]]:
-        """User/assistant text history as ``Content`` turns (tool items are not re-seeded)."""
+    def _history_turns(self, ctx: ChatContext | None = None) -> list[dict[str, Any]]:
+        """User/assistant text history as ``Content`` turns (tool items are not re-seeded).
+        A carried-over summary (``SummarizeHistory``) becomes a user turn."""
         turns: list[dict[str, Any]] = []
-        for item in self.chat_ctx.items:
-            if not isinstance(item, ChatMessage) or item.role not in ("user", "assistant"):
+        for item in (ctx if ctx is not None else self.chat_ctx).items:
+            if not isinstance(item, ChatMessage):
+                continue
+            summary = item.metadata.get("carry_over") == "summary"
+            if item.role not in ("user", "assistant") and not summary:
                 continue
             text = item.text.strip()
             if not text:
                 continue
-            role = "user" if item.role == "user" else "model"
+            role = "model" if item.role == "assistant" else "user"
             if turns and turns[-1]["role"] == role:
                 turns[-1]["parts"].append({"text": text})
             else:
@@ -790,7 +820,7 @@ class GeminiLiveConnection(EngineConnection):
             self._replay = deque(e for e in self._replay if e.kind == "audio")
             self._replay_audio = sum(e.audio_duration for e in self._replay)
         logger.warning("gemini-live: connection closed unexpectedly (%s %s)", code, reason)
-        self._start_rotation(f"connection closed ({code} {reason})".strip())
+        self._start_rotation(f"connection closed ({code} {reason})".strip(), planned=False)
 
     def _dispatch(self, msg: dict[str, Any]) -> None:
         try:
@@ -818,10 +848,11 @@ class GeminiLiveConnection(EngineConnection):
         entry = _Outgoing(json.dumps(payload), kind, start, duration)
         ws = self._ws
         if self._switching or ws is None:
+            self._switch_buffered += entry.audio_duration
             self._queue(entry)
         elif not await self._deliver(ws, entry):
             self._queue(entry, front=True)
-            self._start_rotation("connection lost while sending")
+            self._start_rotation("connection lost while sending", planned=False)
 
     async def _deliver(self, ws: ClientConnection, entry: _Outgoing) -> bool:
         from websockets.exceptions import ConnectionClosed
@@ -855,6 +886,7 @@ class GeminiLiveConnection(EngineConnection):
             self._outbox_audio -= victim.audio_duration
             dropped += victim.audio_duration
         if dropped:
+            self._switch_lost += dropped
             logger.warning("gemini-live: reconnect buffer full, dropped %.2fs of audio", dropped)
 
     def _trim_replay(self) -> None:
@@ -911,11 +943,17 @@ class GeminiLiveConnection(EngineConnection):
             return False  # a requested response has not started yet
         return not self._e.session_resumption or (self._resumable and self._handle is not None)
 
-    def _start_rotation(self, reason: str) -> None:
+    def _start_rotation(self, reason: str, *, planned: bool = True) -> None:
         if self._closed:
             return
         if self._rotation_task is not None and not self._rotation_task.done():
+            if not planned:
+                self._rotation_planned = False
             return  # the running rotation re-checks the new connection before finishing
+        self._rotation_planned = planned
+        self._switch_started = now()
+        self._switch_buffered = self._switch_lost = self._switch_replayed = 0.0
+        self._switch_failed = 0
         self._switching = True
         self._switch_from_epoch = self._epoch
         self._saved_deadline = self._rotation_deadline
@@ -934,7 +972,7 @@ class GeminiLiveConnection(EngineConnection):
         while not self._closed:
             handle = self._handle if self._e.session_resumption else None
             try:
-                ws, early = await self._open(handle)
+                ws, early = await self._open(handle, carry=True)
             except AuthenticationError as exc:
                 self._fail(exc)
                 return
@@ -971,6 +1009,7 @@ class GeminiLiveConnection(EngineConnection):
                 if handle is not None:
                     self.resumptions += 1
                 status: EngineStatusKind = "resumed" if handle is not None else "reconnected"
+                self._report_switch(reason, resumed=handle is not None, attempts=failures + 1)
                 self._emit(EngineStatus(status=status, detail=reason))
                 return
             failures += 1
@@ -982,9 +1021,36 @@ class GeminiLiveConnection(EngineConnection):
             await asyncio.sleep(delay)
             delay = min(delay * 2, 8.0)
 
+    def _report_switch(self, reason: str, *, resumed: bool, attempts: int) -> None:
+        self.rotations += 1
+        lost = self._switch_lost
+        if lost > 0:  # never a silent loss (research note 05, Pipecat #5305)
+            msg = f"Gemini Live: {lost:.2f}s of user audio lost while reconnecting"
+            error = ProviderConnectionError(msg, provider="google")
+            self._emit(EngineErrorEvent(error=error, recoverable=True))
+        self._e.emit(
+            "metrics",
+            RotationMetrics(
+                provider=self._e.provider,
+                model=self._e.model,
+                reason=reason,
+                planned=self._rotation_planned,
+                resumed=resumed,
+                rotation=self.rotations,
+                gap=now() - self._switch_started,
+                attempts=attempts,
+                buffered_audio=self._switch_buffered,
+                replayed_audio=self._switch_replayed,
+                lost_audio=lost,
+                carried_items=0 if resumed else self._switch_carried,
+                failed_responses=self._switch_failed,
+            ),
+        )
+
     def _switch(self, ws: ClientConnection, early: list[dict[str, Any]], *, resumed: bool) -> None:
         """Retire the previous connection's server-side state and install ``ws``."""
         if self._gen is not None:
+            self._switch_failed += 1
             self._finish_generation(self._gen, "incomplete")
         if self._server_turn_open:
             self._end_server_turn()
@@ -1060,6 +1126,7 @@ class GeminiLiveConnection(EngineConnection):
                     self._replay.append(rest)
                     self._replay_audio += rest.audio_duration
                 return False
+            self._switch_replayed += entry.audio_duration
         return await self._flush_outbox(ws)
 
     async def _flush_outbox(self, ws: ClientConnection) -> bool:

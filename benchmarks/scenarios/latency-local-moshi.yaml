@@ -1,0 +1,34 @@
+# T1 latency of a local full-duplex model (Kyutai Moshi / NVIDIA PersonaPlex) served by
+# `moshi.server` on this machine: the latency-local stimuli (Kokoro am_adam, same text and
+# pacing), with more room around each question because Moshi talks at length and greets.
+#
+#   python -m moshi.server --hf-repo kyutai/moshika-pytorch-q8 --static none   # see docs
+#   uv sync --extra moshi --extra kokoro --extra bench
+#   van bench latency --engine '{provider: moshi/moshika-q8, url: "ws://localhost:8998"}' \
+#       -s benchmarks/scenarios/latency-local-moshi.yaml --turns 12 --sessions 2
+#
+# How full-duplex v2v is measured: exactly like every other engine, on the call recording.
+# t_uoff is the annotated end of each question, t_aon the first agent onset after it
+# (reference VAD). Moshi may start *before* the user finished (a negative v2v, counted in
+# premature_rate) and backchannels count as onsets; "missed" means it stayed silent for
+# reply_timeout. The session's own voice_to_voice starts at the engine's local VAD end of
+# speech. moshi.server serves one conversation at a time: sessions run one after another.
+# docs/providers/moshi.md has the results on an RTX 5070 Ti.
+name: latency-local-moshi
+version: 1
+description: >-
+  latency-local questions (Kokoro am_adam) for a local full-duplex Moshi/PersonaPlex server.
+sample_rate: 16000
+loudness_dbfs: -20.0
+lead_in: 0.5
+stimuli: tts
+tts: {provider: kokoro/v1.0-fp16, voice: am_adam}
+reply_timeout: 10.0
+gap_after_reply: 0.8
+turns:
+  - {id: "time", text: "What time does the store open tomorrow?"}
+  - {id: "table", text: "Can you book a table for two people tonight?"}
+  - {id: "order", text: "Where is my order? I placed it last week."}
+  - {id: "sunday", text: "Are you open on Sunday afternoon?"}
+  - {id: "flight", text: "Please change my flight to Friday morning."}
+  - {id: "refund", text: "How long does a refund usually take?"}
