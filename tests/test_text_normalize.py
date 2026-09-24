@@ -35,9 +35,9 @@ CASES: list[tuple[str, str]] = [
     ("I have 3 cats.", "I have three cats."),
     ("It seats 12 people", "It seats twelve people"),
     ("Only 0 left", "Only zero left"),
-    ("About 1,234 people", "About one thousand two hundred thirty-four people"),
+    ("About 1,234 people", "About one thousand two hundred thirty four people"),
     ("We sold 1,000,000 units", "We sold one million units"),
-    ("It has 58213 rows", "It has fifty-eight thousand two hundred thirteen rows"),
+    ("It has 58213 rows", "It has fifty eight thousand two hundred thirteen rows"),
     ("Pi is 3.14", "Pi is three point one four"),
     ("Add .5 cup", "Add point five cup"),
     ("It fell to -7 today", "It fell to minus seven today"),
@@ -46,12 +46,12 @@ CASES: list[tuple[str, str]] = [
     # ordinals
     ("She came 1st", "She came first"),
     ("the 2nd and 3rd floors", "the second and third floors"),
-    ("our 21st year", "our twenty-first year"),
+    ("our 21st year", "our twenty first year"),
     ("the 112th street", "the one hundred twelfth street"),
     # currency
-    ("The total is $42.50.", "The total is forty-two dollars and fifty cents."),
+    ("The total is $42.50.", "The total is forty two dollars and fifty cents."),
     ("It costs $1.", "It costs one dollar."),
-    ("Only $0.99", "Only ninety-nine cents"),
+    ("Only $0.99", "Only ninety nine cents"),
     ("Pay $12.00 today", "Pay twelve dollars today"),
     ("That is $1,250 in total", "That is one thousand two hundred fifty dollars in total"),
     ("A $1.5 million deal", "A one point five million dollars deal"),
@@ -74,37 +74,37 @@ CASES: list[tuple[str, str]] = [
     ("A 5m pole", "A five meters pole"),
     ("Put 5 m apart", "Put five m apart"),
     ("It is -5°C outside", "It is minus five degrees Celsius outside"),
-    ("Set it to 72°F", "Set it to seventy-two degrees Fahrenheit"),
+    ("Set it to 72°F", "Set it to seventy two degrees Fahrenheit"),
     ("A 512 GB disk", "A five hundred twelve gigabytes disk"),
-    ("It takes 25 min", "It takes twenty-five minutes"),
+    ("It takes 25 min", "It takes twenty five minutes"),
     ("It is 2x faster", "It is two times faster"),
     # times
-    ("See you at 4:30 PM.", "See you at four thirty P M."),
-    ("See you at 4:30 PM today", "See you at four thirty P M today"),
-    ("Open at 9:05 am", "Open at nine oh five A M"),
-    ("Leaves at 7 AM.", "Leaves at seven A M."),
-    ("Call at 5pm", "Call at five P M"),
-    ("Meet at 5 p.m. tomorrow", "Meet at five P M tomorrow"),
-    ("Meet at 5 p.m. Then leave", "Meet at five P M. Then leave"),
+    ("See you at 4:30 PM.", "See you at four thirty pee em."),
+    ("See you at 4:30 PM today", "See you at four thirty pee em today"),
+    ("Open at 9:05 am", "Open at nine oh five ay em"),
+    ("Leaves at 7 AM.", "Leaves at seven ay em."),
+    ("Call at 5pm", "Call at five pee em"),
+    ("Meet at 5 p.m. tomorrow", "Meet at five pee em tomorrow"),
+    ("Meet at 5 p.m. Then leave", "Meet at five pee em. Then leave"),
     ("Come at 12:00", "Come at twelve o'clock"),
-    ("Lands at 16:45", "Lands at sixteen forty-five"),
+    ("Lands at 16:45", "Lands at sixteen forty five"),
     ("Lands at 18:00", "Lands at eighteen hundred"),
     # dates and years
     ("on March 3rd", "on March third"),
-    ("on July 14, 2025.", "on July fourteenth, twenty twenty-five."),
+    ("on July 14, 2025.", "on July fourteenth, twenty twenty five."),
     ("by Sept 5", "by September fifth"),
     ("on the 3rd of March", "on the third of March"),
-    ("on 3 March 2024", "on third of March, twenty twenty-four"),
-    ("due 2025-03-04", "due March fourth, twenty twenty-five"),
-    ("due 3/4/2025", "due March fourth, twenty twenty-five"),
-    ("due 25/12/2024", "due December twenty-fifth, twenty twenty-four"),
-    ("in March 2025", "in March twenty twenty-five"),
-    ("in 1999", "in nineteen ninety-nine"),
+    ("on 3 March 2024", "on third of March, twenty twenty four"),
+    ("due 2025-03-04", "due March fourth, twenty twenty five"),
+    ("due 3/4/2025", "due March fourth, twenty twenty five"),
+    ("due 25/12/2024", "due December twenty fifth, twenty twenty four"),
+    ("in March 2025", "in March twenty twenty five"),
+    ("in 1999", "in nineteen ninety nine"),
     ("since 2005", "since two thousand five"),
     ("by 2030", "by twenty thirty"),
     ("founded in 1905", "founded in nineteen oh five"),
     ("in 1900", "in nineteen hundred"),
-    ("from 2023-2024", "from twenty twenty-three to twenty twenty-four"),
+    ("from 2023-2024", "from twenty twenty three to twenty twenty four"),
     ("the 1990s", "the nineteen nineties"),
     ("the '80s", "the eighties"),
     ("in the 90s", "in the nineties"),
@@ -116,16 +116,16 @@ CASES: list[tuple[str, str]] = [
     ("add 1/2 cup", "add one half cup"),
     ("3/4 full", "three quarters full"),
     ("2/3 done", "two thirds done"),
-    ("open 24/7", "open twenty-four seven"),
+    ("open 24/7", "open twenty four seven"),
     # phone numbers and IDs, digit by digit
-    ("Call 555-0142.", "Call five five five, zero one four two."),
+    ("Call 555-0142.", "Call five-five-five, zero-one-four-two."),
     (
         "Call (415) 555-0142",
-        "Call four one five, five five five, zero one four two",
+        "Call four-one-five, five-five-five, zero-one-four-two",
     ),
     (
         "Call +1 415-555-0142",
-        "Call plus one, four one five, five five five, zero one four two",
+        "Call plus one, four-one-five, five-five-five, zero-one-four-two",
     ),
     (
         "Dial +442071838750",
@@ -133,16 +133,16 @@ CASES: list[tuple[str, str]] = [
     ),
     (
         "Call 1-800-555-1234",
-        "Call one, eight zero zero, five five five, one two three four",
+        "Call one, eight-zero-zero, five-five-five, one-two-three-four",
     ),
     ("Your order number is 58213.", "Your order number is five eight two one three."),
     ("The zip code was 94107?", "The zip code was nine four one zero seven?"),
     ("Your PIN is 1234", "Your PIN is one two three four"),
-    ("Order #4521 shipped", "Order number four thousand five hundred twenty-one shipped"),
+    ("Order #4521 shipped", "Order number four thousand five hundred twenty one shipped"),
     ("Ref 1234567", "Ref one two three four five six seven"),
     ("Code 1234567 works", "Code one two three four five six seven works"),
-    ("gate B12", "gate B twelve"),
-    ("an A320 jet", "an A three two zero jet"),
+    ("gate B12", "gate bee twelve"),
+    ("an A320 jet", "an ay three two zero jet"),
     ("COVID-19 news", "COVID nineteen news"),
     ("Use v1.2.3", "Use version one point two point three"),
     ("No. 5 wins", "number five wins"),
@@ -150,8 +150,8 @@ CASES: list[tuple[str, str]] = [
     ("Mail anna.lee@example.com.", "Mail anna dot lee at example dot com."),
     ("Mail support@acme.io", "Mail support at acme dot io"),
     ("Visit docs.example.org/setup.", "Visit docs dot example dot org slash setup."),
-    ("See https://www.example.com", "See W W W dot example dot com"),
-    ("Go to example.com/a-b", "Go to example dot com slash A dash B"),
+    ("See https://www.example.com", "See double-you double-you double-you dot example dot com"),
+    ("Go to example.com/a-b", "Go to example dot com slash ay dash bee"),
     # abbreviations and initialisms
     ("Dr. Smith is in", "Doctor Smith is in"),
     ("Mrs. Jones and Mr. Lee", "Missus Jones and Mister Lee"),
@@ -162,9 +162,9 @@ CASES: list[tuple[str, str]] = [
     ("Acme Inc. makes it", "Acme Incorporated makes it"),
     ("cats vs dogs", "cats versus dogs"),
     ("It's approx. 5", "It's approximately five"),
-    ("the U.S. market", "the U S market"),
-    ("Fly to NYC", "Fly to N Y C"),
-    ("Ask the AI", "Ask the A I"),
+    ("the U.S. market", "the you ess market"),
+    ("Fly to NYC", "Fly to en why see"),
+    ("Ask the AI", "Ask the ay eye"),
     ("It is OK", "It is okay"),
     ("NASA said", "NASA said"),
     ("Chapter IV", "Chapter IV"),
@@ -187,16 +187,16 @@ def test_number_words() -> None:
     assert cardinal(0) == "zero"
     assert cardinal(105) == "one hundred five"
     assert cardinal(1_000_001) == "one million one"
-    assert cardinal(-42) == "minus forty-two"
+    assert cardinal(-42) == "minus forty two"
     assert cardinal(10**21) == "one " + " ".join(["zero"] * 21)  # beyond the scales
     assert [ordinal(n) for n in (1, 2, 3, 4, 5, 8, 9, 12, 20, 21, 100, 1000)] == [
         "first", "second", "third", "fourth", "fifth", "eighth", "ninth", "twelfth",
-        "twentieth", "twenty-first", "one hundredth", "one thousandth",
+        "twentieth", "twenty first", "one hundredth", "one thousandth",
     ]  # fmt: skip
     assert spell_digits("0142") == "zero one four two"
     assert [year(y) for y in (1999, 2000, 2005, 2010, 1905, 1800, 999)] == [
-        "nineteen ninety-nine", "two thousand", "two thousand five", "twenty ten",
-        "nineteen oh five", "eighteen hundred", "nine hundred ninety-nine",
+        "nineteen ninety nine", "two thousand", "two thousand five", "twenty ten",
+        "nineteen oh five", "eighteen hundred", "nine hundred ninety nine",
     ]  # fmt: skip
 
 
@@ -212,7 +212,7 @@ def test_bench_smoke_hard_texts_are_spoken() -> None:
 # ---------------------------------------------------------------------- offset map
 def test_offset_map_points_back_to_the_original() -> None:
     n = EnglishNormalizer().normalize("Pay $12.50 by 5pm, ok")
-    assert n.text == "Pay twelve dollars and fifty cents by five P M, ok"
+    assert n.text == "Pay twelve dollars and fifty cents by five pee em, ok"
     assert n.changed
     i = n.text.index("dollars")
     assert n.to_original(i, i + len("dollars")) == (4, 10)  # "$12.50"
@@ -221,7 +221,7 @@ def test_offset_map_points_back_to_the_original() -> None:
     assert n.original[slice(*n.to_original(j, j + 2))] == "by"
     k = n.text.index("five")
     assert n.original[slice(*n.to_original(k, len(n.text)))] == "5pm, ok"
-    assert [r.text for r in n.replacements] == ["twelve dollars and fifty cents", "five P M"]
+    assert [r.text for r in n.replacements] == ["twelve dollars and fifty cents", "five pee em"]
 
 
 def test_offset_map_rejects_overlaps_and_pads_glued_words() -> None:
@@ -235,7 +235,7 @@ def test_offset_map_rejects_overlaps_and_pads_glued_words() -> None:
 def test_context_is_seen_but_not_rewritten() -> None:
     norm = EnglishNormalizer()
     assert norm.normalize("58213", context="order number is ").text == "five eight two one three"
-    assert norm.normalize("58213").text == "fifty-eight thousand two hundred thirteen"
+    assert norm.normalize("58213").text == "fifty eight thousand two hundred thirteen"
 
 
 # ---------------------------------------------------------------- word alignment
@@ -250,7 +250,7 @@ def test_word_aligner_merges_spoken_words_into_the_original_word() -> None:
     words = aligner.map(_timings(n.text)) + aligner.finish()
     assert [w.word for w in words] == ["Total", "$42.50,", "due", "at", "4:30 PM", "today."]
     money = words[1]
-    assert (money.start, money.end) == (1.0, 5.5)  # "forty-two" .. "cents,"
+    assert (money.start, money.end) == (1.0, 6.5)  # "forty" .. "cents,"
 
 
 def test_word_aligner_holds_a_group_until_it_is_complete() -> None:
@@ -264,7 +264,7 @@ def test_word_aligner_holds_a_group_until_it_is_complete() -> None:
 
 
 def test_word_aligner_survives_split_and_missing_words() -> None:
-    n = EnglishNormalizer().normalize("It is 21 now")  # It is twenty-one now
+    n = EnglishNormalizer().normalize("It is 21 now")  # It is twenty one now
     aligner = WordAligner()
     aligner.add(n)
     pieces = [WordTiming(w, i, i + 1) for i, w in enumerate(["It", "twenty", "one", "now"])]

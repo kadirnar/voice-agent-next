@@ -1,17 +1,17 @@
 """Spoken-form text normalization for TTS input.
 
 LLM replies are full of digits, prices, times, dates, e-mail addresses and URLs. Many TTS
-models read them badly ("58213" as "five tu o thiurt", "$42.50" as "dollar forty-two
-fifty"). A normalizer rewrites them as words before synthesis::
+models read them badly (Pocket TTS reads "58213" as "five tu o thiurt"). A normalizer
+rewrites them as words before synthesis::
 
     >>> from voice_agent_next.text.normalize import normalize_text
     >>> normalize_text("The total is $42.50, due March 3rd at 4:30 PM.")
-    'The total is forty-two dollars and fifty cents, due March third at four thirty P M.'
+    'The total is forty two dollars and fifty cents, due March third at four thirty pee em.'
 
 Every normalizer returns a :class:`NormalizedText` that remembers which span of the
 original text each rewritten span came from, so word timings reported by a TTS on the
 normalized text can be mapped back to the words the LLM wrote (:class:`WordAligner`):
-barge-in truncation keeps "$42.50" in the chat history, not "forty-two dollars and".
+barge-in truncation keeps "$42.50" in the chat history, not "forty two dollars and".
 
 Languages are pluggable (:func:`register_normalizer`): English has a dependency-free
 rule set (:class:`EnglishNormalizer`); other languages get numbers and percentages via
@@ -132,7 +132,7 @@ class WordAligner:
 
     Feed the normalized texts in the order they are synthesized (:meth:`add`), then the
     TTS's word timings in order (:meth:`map`). Consecutive spoken words that come from one
-    original word ("forty-two dollars and fifty cents" <- "$42.50") are merged into one
+    original word ("forty two dollars and fifty cents" <- "$42.50") are merged into one
     timing that carries the original word. A group is released as soon as its last spoken
     word is seen; one whose words are split across calls to :meth:`map` is held back until
     then, so call :meth:`finish` at the end of a segment to release it.
@@ -306,14 +306,15 @@ def _under_thousand(n: int) -> str:
     words = [f"{_ONES[hundreds]} hundred"] if hundreds else []
     if rest >= 20:
         tens, ones = divmod(rest, 10)
-        words.append(_TENS[tens] + (f"-{_ONES[ones]}" if ones else ""))
+        # "forty two", not "forty-two": espeak-based models (Piper) pause at the hyphen
+        words.append(_TENS[tens] + (f" {_ONES[ones]}" if ones else ""))
     elif rest:
         words.append(_ONES[rest])
     return " ".join(words)
 
 
 def cardinal(n: int) -> str:
-    """``1234`` -> ``"one thousand two hundred thirty-four"`` (American, no "and")."""
+    """``1234`` -> ``"one thousand two hundred thirty four"`` (American, no "and"; no hyphens)."""
     if n < 0:
         return "minus " + cardinal(-n)
     if n < 1000:
@@ -331,7 +332,7 @@ def cardinal(n: int) -> str:
 
 
 def ordinal(n: int) -> str:
-    """``21`` -> ``"twenty-first"``."""
+    """``21`` -> ``"twenty first"``."""
     words = cardinal(n)
     head, sep, last = words.rpartition(" ")
     stem, hyphen, unit = last.rpartition("-")
@@ -350,8 +351,8 @@ def spell_digits(digits: str) -> str:
 
 
 def year(y: int) -> str:
-    """``1999`` -> ``"nineteen ninety-nine"``, ``2005`` -> ``"two thousand five"``,
-    ``1905`` -> ``"nineteen oh five"``, ``2025`` -> ``"twenty twenty-five"``."""
+    """``1999`` -> ``"nineteen ninety nine"``, ``2005`` -> ``"two thousand five"``,
+    ``1905`` -> ``"nineteen oh five"``, ``2025`` -> ``"twenty twenty five"``."""
     if y < 1000 or y >= 10000 or (2000 <= y < 2010) or y % 1000 == 0:
         return cardinal(y)
     hi, lo = divmod(y, 100)
@@ -383,9 +384,21 @@ def _plural(value: str, singular: str, plural: str) -> str:
     return singular if value in ("1", "-1") else plural
 
 
+_LETTER_NAMES = dict(
+    zip(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        "ay bee see dee ee eff jee aitch eye jay kay el em en oh pee cue ar ess tee you vee "
+        "double-you ex why zee".split(),
+        strict=True,
+    )
+)
+
+
 def _letters(word: str) -> str:
-    """``"NYC"`` -> ``"N Y C"``."""
-    return " ".join(word.upper())
+    """``"NYC"`` -> ``"en why see"``: letter names as words, which every model tested
+    (Pocket TTS, Kokoro, Piper) reads as letters; bare capitals are often read as a word
+    ("Nysi")."""
+    return " ".join(_LETTER_NAMES.get(ch, ch) for ch in word.upper())
 
 
 # ------------------------------------------------------------------- English rules
@@ -511,7 +524,7 @@ def _say_chunk(chunk: str) -> str:
         if p.isdigit():
             out.append(spell_digits(p) if len(p) > 2 else cardinal(int(p)))
         elif p.lower() == "www":
-            out.append("W W W")
+            out.append(_letters("WWW"))
         elif len(p) == 1 or (p.isupper() and len(p) <= 3 and p not in ("COM", "ORG", "NET")):
             out.append(_letters(p))
         else:
@@ -612,16 +625,16 @@ class EnglishNormalizer(RuleNormalizer):
         plus = s.startswith("+")
         groups = re.findall(r"\d+", s)
         if plus and len(groups) == 1:  # compact international number
-            g = groups[0]
-            return "plus " + spell_digits(g)
-        words = [spell_digits(g) for g in groups]
+            return "plus " + spell_digits(groups[0])
+        # "five-five-five, zero-one-four-two": Pocket TTS runs "five five five, zero" together
+        words = [spell_digits(g).replace(" ", "-") for g in groups]
         if plus:
             words[0] = "plus " + words[0]
         return ", ".join(words)
 
     @staticmethod
     def _digit_groups(m: re.Match[str], text: str) -> str:
-        return ", ".join(spell_digits(g) for g in m.group().split("-"))
+        return ", ".join(spell_digits(g).replace(" ", "-") for g in m.group().split("-"))
 
     @staticmethod
     def _version(m: re.Match[str], text: str) -> str:
@@ -665,7 +678,7 @@ class EnglishNormalizer(RuleNormalizer):
         return spoken
 
     def _time(self, m: re.Match[str], text: str) -> str | None:
-        ampm = f"{m.group(4)} {m.group(5)}".upper() if m.group(4) else None
+        ampm = _letters(m.group(4) + m.group(5)) if m.group(4) else None
         spoken = self._clock(int(m.group(1)), int(m.group(2)), ampm)
         if spoken is None:
             return None
@@ -674,7 +687,7 @@ class EnglishNormalizer(RuleNormalizer):
         return spoken + ("." if _sentence_end(m, text) else "")
 
     def _time_ampm(self, m: re.Match[str], text: str) -> str | None:
-        ampm = f"{m.group(2)} {m.group(3)}".upper()
+        ampm = _letters(m.group(2) + m.group(3))
         spoken = self._clock(int(m.group(1)), 0, ampm)
         if spoken is None:
             return None
@@ -851,7 +864,8 @@ class EnglishNormalizer(RuleNormalizer):
         key = m.group(1).lower()
         spoken = {
             "e.g": "for example", "i.e": "that is", "a.k.a": "also known as",
-            "u.s.a": "U S A", "u.s": "U S", "u.k": "U K", "a.m": "A M", "p.m": "P M",
+            "u.s.a": _letters("USA"), "u.s": _letters("US"), "u.k": _letters("UK"),
+            "a.m": _letters("AM"), "p.m": _letters("PM"),
         }[key]  # fmt: skip
         return spoken + ("." if _sentence_end(m, text) and key not in ("e.g", "i.e") else "")
 

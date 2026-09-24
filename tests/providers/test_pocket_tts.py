@@ -568,7 +568,7 @@ async def test_numbers_are_spoken_and_word_timings_point_to_the_original(
     tts = PocketTTS()
     items = await collect(tts, "Your order 58213 costs $42.50.")
     assert backend.model.calls[0]["text"] == (
-        "Your order five eight two one three costs forty-two dollars and fifty cents."
+        "Your order five eight two one three costs forty two dollars and fifty cents."
     )
     assert items[0].text == "Your order 58213 costs $42.50."
     assert [w.word for w in words_of(items)] == ["Your", "order", "58213", "costs", "$42.50."]

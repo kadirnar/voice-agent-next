@@ -7,13 +7,13 @@ synthesis:
 
 | The LLM writes | The TTS gets |
 | --- | --- |
-| `The total is $42.50.` | The total is forty-two dollars and fifty cents. |
+| `The total is $42.50.` | The total is forty two dollars and fifty cents. |
 | `Your order number is 58213.` | Your order number is five eight two one three. |
-| `See you March 3rd at 4:30 PM.` | See you March third at four thirty P M. |
-| `Signed on July 14, 2025.` | Signed on July fourteenth, twenty twenty-five. |
-| `Call 555-0142.` | Call five five five, zero one four two. |
+| `See you March 3rd at 4:30 PM.` | See you March third at four thirty pee em. |
+| `Signed on July 14, 2025.` | Signed on July fourteenth, twenty twenty five. |
+| `Call 555-0142.` | Call five-five-five, zero-one-four-two. |
 | `Mail anna.lee@example.com.` | Mail anna dot lee at example dot com. |
-| `Dr. Smith, e.g. at 7 AM` | Doctor Smith, for example at seven A M |
+| `Dr. Smith, e.g. at 7 AM` | Doctor Smith, for example at seven ay em |
 
 The chat history, the transcript events and barge-in truncation still use the text the
 LLM wrote. The normalized text only goes to the TTS model.
@@ -141,9 +141,9 @@ a number that arrives in the next chunk.
 
 **Word timings.** Each `NormalizedText` keeps an offset map back to the original. A
 `WordAligner` maps the word timings the TTS reports on the spoken text back to the
-original words. It merges "forty-two dollars and fifty cents" into a single `$42.50`
+original words. It merges "forty two dollars and fifty cents" into a single `$42.50`
 timing that starts with the first spoken word. When the user interrupts, the truncated
-assistant message says `The total is $42.50,`, never `The total is forty-two dollars`.
+assistant message says `The total is $42.50,`, never `The total is forty two dollars`.
 With a sentence-at-a-time TTS, the segment text (`SynthesizedAudio.text`) is the
 original sentence too.
 
