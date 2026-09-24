@@ -120,6 +120,9 @@ class APIEndpoint:
                 endpoints, a key is only required by OpenAI's own host.
         """
         resolved = (base_url or first_env(base_url_env) or default_base_url).strip().rstrip("/")
+        scheme, sep, rest = resolved.partition("://")
+        if sep and scheme.lower() in ("ws", "wss"):  # e.g. a variable shared with the engine
+            resolved = f"{'https' if scheme.lower() == 'wss' else 'http'}://{rest}"
         if not urlsplit(resolved).netloc:
             raise ConfigurationError(f"{owner}: invalid base URL {resolved!r}")
         extra = dict(headers or {})

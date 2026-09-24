@@ -439,7 +439,12 @@ class OpenAISTT(STT):
 
     # ---------------------------------------------------------------- configuration
     def languages_for(self, language: str | None) -> list[str]:
-        """Normalized language hints for a stream/request in ``language``."""
+        """Normalized language hints for a stream/request in ``language``.
+
+        ``languages`` applies unless another language is asked for (``Agent(language=...)``
+        or ``stream(language=...)``), which then wins.
+        """
+        language = language or self.language
         if self.languages and (language is None or language == self.language):
             values: Sequence[str] = self.languages
         elif language:
