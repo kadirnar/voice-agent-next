@@ -58,8 +58,11 @@ class LoopbackTransport(Transport):
             input_format=input_format or AudioFormat(16_000, 1),
             output_format=output_format or AudioFormat(24_000, 1),
         )
-        if not pausable:
-            self.capabilities = TransportCapabilities(playback_position=True, messages=True)
+        # without real-time playout audio counts as played the moment it is written, so
+        # the transport knows nothing the session's playback clock doesn't
+        self.capabilities = TransportCapabilities(
+            pause=pausable, playback_position=realtime_playout, messages=True
+        )
         self.realtime_playout = realtime_playout
         self._user_audio: Chan[AudioFrame] = Chan()
         self._played: Chan[PlayedAudio] = Chan()

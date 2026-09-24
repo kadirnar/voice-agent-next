@@ -82,6 +82,8 @@ _SAY_REQUEST_TTL = 10.0
 """A ``say()`` whose response has not started within this many seconds is forgotten."""
 _RECHECK_DELAY = 0.01
 """Re-check an overlap this soon when engine events are still waiting to be handled."""
+_MAX_PLAYBACK_LAG = 2.0
+"""Longest wait (s) for a transport to finish playing a response after the virtual clock."""
 
 
 @dataclass(slots=True)
@@ -678,6 +680,7 @@ class AgentSession(EventEmitter):
             await asyncio.sleep(delay)
         if pauses != self._pause_seq or self._clock_paused_at is not None:
             await self._wait_playout_end(resp)  # paused meanwhile: its audio ends later
+        await self._wait_until_heard(resp)
         if resp.finished or resp.interrupted:
             return
         resp.finished = True
@@ -705,6 +708,36 @@ class AgentSession(EventEmitter):
             if self._send_gate.is_set():
                 return
 
+    def _listener_time(self, t: float) -> float:
+        """Where the listener is on the playback timeline at time ``t``.
+
+        The virtual clock assumes audio is heard the moment it is due. A transport with
+        ``capabilities.playback_position`` knows better (device output latency, a
+        client-side jitter buffer, playback marks): the part of its backlog that the
+        virtual clock does not account for is how far the listener lags behind.
+        """
+        transport = self._transport
+        if transport is None or not transport.capabilities.playback_position:
+            return t
+        try:
+            buffered = transport.buffered_duration()
+        except Exception:
+            return t
+        return t - (buffered - max(0.0, self._virtual_end - t))
+
+    async def _wait_until_heard(self, resp: _Response) -> None:
+        """Wait until the listener has heard ``resp`` to the end (transport lag included)."""
+        deadline = now() + _MAX_PLAYBACK_LAG
+        while not (resp.finished or resp.interrupted):
+            if self._clock_paused_at is not None:
+                await self._clock_running.wait()
+                deadline = now() + _MAX_PLAYBACK_LAG
+                continue
+            remaining = resp.end - self._listener_time(now())
+            if remaining <= 0.005 or now() >= deadline:
+                return
+            await asyncio.sleep(min(remaining, 0.25))  # re-check: the estimate moves
+
     async def _wait_playout_end(self, resp: _Response) -> None:
         """Wait until the audio sent for ``resp`` has been played, pauses included."""
         while resp.segments and not (resp.finished or resp.interrupted):
@@ -731,7 +764,10 @@ class AgentSession(EventEmitter):
             return False
         if self._clock_paused_at is not None:
             return True  # paused mid-speech
-        return not resp.done or self._virtual_end > now() or not self._out.empty()
+        t = now()
+        if not resp.done or self._virtual_end > t or not self._out.empty():
+            return True
+        return self._listener_time(t) < resp.end  # the listener still hears the tail
 
     def _discard_input(self) -> bool:
         """True while uninterruptible speech plays (and discarding is enabled)."""
@@ -1029,7 +1065,7 @@ class AgentSession(EventEmitter):
             barge.overlap.confirmed = True
             barge.paused_at = None
         paused_at = self._clock_paused_at
-        played = resp.played(paused_at if paused_at is not None else now())
+        played = resp.played(self._listener_time(paused_at if paused_at is not None else now()))
         self._out.clear()
         self._virtual_end = now()
         self._unfreeze_clock()  # paused audio is dropped, not resumed

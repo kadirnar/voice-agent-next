@@ -502,3 +502,71 @@ async def test_user_turn_precedes_the_reply_even_with_a_late_transcript() -> Non
     assert roles == [("user", "where is my order"), ("assistant", "On its way.")]
     added = [e.item.role for e in rec.of("conversation_item") if isinstance(e.item, ChatMessage)]
     assert added.count("user") == 1  # announced once, when the transcript arrived
+
+
+class LaggyTransport(LoopbackTransport):
+    """A real-time speaker that reports ``lag`` s of extra output latency (a device buffer
+    or a client-side jitter buffer): the listener hears everything ``lag`` s later."""
+
+    def __init__(self, lag: float) -> None:
+        super().__init__(realtime_playout=True)
+        self.lag = lag
+
+    def buffered_duration(self) -> float:
+        return super().buffered_duration() + self.lag
+
+
+def speaking_since(rec: Recorder) -> float:
+    return next(e.timestamp for e in rec.of("agent_state_changed")
+                if e.new_state == AgentState.SPEAKING)  # fmt: skip
+
+
+@pytest.mark.parametrize("lag", [0.0, 0.4])
+async def test_truncation_follows_the_transports_playback_position(lag: float) -> None:
+    session = make_session(
+        "native", transcripts=["tell me a story"], responses=["A long story. " * 20],
+        realtime_factor=1.0,
+    )  # fmt: skip
+    rec = Recorder(session)
+    user_speaking: list[float] = []
+    session.on("user_state_changed",
+               lambda e: user_speaking.append(e.timestamp) if e.new_state == "speaking" else None)  # fmt: skip
+    transport = LaggyTransport(lag)
+    await session.start(Agent("x"), transport)
+    await speak(transport, 0.6, 0.5)
+    await wait_for(lambda: session.agent_state == AgentState.SPEAKING)
+    await asyncio.sleep(1.0)
+    await transport.play_user_audio(synth_speech(0.6, 16_000), realtime=False)  # barge in
+    await wait_for(lambda: bool(rec.of("interrupted")))
+    await session.aclose()
+
+    # heard = agent audio played until the user started to speak, minus what the
+    # transport still had to play out (lag)
+    expected = user_speaking[-1] - speaking_since(rec) - lag
+    (ev,) = rec.of("interrupted")
+    assert ev.played == pytest.approx(expected, abs=0.12)
+    assert session.connection.truncations[0][1] == pytest.approx(ev.played * 1000, abs=1)  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("lag", [0.0, 0.4])
+async def test_agent_keeps_speaking_until_the_listener_heard_the_reply(lag: float) -> None:
+    session = make_session("native", responses=["Sure, it is done."], realtime_factor=1.0)
+    rec = Recorder(session)
+    transport = LaggyTransport(lag)
+    await session.start(Agent("x"), transport)
+    await speak(transport)
+    await wait_for(lambda: AgentState.LISTENING in rec.states()[2:], timeout=8)
+    await session.aclose()
+
+    listening = [e.timestamp for e in rec.of("agent_state_changed")
+                 if e.new_state == AgentState.LISTENING][-1]  # fmt: skip
+    audio = sum(p.frame.duration for p in transport.played_log)
+    assert listening - speaking_since(rec) == pytest.approx(audio + lag, abs=0.12)
+    (m,) = rec.turn_metrics()
+    assert m.agent_speech_duration == pytest.approx(audio, abs=0.05)
+
+
+def test_loopback_reports_a_playback_position_only_with_real_time_playout() -> None:
+    assert LoopbackTransport(realtime_playout=True).capabilities.playback_position
+    assert not LoopbackTransport().capabilities.playback_position
+    assert not LoopbackTransport(pausable=False).capabilities.pause
