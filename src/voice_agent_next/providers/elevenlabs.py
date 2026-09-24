@@ -1327,6 +1327,10 @@ class _ElevenLabsSynthesizeStream(SynthesizeStream):
                 ctx.conn.release(ctx)
                 continue
             ctx.conn.abandon(ctx)
+            if ctx.closed_at is not None:
+                # already closing (its input ended): its late audio is dropped. Messaging a
+                # closing context again is a protocol error on the dialogue API.
+                continue
             try:
                 async with asyncio.timeout(1.0):
                     await ctx.conn.send(ctx.conn.protocol.close_message(ctx.id))
