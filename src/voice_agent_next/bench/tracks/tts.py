@@ -626,7 +626,8 @@ _METHOD = """\
 * `ttfa_ms`: playout time of the first speech onset (reference VAD: 10 ms frames ≥
   {thr:g} dBFS, ≥ 100 ms of speech, refined to the sample) for a real-time player that
   starts with the first chunk, so leading silence counts. `ttfb_ms`: first chunk received.
-* `rtf` = synthesis wall time ÷ audio duration. An underrun is a chunk arriving more than
+* `rtf` = synthesis wall time ÷ audio duration (streaming: includes waiting for the paced
+  text, so it is bounded below by the text pace). An underrun is a chunk arriving more than
   {under:g} ms after the player ran dry; `stall_ms` is the silence it inserted.
 * Round trip: every clip is transcribed after the timed phase by `{stt}`; `rt_wer` /
   `rt_cer` are corpus rates (Σ edits ÷ Σ reference length) after the `{norm}`

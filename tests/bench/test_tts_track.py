@@ -64,6 +64,7 @@ def test_squash() -> None:
     assert squash("4:30 pm") == "430 pm"
     assert squash("5 5 5 0 1 4 2") == "5550142"
     assert squash("$42.50, ok") == "4250 ok"
+    assert squash("july 14 2025", join_digits=False) == "july 14 2025"
 
 
 @pytest.mark.parametrize(
@@ -79,6 +80,8 @@ def test_squash() -> None:
         (["nyc", "new york city"], "Your flight to New York City", True),
         (["Dr. Smith"], "Doctor Smith will see you", True),
         (["12"], "one hundred twenty", False),  # whole words only
+        (["July 14"], "The contract was signed on July 14, 2025.", True),
+        (["2025"], "signed on July fourteenth, twenty twenty-five", True),
     ],
 )
 def test_entity_matching(alternatives: list[str], transcript: str, found: bool) -> None:

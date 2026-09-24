@@ -39,22 +39,30 @@ _DIGIT_GAP = re.compile(r"(?<=\d)[^a-z0-9]+(?=\d)")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
-def squash(normalized: str) -> str:
-    """Comparison form for entities: separators between digits removed (``4:30``,
-    ``4 30`` -> ``430``), anything but letters and digits turned into single spaces."""
-    s = _DIGIT_GAP.sub("", normalized.lower())
+def squash(normalized: str, *, join_digits: bool = True) -> str:
+    """Comparison form for entities: anything but letters and digits becomes a single
+    space; with ``join_digits``, separators between digits are removed first (``4:30``,
+    ``4 30`` -> ``430``)."""
+    s = normalized.lower()
+    if join_digits:
+        s = _DIGIT_GAP.sub("", s)
     return " ".join(_NON_ALNUM.sub(" ", s).split())
 
 
 def entity_matches(
     alternatives: Sequence[str], transcript: str, normalize: Callable[[str], str]
 ) -> bool:
-    """True when one spoken form of an entity appears (as whole words) in the transcript."""
-    hyp = f" {squash(normalize(transcript))} "
-    for alt in alternatives:
-        needle = squash(normalize(alt))
-        if needle and f" {needle} " in hyp:
-            return True
+    """True when one spoken form of an entity appears (as whole words) in the transcript.
+
+    Both sides are compared as-is and with digit groups joined, so ``4:30`` matches
+    "four thirty" while ``July 14`` still matches "July 14, 2025"."""
+    hyp_n = normalize(transcript)
+    for join in (False, True):
+        hyp = f" {squash(hyp_n, join_digits=join)} "
+        for alt in alternatives:
+            needle = squash(normalize(alt), join_digits=join)
+            if needle and f" {needle} " in hyp:
+                return True
     return False
 
 
