@@ -67,12 +67,14 @@ class LoopbackTransport(Transport):
         self._user_audio: Chan[AudioFrame] = Chan()
         self._played: Chan[PlayedAudio] = Chan()
         self._queue: deque[AudioFrame] = deque()
+        self._arrivals: deque[float] = deque()  # when each queued frame was written
         self._queued_duration = 0.0
         self._current_end: float | None = None
         self._wakeup = asyncio.Event()
         self._player: asyncio.Task[None] | None = None
         self._cleared = 0
         self._paused = False
+        self._arrived = 0.0
         self.messages: list[dict[str, Any]] = []
         self.played_log: list[PlayedAudio] = []
         self.clear_times: list[float] = []
@@ -104,11 +106,13 @@ class LoopbackTransport(Transport):
             self._deliver(frame, now())
             return
         self._queue.append(frame)
+        self._arrivals.append(now())
         self._queued_duration += frame.duration
         self._wakeup.set()
 
     async def clear_audio(self) -> None:
         self._queue.clear()
+        self._arrivals.clear()
         self._queued_duration = 0.0
         self._current_end = None
         self._cleared += 1
@@ -190,6 +194,7 @@ class LoopbackTransport(Transport):
 
     def _pop(self) -> AudioFrame:
         frame = self._queue.popleft()
+        self._arrived = self._arrivals.popleft()
         # reset when empty: float residue (e.g. 1e-17) would make wait_for_playout() spin
         self._queued_duration = (
             max(0.0, self._queued_duration - frame.duration) if self._queue else 0.0
@@ -209,7 +214,8 @@ class LoopbackTransport(Transport):
                 continue
             frame = self._pop()
             cleared_at_start = self._cleared
-            start = now() if play_head is None else play_head
+            # back to back with the previous frame, unless it arrived after that one ended
+            start = now() if play_head is None else max(play_head, self._arrived)
             play_head = None
             self._current_end = start + frame.duration
             self._deliver(frame, start)
