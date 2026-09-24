@@ -72,6 +72,32 @@ Audio-streaming TTS removes the clause-rendering wait. It is the largest single 
 - GPU TTS (#79);
 - an omni model that replaces STT + LLM + TTS (#75).
 
+## T1 · Native full-duplex speech-to-speech: Moshi on the RTX 5070 Ti (2026-09-24, #13)
+
+`kyutai/moshika-pytorch-q8` served by `moshi.server` (10.2 GB VRAM), driven by `MoshiEngine` through the same caller emulator and scenario. 3 sessions × 12 turns, 33 measured turns.
+
+| | v2v p50 | v2v p90 |
+|---|---:|---:|
+| all turns | **276 ms** | **444 ms** |
+| turns where Moshi waited for the end of the question (22) | 344 ms | 446 ms |
+
+- **Premature replies: 33 %.** Moshi decides its own turn-taking and answers in the pause inside two-sentence questions ("Where is my order? · I placed it last week."). The cascade's turn detector waits in those pauses.
+- 0 % missed turns, 0 % dead air.
+- This is about 3× faster than the best cascade measured here (≈ 0.9 s with Pocket TTS on CPU). The cost: no tools, no user transcript, and turn-taking you can't control. See `docs/providers/moshi.md`.
+
+## T2 · ASR on CPU (2026-09-24, `van bench asr`)
+
+LibriSpeech test-clean smoke subset (50 utterances, 10 speakers), Ryzen 5 5600 CPU, Whisper-style normalization. `TTFS` is the time from the end of the audio to the final transcript: in streaming mode it is measured from `flush()`, in batch mode it is the whole transcription time.
+
+| system | mode | WER | RTFx | TTFS p50 |
+| :--- | :--- | ---: | ---: | ---: |
+| faster-whisper `base` (int8) | batch | 4.75 % | 18 | 410 ms |
+| sherpa-onnx `nemo-fastconformer-en-80ms` | streaming, real time | **2.29 %** | – | **63 ms** |
+| sherpa-onnx `nemo-fastconformer-en-80ms` | batch | 2.29 % | 7.7 | 996 ms |
+| Moonshine `tiny` | batch | 5.19 % | 69 | 102 ms |
+
+On this subset the streaming NeMo model is both the most accurate and the fastest to finalize. Scores for FLEURS (en/es/de/tr/zh) are in PR #99.
+
 ## T7 · Framework overhead (mock components)
 
 `van bench latency --engine mock` (energy VAD 0.4 s silence, no model latency): v2v p50 ≈ 402 ms

@@ -95,14 +95,14 @@ Every component is addressed by a `provider/model` spec and installed through an
 | | Local | Cloud |
 |---|---|---|
 | **Speech-to-speech engines** | any OpenAI-Realtime-compatible server: Speaches, LocalAI, vLLM-Omni | OpenAI Realtime, Gemini Live, Azure OpenAI Realtime, xAI Grok Voice, Qwen-Omni Realtime |
-| **STT** | sherpa-onnx (streaming Zipformer/NeMo, Parakeet, Moonshine, SenseVoice, Whisper), faster-whisper (CPU / CUDA) | Deepgram Nova-3 & Flux, AssemblyAI Universal-Streaming, ElevenLabs Scribe v2, OpenAI transcribe, Cartesia Ink |
+| **STT** | sherpa-onnx (streaming Zipformer/NeMo, Parakeet, Moonshine, SenseVoice, Whisper), Moonshine Streaming, faster-whisper (CPU / CUDA) | Deepgram Nova-3 & Flux, AssemblyAI Universal-Streaming, ElevenLabs Scribe v2, OpenAI transcribe, Cartesia Ink |
 | **LLM** | Ollama, llama.cpp, vLLM, LM Studio | OpenAI, Anthropic Claude, Google Gemini, Groq, Cerebras, Together, OpenRouter, DeepSeek, Fireworks, SambaNova |
-| **TTS** | Kokoro-82M, sherpa-onnx (Piper/VITS, Kokoro, Matcha), Kokoro-FastAPI | Cartesia Sonic, ElevenLabs Flash/v3, OpenAI gpt-4o-mini-tts, Gemini TTS, Deepgram Aura-2 |
+| **TTS** | Kyutai Pocket TTS (audio streaming, cloning), Kokoro-82M, sherpa-onnx (Piper/VITS, Kokoro, Matcha), Kokoro-FastAPI | Cartesia Sonic, ElevenLabs Flash/v3, OpenAI gpt-4o-mini-tts, Gemini TTS, Deepgram Aura-2 |
 | **VAD & turn-taking** | Silero VAD v6, TEN VAD, energy VAD, Smart Turn v3.2 | STT-native turn events (Deepgram Flux, AssemblyAI, Cartesia Ink) |
-| **Transports** | microphone/speakers (with WebRTC echo cancellation), files, loopback | WebSocket + browser client, telephony (Twilio, Telnyx, Vonage, Plivo) |
+| **Transports** | microphone/speakers (with WebRTC echo cancellation), files, loopback | WebSocket + browser client, WebRTC (aiortc), telephony (Twilio, Telnyx, Vonage, Plivo) |
 | **Serving & ops** | `van serve`: any engine behind the OpenAI Realtime protocol | failover chains, call recording (stereo WAV + JSONL), OpenTelemetry tracing, GPU auto-selection |
 
-In progress ([roadmap](ROADMAP.md)): omni models (LFM2.5-Audio), presets, WebRTC, Moonshine, Pocket TTS, async tools, Moshi, MLX on Apple Silicon.
+In progress ([roadmap](ROADMAP.md)): omni models (LFM2.5-Audio), Moshi full-duplex, GPU TTS (Chatterbox, Qwen3-TTS), dynamic endpointing, session rotation, MLX on Apple Silicon.
 
 ## Benchmarks
 
