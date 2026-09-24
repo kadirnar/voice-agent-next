@@ -55,6 +55,8 @@ jobs:
       - run: uv run pytest -q
       - name: providers import without optional dependencies
         run: uv run van providers --json > /dev/null
+      - name: echo cancellation with the native livekit wheel (extra `aec`)
+        run: uv run --extra aec pytest -q -m model tests/test_aec.py
 
   # macOS / Windows minutes are expensive on private repos: run them on main, weekly,
   # manually, or on pull requests labelled `ci:full`.
@@ -78,3 +80,5 @@ jobs:
       - run: uv sync
       - run: uv run pytest -q
       - run: uv run van providers --json
+      - name: echo cancellation with the native livekit wheel (extra `aec`)
+        run: uv run --extra aec pytest -q -m model tests/test_aec.py
