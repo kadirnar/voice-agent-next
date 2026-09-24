@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>voice-agent-next WebSocket demo</title>
+<!--
+  Single-file browser client for the voice-agent-next WebSocket transport (protocol van-ws/1,
+  see docs/transports/websocket.md). No build step and no dependencies:
+
+    python examples/websocket_agent.py serve      # then open http://127.0.0.1:8765/
+
+  Or open this file from any web server and pass the agent's address: ?ws=ws://host:8765/
+  (browsers only allow microphone access on https:// pages and on http://localhost).
+  ?autoconnect=1 connects on load (for kiosks and automated tests).
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #677084; --border: #dde1e8;
+    --accent: #3b6fd8; --user: #e8effd; --agent: #f1f2f5; --ok: #1e8a5a; --warn: #b7791f;
+    --bad: #c53030;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1a1e26; --text: #e6e9ef; --muted: #98a1b3; --border: #2b313d;
+      --accent: #7aa2f7; --user: #22314f; --agent: #242933; --ok: #48bb78; --warn: #ecc94b;
+      --bad: #fc8181;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 40px; }
+  h1 { font-size: 20px; margin: 0; }
+  header p { margin: 2px 0 16px; color: var(--muted); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input[type=text] {
+    flex: 1; min-width: 0; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font: inherit;
+  }
+  button {
+    padding: 8px 14px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent);
+    color: #fff; font: inherit; cursor: pointer;
+  }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  .status { margin: 12px 0; gap: 6px; }
+  .pill {
+    font-size: 13px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border);
+    color: var(--muted); white-space: nowrap;
+  }
+  .pill.on { color: var(--ok); border-color: var(--ok); }
+  .pill.busy { color: var(--warn); border-color: var(--warn); }
+  .pill.speaking { color: var(--accent); border-color: var(--accent); }
+  .pill.bad { color: var(--bad); border-color: var(--bad); }
+  .meter { width: 90px; height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
+  .meter > div { height: 100%; width: 0; background: var(--ok); transition: width 60ms linear; }
+  #log { height: 52vh; min-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+  .msg { max-width: 85%; padding: 8px 12px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg .who { display: block; font-size: 12px; color: var(--muted); }
+  .msg.user { align-self: flex-end; background: var(--user); }
+  .msg.assistant { align-self: flex-start; background: var(--agent); }
+  .msg.partial .text { color: var(--muted); font-style: italic; }
+  .msg .note { font-size: 12px; color: var(--warn); }
+  .system { align-self: center; font-size: 12px; color: var(--muted); text-align: center; }
+  .system.error { color: var(--bad); }
+  form { margin-top: 12px; }
+  details { margin-top: 16px; color: var(--muted); font-size: 14px; }
+  code { font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>voice-agent-next</h1>
+    <p>Talk to a voice agent over a WebSocket (<code>van-ws/1</code>). Use headphones or a browser with good echo cancellation (Chrome, Edge, Safari).</p>
+  </header>
+
+  <div class="card">
+    <div class="row">
+      <input id="url" type="text" aria-label="Agent WebSocket URL" spellcheck="false">
+      <button id="connect">Connect</button>
+      <button id="mute" class="secondary" disabled>Mute mic</button>
+    </div>
+    <div class="row status">
+      <span id="conn" class="pill">disconnected</span>
+      <span id="agent" class="pill">agent: -</span>
+      <span id="user" class="pill">you: -</span>
+      <span id="latency" class="pill" title="user stops speaking -> first agent audio (measured by the server)">voice-to-voice: -</span>
+      <span class="meter" title="microphone level"><div id="level"></div></span>
+    </div>
+    <div id="log" aria-live="polite"></div>
+    <form id="text-form" class="row">
+      <input id="text" type="text" placeholder="...or type a message" autocomplete="off" disabled>
+      <button id="send" disabled>Send</button>
+    </form>
+  </div>
+
+  <details>
+    <summary>How it works</summary>
+    <p>The microphone is captured with <code>getUserMedia</code> (echo cancellation, noise suppression and
+    auto gain on), resampled to 16 kHz in an AudioWorklet and sent as 20 ms binary frames of PCM16. Agent audio
+    arrives as 24 kHz PCM16 binary frames and is played by a second AudioWorklet, which reports its playback
+    position back to the server (<code>playback</code>) so the agent knows what you actually heard. On
+    <code>clear</code> (you interrupted the agent) queued audio is dropped at once. Transcripts, agent state and
+    latency metrics arrive as JSON messages.</p>
+  </details>
+</main>
+
+<!-- AudioWorklet module, loaded from a Blob URL so this page stays a single file. -->
+<script type="text/plain" id="van-worklet">
+// Streaming resampler: windowed-sinc low-pass (when downsampling) + linear interpolation.
+class Resampler {
+  constructor(inRate, outRate) {
+    this.step = inRate / outRate;
+    this.t = 1;      // position of the next output sample; index 0 = last sample of previous block
+    this.last = 0;
+    this.fir = null;
+    if (outRate < inRate) {
+      const taps = 33, fc = 0.45 * outRate / inRate;  // cutoff just below the new Nyquist
+      const h = new Float32Array(taps);
+      let sum = 0;
+      for (let i = 0; i < taps; i++) {
+        const n = i - (taps - 1) / 2;
+        const sinc = n === 0 ? 2 * fc : Math.sin(2 * Math.PI * fc * n) / (Math.PI * n);
+        const w = 0.42 - 0.5 * Math.cos(2 * Math.PI * i / (taps - 1)) + 0.08 * Math.cos(4 * Math.PI * i / (taps - 1));
+        h[i] = sinc * w;
+        sum += h[i];
+      }
+      for (let i = 0; i < taps; i++) h[i] /= sum;
+      this.fir = h;
+      this.hist = new Float32Array(taps - 1);
+    }
+  }
+  lowpass(x) {
+    const h = this.fir, hist = this.hist, m = hist.length, y = new Float32Array(x.length);
+    for (let i = 0; i < x.length; i++) {
+      let acc = 0;
+      for (let k = 0; k <= m; k++) {
+        const j = i - k;
+        acc += h[k] * (j >= 0 ? x[j] : hist[m + j]);
+      }
+      y[i] = acc;
+    }
+    if (x.length >= m) hist.set(x.subarray(x.length - m));
+    else { hist.copyWithin(0, x.length); hist.set(x, m - x.length); }
+    return y;
+  }
+  process(x) {
+    if (this.fir) x = this.lowpass(x);
+    const n = x.length, out = new Float32Array(Math.ceil((n + 1) / this.step) + 1);
+    let t = this.t, k = 0;
+    while (t < n) {
+      const i = Math.floor(t), f = t - i;
+      const a = i === 0 ? this.last : x[i - 1];
+      out[k++] = a + (x[i] - a) * f;
+      t += this.step;
+    }
+    this.t = t - n;
+    if (n) this.last = x[n - 1];
+    return out.subarray(0, k);
+  }
+}
+
+// Microphone (context rate) -> PCM16 frames at `targetRate`, posted to the main thread.
+class CaptureProcessor extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    const opts = options.processorOptions || {};
+    const rate = opts.targetRate || 16000;
+    this.frameSamples = Math.round(rate * (opts.frameMs || 20) / 1000);
+    this.resampler = new Resampler(sampleRate, rate);
+    this.frame = new Int16Array(this.frameSamples);  // PCM16 in platform order (little-endian everywhere)
+    this.fill = 0;
+    this.energy = 0;
+    this.muted = false;
+    this.port.onmessage = (e) => { if (e.data.type === "mute") this.muted = !!e.data.muted; };
+  }
+  process(inputs) {
+    const input = inputs[0];
+    if (!input || input.length === 0) return true;
+    let mono = input[0];
+    if (input.length > 1) {
+      mono = new Float32Array(input[0].length);
+      for (let c = 0; c < input.length; c++) for (let i = 0; i < mono.length; i++) mono[i] += input[c][i] / input.length;
+    }
+    const y = this.resampler.process(mono);
+    for (let i = 0; i < y.length; i++) {
+      const s = this.muted ? 0 : Math.max(-1, Math.min(1, y[i]));
+      this.frame[this.fill++] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      this.energy += s * s;
+      if (this.fill === this.frameSamples) {
+        const rms = Math.sqrt(this.energy / this.frameSamples);
+        this.port.postMessage({ pcm: this.frame.buffer, rms }, [this.frame.buffer]);
+        this.frame = new Int16Array(this.frameSamples);
+        this.fill = 0;
+        this.energy = 0;
+      }
+    }
+    return true;  // outputs stay silent
+  }
+}
+
+// Agent PCM16 (at the rate from `ready`) -> speakers, with clear and playback-position reports.
+class PlaybackProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.configure(24000);
+    this.port.onmessage = (e) => this.onMessage(e.data);
+  }
+  configure(rate) {
+    this.inRate = rate;
+    this.resampler = new Resampler(rate, sampleRate);
+    this.queue = [];      // Float32Array chunks at the context rate
+    this.offset = 0;      // read position in queue[0]
+    this.queued = 0;      // samples queued (context rate)
+    this.received = 0;    // agent samples received (at inRate)
+    this.sinceReport = 0;
+    this.playing = false;
+  }
+  onMessage(msg) {
+    if (msg.type === "config") {
+      this.configure(msg.sampleRate);
+    } else if (msg.type === "audio") {
+      const pcm = new Int16Array(msg.pcm), x = new Float32Array(pcm.length);
+      for (let i = 0; i < pcm.length; i++) x[i] = pcm[i] / 32768;
+      this.received += pcm.length;
+      const y = this.resampler.process(x);
+      if (y.length) { this.queue.push(y); this.queued += y.length; }
+    } else if (msg.type === "clear") {
+      this.queue = [];
+      this.offset = 0;
+      this.queued = 0;
+      this.resampler = new Resampler(this.inRate, sampleRate);
+      this.report();
+    }
+  }
+  // van-ws/1 playback cursor: agent audio received minus audio still queued (played or cleared).
+  report() {
+    const ms = this.received * 1000 / this.inRate - this.queued * 1000 / sampleRate;
+    this.port.postMessage({ type: "position", positionMs: Math.max(0, ms) });
+    this.sinceReport = 0;
+  }
+  process(inputs, outputs) {
+    const out = outputs[0][0];
+    let i = 0;
+    while (i < out.length && this.queue.length) {
+      const chunk = this.queue[0];
+      const n = Math.min(out.length - i, chunk.length - this.offset);
+      out.set(chunk.subarray(this.offset, this.offset + n), i);
+      i += n;
+      this.offset += n;
+      this.queued -= n;
+      if (this.offset >= chunk.length) { this.queue.shift(); this.offset = 0; }
+    }
+    for (let c = 1; c < outputs[0].length; c++) outputs[0][c].set(out);
+    const wasPlaying = this.playing;
+    this.playing = this.queued > 0;
+    if (this.playing) {
+      this.sinceReport += out.length;
+      if (this.sinceReport >= sampleRate / 10) this.report();  // every 100 ms while playing
+    } else if (wasPlaying) {
+      this.report();  // drained
+    }
+    return true;
+  }
+}
+
+registerProcessor("van-capture", CaptureProcessor);
+registerProcessor("van-playback", PlaybackProcessor);
+</script>
+
+<script>
+"use strict";
+const PROTOCOL = "van-ws/1";
+const INPUT_RATE = 16000;   // what we send
+const OUTPUT_RATE = 24000;  // what we ask for (the server's `ready` has the final word)
+
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+let ws = null, audioCtx = null, micStream = null, capture = null, playback = null;
+let ready = false, muted = false;
+const bubbles = new Map();
+
+$("url").value = params.get("ws") || (location.protocol.startsWith("http")
+  ? `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/`
+  : "ws://127.0.0.1:8765/");
+
+function send(message) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+}
+
+function setPill(id, text, cls) {
+  const el = $(id);
+  el.textContent = text;
+  el.className = `pill ${cls || ""}`;
+}
+
+function logLine(text, cls = "") {
+  const div = document.createElement("div");
+  div.className = `system ${cls}`;
+  div.textContent = text;
+  appendToLog(div);
+}
+
+function appendToLog(el) {
+  const log = $("log");
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  log.appendChild(el);
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+function bubble(role, key) {
+  let el = bubbles.get(key);
+  if (!el) {
+    el = document.createElement("div");
+    el.className = `msg ${role}`;
+    el.innerHTML = '<span class="who"></span><span class="text"></span><span class="note"></span>';
+    el.querySelector(".who").textContent = role === "user" ? "You" : "Agent";
+    bubbles.set(key, el);
+    appendToLog(el);
+  }
+  return el;
+}
+
+function onTranscript(msg) {
+  const el = bubble(msg.role, `${msg.role}:${msg.item_id}`);
+  el.querySelector(".text").textContent = msg.text;
+  el.classList.toggle("partial", !msg.final);
+  if (msg.interrupted) el.querySelector(".note").textContent = `\ninterrupted after ${(msg.played_ms / 1000).toFixed(1)} s`;
+  const log = $("log");
+  if (log.scrollHeight - log.scrollTop - log.clientHeight < 120) log.scrollTop = log.scrollHeight;
+}
+
+function onMessage(msg) {
+  switch (msg.type) {
+    case "ready":
+      ready = true;
+      playback.port.postMessage({ type: "config", sampleRate: msg.output_sample_rate });
+      setPill("conn", "connected", "on");
+      logLine(`connected (session ${msg.session_id}, ${msg.sample_rate} Hz in / ${msg.output_sample_rate} Hz out)`);
+      $("text").disabled = $("send").disabled = $("mute").disabled = false;
+      break;
+    case "clear":  // barge-in: drop everything queued for playback
+      playback.port.postMessage({ type: "clear" });
+      break;
+    case "transcript":
+      onTranscript(msg);
+      break;
+    case "state":
+      setPill("agent", `agent: ${msg.agent}`, { listening: "on", thinking: "busy", speaking: "speaking" }[msg.agent]);
+      setPill("user", `you: ${msg.user}`, msg.user === "speaking" ? "speaking" : "");
+      break;
+    case "metrics":
+      if (msg.kind === "turn" && msg.data.voice_to_voice != null) {
+        setPill("latency", `voice-to-voice: ${Math.round(msg.data.voice_to_voice * 1000)} ms`, "on");
+      }
+      break;
+    case "error":
+      logLine(`error: ${msg.message}`, "error");
+      break;
+    case "audio": {  // base64 framing (compatibility mode)
+      const bytes = Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0));
+      playback.port.postMessage({ type: "audio", pcm: bytes.buffer }, [bytes.buffer]);
+      break;
+    }
+    default:
+      break;  // ignore unknown messages (forward compatibility)
+  }
+}
+
+async function connect() {
+  $("connect").disabled = true;
+  setPill("conn", "connecting...", "busy");
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    audioCtx = new AudioContext({ latencyHint: "interactive" });
+    const code = new Blob([$("van-worklet").textContent], { type: "application/javascript" });
+    const moduleUrl = URL.createObjectURL(code);
+    await audioCtx.audioWorklet.addModule(moduleUrl);
+    URL.revokeObjectURL(moduleUrl);
+    capture = new AudioWorkletNode(audioCtx, "van-capture", {
+      processorOptions: { targetRate: INPUT_RATE, frameMs: 20 },
+    });
+    playback = new AudioWorkletNode(audioCtx, "van-playback", { numberOfInputs: 0, outputChannelCount: [1] });
+    audioCtx.createMediaStreamSource(micStream).connect(capture);
+    capture.connect(audioCtx.destination);  // silent output: keeps the capture node running
+    playback.connect(audioCtx.destination);
+    capture.port.onmessage = (e) => {
+      $("level").style.width = `${Math.min(100, e.data.rms * 400)}%`;
+      if (ready && ws.readyState === WebSocket.OPEN) ws.send(e.data.pcm);
+    };
+    playback.port.onmessage = (e) => {
+      if (ready) send({ type: "playback", position_ms: Math.round(e.data.positionMs) });
+    };
+    if (audioCtx.state !== "running") {  // autoplay policy: needs a user gesture
+      audioCtx.resume().catch(() => {});
+      if (audioCtx.state !== "running") logLine("click anywhere on the page to enable audio");
+    }
+    openSocket($("url").value.trim());
+  } catch (err) {
+    logLine(`could not start: ${err.message || err}`, "error");
+    teardown();
+  }
+}
+
+function openSocket(url) {
+  ws = new WebSocket(url);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => send({
+    type: "hello", protocol: PROTOCOL, codec: "pcm_s16le", sample_rate: INPUT_RATE, channels: 1,
+    output_sample_rate: OUTPUT_RATE, framing: "binary", metadata: { client: "van-web-demo" },
+  });
+  ws.onmessage = (e) => {
+    if (typeof e.data !== "string") {  // binary frame = agent audio (PCM16)
+      playback.port.postMessage({ type: "audio", pcm: e.data }, [e.data]);
+      return;
+    }
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+    onMessage(msg);
+  };
+  ws.onclose = (e) => {
+    logLine(`disconnected (code ${e.code}${e.reason ? `: ${e.reason}` : ""})`, e.code === 1000 ? "" : "error");
+    teardown();
+  };
+  $("connect").textContent = "Disconnect";
+  $("connect").disabled = false;
+}
+
+function teardown() {
+  ready = false;
+  if (ws) {
+    ws.onopen = ws.onmessage = ws.onclose = null;  // a late close event must not hit a new session
+    if (ws.readyState <= WebSocket.OPEN) ws.close(1000, "bye");
+  }
+  ws = null;
+  if (micStream) micStream.getTracks().forEach((t) => t.stop());
+  micStream = null;
+  if (audioCtx) audioCtx.close();
+  audioCtx = capture = playback = null;
+  bubbles.clear();
+  muted = false;
+  $("mute").textContent = "Mute mic";
+  $("level").style.width = "0";
+  $("connect").textContent = "Connect";
+  $("connect").disabled = false;
+  $("text").disabled = $("send").disabled = $("mute").disabled = true;
+  setPill("conn", "disconnected");
+  setPill("agent", "agent: -");
+  setPill("user", "you: -");
+}
+
+$("connect").addEventListener("click", () => {
+  if (!ws) return connect();
+  logLine("disconnected");
+  teardown();
+});
+document.addEventListener("click", () => {
+  if (audioCtx && audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+});
+$("mute").addEventListener("click", () => {
+  muted = !muted;
+  capture.port.postMessage({ type: "mute", muted });  // keeps sending (silent) frames
+  $("mute").textContent = muted ? "Unmute mic" : "Mute mic";
+});
+$("text-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = $("text").value.trim();
+  if (!text || !ready) return;
+  send({ type: "text", text });
+  const el = bubble("user", `typed:${Date.now()}`);
+  el.querySelector(".text").textContent = text;
+  $("text").value = "";
+});
+if (params.get("autoconnect") === "1") connect();
+</script>
+</body>
+</html>
