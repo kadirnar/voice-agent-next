@@ -512,8 +512,16 @@ async def test_a_late_verdict_never_cancels_the_engines_next_response() -> None:
     paused response is only truncated, so that answer survives."""
 
     class Laggy(MockEngineConnection):
+        """Delivers every event 60 ms late, in order (like a network connection)."""
+
+        last_due = 0.0
+
         def _emit(self, event: EngineEvent) -> None:
-            asyncio.get_running_loop().call_later(0.06, super()._emit, event)
+            loop = asyncio.get_running_loop()
+            # strictly increasing due times keep the order: with a coarse clock (Windows)
+            # timers due at the same time may otherwise fire in any order
+            self.last_due = max(loop.time() + 0.06, self.last_due + 1e-6)
+            loop.call_at(self.last_due, super()._emit, event)
 
     class LaggyEngine(MockEngine):
         async def connect(self, options: EngineOptions) -> EngineConnection:
