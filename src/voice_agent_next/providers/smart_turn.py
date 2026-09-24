@@ -39,6 +39,7 @@ from ..audio.frame import AudioFrame
 from ..audio.resample import resample
 from ..chat import ChatContext
 from ..errors import ConfigurationError, ProviderError
+from ..models import ModelFile, register_model
 from ..registry import register_provider
 from ..turn import TurnDetector
 from ..utils.clock import now
@@ -360,3 +361,27 @@ class SmartTurnDetector(TurnDetector):
 
     async def aclose(self) -> None:
         self._session = None
+
+
+_SIZES = {
+    "smart-turn-v3.2-cpu.onnx": 8_679_182,
+    "smart-turn-v3.2-gpu.onnx": 32_411_198,
+    "smart-turn-v3.1-cpu.onnx": 8_679_180,
+    "smart-turn-v3.1-gpu.onnx": 32_411_198,
+    "smart-turn-v3.0.onnx": 8_757_193,
+}
+for _filename, _digest in MODEL_SHA256.items():
+    register_model(
+        "smart_turn",
+        _filename.removesuffix(".onnx"),
+        kind="turn",
+        files=[
+            ModelFile.from_hf(
+                HF_REPO, _filename, revision=HF_REVISION, sha256=_digest, size=_SIZES[_filename]
+            )
+        ],
+        license="BSD-2-Clause",
+        languages="23 languages",
+        description="Smart Turn v3 audio end-of-turn model"
+        + (" (int8, CPU)" if "cpu" in _filename else " (fp32, GPU)" if "gpu" in _filename else ""),
+    )

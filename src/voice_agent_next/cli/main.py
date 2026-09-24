@@ -126,6 +126,7 @@ def doctor() -> None:
             table.add_row("torch accelerators", ", ".join(accel) or "cpu only")
         except Exception as exc:
             table.add_row("torch accelerators", f"error: {exc}")
+    _hardware_doctor_rows(table)
     _audio_doctor_rows(table)
     keys = [
         "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
@@ -135,6 +136,19 @@ def doctor() -> None:
     present = [k for k in keys if os.environ.get(k)]
     table.add_row("API keys set", ", ".join(present) or "[dim]none[/dim]")
     console.print(table)
+
+
+def _hardware_doctor_rows(table: Table) -> None:
+    """GPUs, CUDA libraries and where local models run on `device="auto"` (docs/hardware.md)."""
+    from .. import hardware
+
+    try:
+        rows = hardware.report()
+    except Exception as exc:  # report() does not raise; belt and braces for the doctor
+        rows = [("hardware", f"error: {exc}")]
+    for check, result in rows:
+        style = "yellow" if "to use the GPU:" in result or result.startswith("error") else ""
+        table.add_row(check, f"[{style}]{escape(result)}[/{style}]" if style else escape(result))
 
 
 def _audio_doctor_rows(table: Table) -> None:
@@ -218,7 +232,9 @@ def run(
     turn_detector: Annotated[str | None, typer.Option("--turn", help="Turn detector")] = None,
     instructions: Annotated[str | None, typer.Option(help="System prompt")] = None,
     greeting: Annotated[str | None, typer.Option(help="Spoken greeting")] = None,
-    transport: Annotated[str, typer.Option(help="local|file|websocket|webrtc|twilio")] = "local",
+    transport: Annotated[
+        str, typer.Option(help="local|file|websocket|webrtc|twilio|telnyx|vonage|plivo")
+    ] = "local",
     input_wav: Annotated[
         Path | None, typer.Option("--input", help="Input WAV (file transport)")
     ] = None,
@@ -338,7 +354,7 @@ def _attach_console_logging(session: Any) -> None:
 
 def _register_command_groups() -> None:
     """Optional command groups live in ``cli/<name>.py`` modules exposing a Typer ``app``."""
-    for name in ("bench", "serve"):
+    for name in ("bench", "models", "serve"):
         module_name = f"{__package__}.{name}"
         try:
             module = importlib.import_module(module_name)

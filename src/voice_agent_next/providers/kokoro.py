@@ -42,6 +42,8 @@ import numpy as np
 
 from ..audio.frame import SAMPLE_WIDTH, AudioFrame
 from ..errors import ConfigurationError, ProviderError
+from ..hardware import select_onnx_backend
+from ..models import ModelFile, register_model
 from ..registry import register_provider
 from ..text.sentences import SentenceSegmenter
 from ..tts import TTS, ChunkedStream
@@ -74,6 +76,7 @@ _RELEASE = "model-files-v1.1"
 _RELEASE_URL = f"https://github.com/thewh1teagle/kokoro-onnx/releases/download/{_RELEASE}"
 _CPU = "CPUExecutionProvider"
 _ACCELERATED = ("CUDAExecutionProvider", "CoreMLExecutionProvider", "DmlExecutionProvider")
+_AUTO_DEVICES = ("cuda", "coreml", "directml")  # the same order, as hardware device names
 """Preference order; the first one ONNX Runtime reports as available is used."""
 _ESPEAK_MAX_PATH = 229 if sys.platform == "win32" else 159
 """Longest espeak-ng data path (bytes) that espeak-ng 1.52 can store; see ``_espeak_config``."""
@@ -489,11 +492,16 @@ class KokoroTTS(TTS):
 
     def _create_session(self, ort: Any, path: Path, options: Any) -> Any:
         explicit = self._providers is not None
-        providers = (
-            list(self._providers)
-            if self._providers is not None
-            else select_execution_providers(ort.get_available_providers())
-        )
+        if self._providers is not None:
+            providers = list(self._providers)
+        else:
+            # CUDA > CoreML > DirectML > CPU; CUDA libraries are preloaded from pip wheels
+            backend = select_onnx_backend("auto", accelerators=_AUTO_DEVICES, ort=ort)
+            providers = list(backend.providers)
+            if backend.fix:
+                logger.info(
+                    "kokoro: running on CPU: %s. To use the GPU: %s", backend.reason, backend.fix
+                )
         try:
             return ort.InferenceSession(str(path), sess_options=options, providers=providers)
         except Exception as exc:
@@ -567,3 +575,22 @@ class _KokoroChunkedStream(ChunkedStream):
             pcm = await tts._submit(tts._synthesize_segment, segment, voice)
             for start in range(0, len(pcm), step):
                 self._push_audio(pcm[start : start + step])
+
+
+def _model_file(asset: KokoroAsset) -> ModelFile:
+    return ModelFile.from_url(
+        asset.url, subdir=f"kokoro/{_RELEASE}", sha256=asset.sha256, size=asset.size
+    )
+
+
+for _name, _variant in KOKORO_MODELS.items():
+    _zh = _name.startswith("v1.1-zh")
+    register_model(
+        "kokoro",
+        _name,
+        kind="tts",
+        files=[_model_file(_variant.onnx), _model_file(_variant.voices)],
+        license="Apache-2.0",
+        languages="zh, en" if _zh else "en, es, fr, hi, it, ja, pt, zh",
+        description=f"Kokoro-82M {_name} ONNX + voice pack ({_variant.voices.filename})",
+    )
