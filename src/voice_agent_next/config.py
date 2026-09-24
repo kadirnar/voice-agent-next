@@ -7,7 +7,7 @@ Example ``agent.yaml``::
 
     # ...or a cascade (omit `engine`)
     stt: {provider: deepgram/nova-3, language: en}
-    llm: openai/gpt-4.1-mini
+    llm: [groq/llama-3.3-70b-versatile, openai/gpt-4.1-mini]   # a list = failover chain
     tts: {provider: cartesia/sonic-2, voice: "<voice id>"}
     vad: silero
     turn_detector: smart_turn
@@ -48,7 +48,9 @@ __all__ = [
     "resolve_callable",
 ]
 
-ComponentSpec = str | dict[str, Any]
+SingleComponentSpec = str | dict[str, Any]
+ComponentSpec = SingleComponentSpec | list[SingleComponentSpec]
+"""A provider spec, its mapping form, or (STT/LLM/TTS) a failover list of either."""
 _ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
@@ -68,12 +70,12 @@ class AppConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    engine: ComponentSpec | None = None
+    engine: SingleComponentSpec | None = None
     stt: ComponentSpec | None = None
     llm: ComponentSpec | None = None
     tts: ComponentSpec | None = None
-    vad: ComponentSpec | None = None
-    turn_detector: ComponentSpec | None = None
+    vad: SingleComponentSpec | None = None
+    turn_detector: SingleComponentSpec | None = None
     cascade: dict[str, Any] = Field(default_factory=dict)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     session: dict[str, Any] = Field(default_factory=dict)

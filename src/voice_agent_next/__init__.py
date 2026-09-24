@@ -39,6 +39,7 @@ from .errors import (
     ProviderNotFoundError,
     VoiceAgentError,
 )
+from .fallback import FallbackLLM, FallbackSTT, FallbackTTS
 from .llm import LLM, ChatChunk, LLMCapabilities, LLMStream
 from .registry import create, list_providers, register_provider
 from .session import Agent, AgentSession, AgentState, SessionOptions, UserState
@@ -75,6 +76,9 @@ __all__ = [
     "EngineCapabilities",
     "EngineConnection",
     "EngineOptions",
+    "FallbackLLM",
+    "FallbackSTT",
+    "FallbackTTS",
     "FunctionCall",
     "FunctionCallOutput",
     "FunctionTool",
