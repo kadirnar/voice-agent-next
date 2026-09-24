@@ -142,8 +142,13 @@ padding (`VADOptions`) work as usual.
 ```python
 create("stt", "sherpa-onnx", model="/models/sherpa-onnx-whisper-tiny.en")  # kind guessed
 create("stt", "sherpa-onnx", model="https://…/model.tar.bz2", sha256="…", kind="online-transducer")
-create("stt", "sherpa-onnx", model="/models/x", kind="offline-nemo-ctc",
-       files={"model": "/models/x/model.int8.onnx", "tokens": "/models/x/tokens.txt"})
+create(
+    "stt",
+    "sherpa-onnx",
+    model="/models/x",
+    kind="offline-nemo-ctc",
+    files={"model": "/models/x/model.int8.onnx", "tokens": "/models/x/tokens.txt"},
+)
 ```
 
 The kind (`ModelKind`: `online-transducer`, `online-paraformer`, `online-zipformer2-ctc`,
@@ -198,7 +203,28 @@ Audio streams out as sherpa generates it (per sentence); `stream()` uses the bas
 
 ## Latency
 
-LATENCY_SECTION
+T1 benchmark (`van bench latency`, 13 turns × 2 sessions per condition, first turn of each
+session excluded, run back to back) on an AMD Ryzen 5 5600 CPU (no GPU), with only the
+recognizer changing: Silero VAD · Smart Turn v3.2 · Ollama `LiquidAI/lfm2.5-1.2b-instruct`
+· Kokoro v1.0 fp16 (kokoro-onnx) · `cascade.first_sentence_max_chars: 40`, scenario
+`benchmarks/scenarios/latency-local.yaml`.
+
+| STT | v2v p50 | v2v p90 | end-of-turn delay p50 | STT flush → final p50 | dead air (> 2 s) |
+|---|---:|---:|---:|---:|---:|
+| faster-whisper `base` (CPU int8, batch) | 1,284 ms | 1,878 ms | 633 ms | 373 ms | 4 % |
+| sherpa-onnx `nemo-fastconformer-en-80ms` | 1,209 ms | 1,872 ms | **401 ms** | **94 ms** | 13 % |
+| sherpa-onnx `zipformer-en-kroko` | **1,126 ms** | **1,620 ms** | **400 ms** | 100 ms | 4 % |
+
+* The streaming recognizer takes the final transcript off the critical path: the
+  end-of-turn delay drops to the cascade's minimum endpointing delay (0.4 s with a turn
+  detector); the STT final arrives in ≈ 100 ms, well inside that window.
+* The rest of v2v is the TTS's first audio, which depends on the LLM's first clause and
+  varies between runs (the lowercase, unpunctuated NeMo transcript changes the LLM's
+  wording); Kroko's cased, punctuated output gave replies closest to the baseline.
+* Transcripts of all 24 measured turns were correct with both streaming models.
+
+With `latency-local-sherpa.yaml` (stimuli rendered by sherpa-onnx Kokoro int8) and the NeMo
+model, 6 measured turns gave v2v p50 952 ms / p90 1,116 ms, end-of-turn delay 401 ms.
 
 ## Tests
 
