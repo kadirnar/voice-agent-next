@@ -20,7 +20,10 @@ from .events import (
     UserTranscript,
 )
 from .interruptions import InterruptionPolicy, backchannel_words_for
+from .recording import SessionRecorder
 from .session import AgentSession, SessionOptions
+from .taps import SessionTap
+from .tracing import SessionTracer
 
 __all__ = [
     "DEFAULT_INSTRUCTIONS",
@@ -37,6 +40,9 @@ __all__ = [
     "SessionClosed",
     "SessionError",
     "SessionOptions",
+    "SessionRecorder",
+    "SessionTap",
+    "SessionTracer",
     "ToolCalled",
     "ToolResult",
     "UserState",
