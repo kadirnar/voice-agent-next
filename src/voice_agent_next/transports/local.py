@@ -140,6 +140,11 @@ class AudioSystemInfo:
     devices: tuple[AudioDeviceInfo, ...]
 
     @property
+    def portaudio_release(self) -> str:
+        """The version text without the build details, e.g. ``"PortAudio V19.6.0-devel"``."""
+        return self.portaudio_version.split(",")[0].strip()
+
+    @property
     def default_input(self) -> AudioDeviceInfo | None:
         return next((d for d in self.devices if d.is_default_input), None)
 
@@ -171,7 +176,7 @@ class AudioSystemInfo:
 
     def _linux_hostapi_hint(self) -> str:
         hint = (
-            f"{self.portaudio_version} has no PulseAudio/PipeWire host API (Debian and "
+            f"{self.portaudio_release} has no PulseAudio/PipeWire host API (Debian and "
             "Ubuntu ship PortAudio 19.6), so audio goes through ALSA"
         )
         preference = ("pipewire", "pulse", "default")

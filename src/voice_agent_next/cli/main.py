@@ -181,7 +181,7 @@ def devices(
     if as_json:
         typer.echo(json.dumps([dataclasses.asdict(d) for d in info.devices], indent=2))
         return
-    table = Table(title=f"audio devices ({escape(info.portaudio_version)})")
+    table = Table(title=f"audio devices ({escape(info.portaudio_release)})")
     for col in ("#", "name", "host API", "in", "out", "rate", "default"):
         table.add_column(
             col, overflow="fold", justify="right" if col in ("#", "in", "out") else "left"

@@ -895,10 +895,12 @@ def test_default_echo_canceller_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_linux_hint_points_to_the_alsa_pipewire_device(fake_sd: FakeSoundDevice) -> None:
     info = describe_audio_system()
     assert info.portaudio_version == PORTAUDIO_19_6
+    assert info.portaudio_release == "PortAudio V19.6.0-devel"
     assert info.default_input is not None and info.default_input.index == 0
     assert info.default_output is not None and info.default_output.index == 1
     (hint,) = info.hints(platform="linux")
-    assert "no PulseAudio/PipeWire host API" in hint and "input_device='pipewire'" in hint
+    assert hint.startswith("PortAudio V19.6.0-devel has no PulseAudio/PipeWire host API")
+    assert "input_device='pipewire'" in hint
     assert info.hints(platform="darwin") == []
 
 
