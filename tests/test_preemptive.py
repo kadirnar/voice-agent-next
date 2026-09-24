@@ -34,6 +34,7 @@ from voice_agent_next.events import (
     ResponseText,
     ResponseToolCall,
 )
+from voice_agent_next.llm import LLMStream
 from voice_agent_next.metrics import (
     LLMMetrics,
     SpeculationMetrics,
@@ -91,7 +92,7 @@ def cascade(
     **options: Any,
 ) -> AgentSession:
     options.setdefault("preemptive_generation", True)
-    options.setdefault("min_endpointing_delay", 1.0)  # a wide window: robust on slow runners
+    options.setdefault("min_endpointing_delay", 0.8)  # a wide window: robust on slow runners
     return AgentSession(
         stt=stt if stt is not None else MockSTT(transcripts=["book a table"], latency=0.02),
         llm=llm if llm is not None else MockLLM(ttft=0.05),
@@ -174,6 +175,29 @@ async def test_hit_is_released_as_one_ordinary_response() -> None:
     assert history(session) == [("user", "book a table"), ("assistant", "You said: book a table")]
     assert [(i.role, i.text) for i in conn.chat_ctx.items] == history(session)
     assert session.usage.speculation_hits == 1 and session.usage.speculation_waste_calls == 0
+
+
+async def test_speculative_reply_gets_exactly_the_llm_input_of_a_normal_one() -> None:
+    async def requests(preemptive: bool) -> list[list[tuple[str, str]]]:
+        llm = MockLLM(ttft=0.02)
+        session = cascade(
+            stt=MockSTT(transcripts=["first question", "second question"], latency=0.02),
+            llm=llm,
+            preemptive_generation=preemptive,
+            max_history_items=3,  # the window must cut the history at the same item
+            min_endpointing_delay=0.5,
+        )
+        rec = Recorder(session)
+        transport = LoopbackTransport()
+        await session.start(Agent("Be brief."), transport)
+        for n in (1, 2):
+            await speak(transport, 0.5, 0.4)
+            await wait_for(lambda n=n: len(rec.turn_metrics()) == n, 5)  # type: ignore[misc]
+        await session.aclose()
+        assert len(speculations(rec)) == (2 if preemptive else 0)
+        return [[(getattr(i, "role", ""), getattr(i, "text", "")) for i in r] for r in llm.requests]
+
+    assert await requests(True) == await requests(False)
 
 
 # ---------------------------------------------------------------------------- misses
@@ -364,6 +388,43 @@ async def test_eager_speculation_is_dropped_when_the_final_turn_differs(resumed:
         ("user", "Hey can you help me?"),
         ("assistant", "You said: Hey can you help me?"),
     ]
+
+
+class FirstCallFails(MockLLM):
+    """The first request fails: when it is made (``"start"``) or while streaming."""
+
+    def __init__(self, mode: str, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.mode = mode
+
+    def _chat(self, ctx: ChatContext, **kw: Any) -> LLMStream:
+        if self.requests:  # later calls work
+            return super()._chat(ctx, **kw)
+        self.requests.append(ctx.copy())
+        if self.mode == "start":
+            raise RuntimeError("rejected")
+        return _Failing(self, ctx, **kw)
+
+
+class _Failing(LLMStream):
+    async def _run(self) -> None:
+        raise RuntimeError("rate limited")
+
+
+@pytest.mark.parametrize("mode", ["start", "stream"])
+async def test_a_failed_speculation_falls_back_to_a_normal_reply(mode: str) -> None:
+    llm = FirstCallFails(mode, ttft=0.02)
+    session = cascade(llm=llm)
+    rec = Recorder(session)
+    transport = LoopbackTransport()
+    await session.start(Agent("x"), transport)
+    await speak(transport, 0.5, 0.4)
+    await wait_for(lambda: bool(rec.turn_metrics()), 5)
+    await session.aclose()
+    # the failure never reaches the session: the committed turn gets a fresh reply
+    assert outcomes(rec) == ([] if mode == "start" else [(False, "failed")])
+    assert not rec.of("error")
+    assert history(session) == [("user", "book a table"), ("assistant", "You said: book a table")]
 
 
 # ----------------------------------------------------------------------------- tools

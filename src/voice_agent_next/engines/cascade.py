@@ -596,7 +596,12 @@ class CascadeConnection(EngineConnection):
         user = ChatMessage(role="user", content=[text], id=item_id)
         answer = ChatMessage(role="assistant", content=[""], id=new_id("item_"))
         tools = self.tools if engine.llm.capabilities.tool_calling else []
-        reply = _Prefetch(engine.llm.chat(self._llm_context(None, (user, answer)), tools=tools))
+        try:
+            stream = engine.llm.chat(self._llm_context(None, (user, answer)), tools=tools)
+        except Exception:  # the reply started at the commit will report it
+            logger.exception("could not start a speculative reply")
+            return
+        reply = _Prefetch(stream)
         output = _Output(self, held=True)
         rid = new_id("resp_")
         task = asyncio.create_task(
