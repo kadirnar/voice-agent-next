@@ -506,7 +506,7 @@ async def test_go_away_rotates_seamlessly_without_losing_audio(fake: Callable[..
 
 
 async def test_rotation_waits_for_the_model_to_finish(fake: Callable[..., Any]) -> None:
-    server = await fake(replies=["This answer takes a moment to say."], realtime_factor=1.0)
+    server = await fake(replies=["One moment, please."], realtime_factor=1.0)
     conn, events = await connect(server)
     await say(conn)
     await events.wait(lambda: bool(events.of(ResponseAudio)))
@@ -614,6 +614,44 @@ async def test_update_applies_the_new_setup_on_a_resumed_connection(
     assert statuses(events) == [("reconnecting", "update"), ("resumed", "update")]
 
 
+async def test_failed_planned_rotation_keeps_the_current_connection(
+    fake: Callable[..., Any],
+) -> None:
+    server = await fake(replies=["Still here."])
+    conn, events = await connect(server)
+    server.reject_status = 503  # the service refuses new connections for a moment
+    await conn.update(instructions="New instructions.")
+    await events.wait(lambda: len(events.of(EngineStatus)) >= 2)
+    assert statuses(events) == [
+        ("reconnecting", "update"), ("resumed", "kept the current connection (update)")
+    ]  # fmt: skip
+    errors = [e for e in events.items if type(e).__name__ == "EngineErrorEvent"]
+    assert len(errors) == 1 and errors[0].recoverable
+    assert isinstance(errors[0].error, ProviderConnectionError)
+    await say(conn)  # the conversation carries on over the first connection
+    await events.wait(lambda: bool(events.of(ResponseDone)))
+    assert len(server.connections) == 1
+    server.reject_status = None
+    await events.wait(lambda: conn.resumptions == 1)  # retried at a later idle moment
+    await conn.aclose()
+    assert server.connections[1].setup["systemInstruction"] == {"parts": [{"text": "New instructions."}]}  # fmt: skip
+
+
+async def test_reconnect_withdraws_pending_tool_calls(fake: Callable[..., Any]) -> None:
+    server = await fake(replies=[FakeToolCall("lookup", {"q": "x"})])
+    conn, events = await connect(server, TOOLS)
+    await say(conn)
+    await events.wait(lambda: bool(events.of(ResponseToolCall)))
+    call = events.of(ResponseToolCall)[0].call
+    await server.drop()  # the resumed session predates the call (resumable=false meanwhile)
+    await events.wait(lambda: resumed(events))
+    assert events.of(ToolCallCancelled)[-1].call_ids == [call.call_id]
+    await conn.send_tool_output(FunctionCallOutput(call_id=call.call_id, output="late"))
+    await asyncio.sleep(0.1)
+    await conn.aclose()
+    assert server.connections[1].tool_responses == []  # not sent to a session without the call
+
+
 # ------------------------------------------------------------------- manual turns
 async def test_manual_turn_detection(fake: Callable[..., Any]) -> None:
     server = await fake(replies=["Got it."], transcripts=["push to talk"])
@@ -712,7 +750,7 @@ def history(session: AgentSession) -> list[tuple[str, str]]:
 
 
 async def test_session_turn_with_greeting_and_transcripts(fake: Callable[..., Any]) -> None:
-    server = await fake(replies=["Hi! Nice to meet you."], transcripts=["hello gemini"])
+    server = await fake(replies=["Hi there!"], transcripts=["hello gemini"])
     session = AgentSession(engine_for(server))
     rec = Recorder(session)
     transport = LoopbackTransport()
@@ -724,7 +762,7 @@ async def test_session_turn_with_greeting_and_transcripts(fake: Callable[..., An
     await asyncio.wait_for(session.wait_closed(), 5)
 
     assert history(session) == [
-        ("assistant", "Welcome."), ("user", "hello gemini"), ("assistant", "Hi! Nice to meet you.")
+        ("assistant", "Welcome."), ("user", "hello gemini"), ("assistant", "Hi there!")
     ]  # fmt: skip
     finals = [e.text for e in rec.of("user_transcript") if e.is_final]
     assert finals == ["hello gemini"]
@@ -736,7 +774,7 @@ async def test_session_turn_with_greeting_and_transcripts(fake: Callable[..., An
     assert m.voice_to_voice is not None and m.end_of_turn_delay is not None
     assert not m.interrupted
     played = sum(p.frame.duration for p in transport.played_log)
-    assert played == pytest.approx((len("Welcome.") + len("Hi! Nice to meet you.")) / 15, abs=0.15)
+    assert played == pytest.approx((len("Welcome.") + len("Hi there!")) / 15, abs=0.15)
     assert session.usage.engine_output_audio_tokens > 0
     assert rec.of("close")[0].reason == "user_disconnected"
     assert server.setups[0]["systemInstruction"] == {"parts": [{"text": "Be nice."}]}
@@ -751,7 +789,7 @@ async def test_session_tool_call_round_trip(fake: Callable[..., Any]) -> None:
         calls.append(city)
         return f"sunny in {city}"
 
-    server = await fake(replies=[FakeToolCall("weather", {"city": "Paris"}), "It is sunny in Paris."],
+    server = await fake(replies=[FakeToolCall("weather", {"city": "Paris"}), "Sunny."],
                         transcripts=["weather in paris?"])  # fmt: skip
     session = AgentSession(engine_for(server))
     rec = Recorder(session)
@@ -767,7 +805,7 @@ async def test_session_tool_call_round_trip(fake: Callable[..., Any]) -> None:
     assert response["scheduling"] == "WHEN_IDLE"
     kinds = [getattr(i, "role", i.type) for i in session.history.items]
     assert kinds == ["user", "function_call", "function_call_output", "assistant"]
-    assert history(session)[-1] == ("assistant", "It is sunny in Paris.")
+    assert history(session)[-1] == ("assistant", "Sunny.")
     m = rec.turn_metrics()[0]
     assert m.tool_calls == 1 and m.voice_to_voice is not None
 
@@ -866,7 +904,7 @@ async def test_session_voice_to_voice_matches_external_measurement(
 
 
 async def test_session_continues_across_a_go_away_rotation(fake: Callable[..., Any]) -> None:
-    server = await fake(replies=["First answer.", "Second answer."], transcripts=["one", "two"])
+    server = await fake(replies=["First.", "Second."], transcripts=["one", "two"])
     session = AgentSession(engine_for(server))
     rec = Recorder(session)
     transport = LoopbackTransport()
@@ -883,7 +921,7 @@ async def test_session_continues_across_a_go_away_rotation(fake: Callable[..., A
     await session.aclose()
 
     assert history(session) == [
-        ("user", "one"), ("assistant", "First answer."), ("user", "two"), ("assistant", "Second answer.")
+        ("user", "one"), ("assistant", "First."), ("user", "two"), ("assistant", "Second.")
     ]  # fmt: skip
     first, second = server.connections
     assert second.session is first.session and second.user_turns == ["two"]

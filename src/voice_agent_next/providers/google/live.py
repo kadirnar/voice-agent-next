@@ -531,6 +531,7 @@ class GeminiLiveConnection(EngineConnection):
         self._resumable = False
         self._pending_rotation: str | None = None
         self._rotation_deadline: float | None = None
+        self._rotation_retry_at: float | None = None
         # ---- server turn state
         self._server_turn_open = False
         self._gen: _Generation | None = None
@@ -599,7 +600,12 @@ class GeminiLiveConnection(EngineConnection):
     async def _open(self, handle: str | None) -> tuple[ClientConnection, list[dict[str, Any]]]:
         """Connect, send ``setup`` and wait for ``setupComplete``."""
         from websockets.asyncio.client import connect
-        from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
+        from websockets.exceptions import (
+            ConnectionClosed,
+            InvalidStatus,
+            InvalidURI,
+            WebSocketException,
+        )
 
         url, headers = self._e._endpoint()
         turns = self._history_turns() if handle is None else []
@@ -615,7 +621,9 @@ class GeminiLiveConnection(EngineConnection):
         except InvalidStatus as exc:
             body = exc.response.body.decode("utf-8", "replace") if exc.response.body else ""
             raise _http_error(exc.response.status_code, body) from exc
-        except (OSError, InvalidHandshake, TimeoutError) as exc:
+        except InvalidURI as exc:
+            raise ConfigurationError(f"invalid Gemini Live base_url: {exc}") from exc
+        except (OSError, WebSocketException, TimeoutError) as exc:
             msg = f"cannot connect to Gemini Live: {type(exc).__name__}: {exc}"
             raise ProviderConnectionError(msg, provider="google") from exc
         self.connections += 1
@@ -852,7 +860,7 @@ class GeminiLiveConnection(EngineConnection):
             return
         if self._rotation_deadline is not None and t >= self._rotation_deadline:
             self._start_rotation(f"{reason} (deadline)")
-        elif self._is_idle():
+        elif (self._rotation_retry_at is None or t >= self._rotation_retry_at) and self._is_idle():
             self._start_rotation(reason)
 
     def _is_idle(self) -> bool:
@@ -872,6 +880,7 @@ class GeminiLiveConnection(EngineConnection):
         self._switching = True
         self._pending_rotation = None
         self._rotation_deadline = None
+        self._rotation_retry_at = None
         self._rotation_task = asyncio.create_task(self._rotate(reason), name="gemini-live-rotate")
 
     async def _rotate(self, reason: str) -> None:
@@ -890,6 +899,13 @@ class GeminiLiveConnection(EngineConnection):
             except Exception as exc:
                 failures += 1
                 rejected = isinstance(exc, ProviderError) and not exc.retryable
+                current = self._ws
+                if (  # a planned rotation failed but the current connection still works
+                    current is not None
+                    and current.state is State.OPEN
+                    and await self._keep_current(current, reason, exc, retry_in=delay)
+                ):
+                    return
                 if rejected and handle is not None:
                     # e.g. an expired handle: continue in a fresh session (history re-seeded)
                     logger.warning("gemini-live: cannot resume (%s); starting a new session", exc)
@@ -941,6 +957,21 @@ class GeminiLiveConnection(EngineConnection):
             self._handle = None
         self._install(ws, early)
 
+    async def _keep_current(
+        self, ws: ClientConnection, reason: str, error: Exception, *, retry_in: float
+    ) -> bool:
+        """Abort a planned rotation and carry on with ``ws`` (retried later if sensible)."""
+        if not await self._flush_outbox(ws):
+            return False
+        self._switching = False  # outbox empty; no await since the check
+        logger.warning("gemini-live: could not rotate (%s); keeping the current connection", error)
+        if not (isinstance(error, ProviderError) and not error.retryable):
+            self._pending_rotation = reason.removesuffix(" (deadline)")
+            self._rotation_retry_at = now() + retry_in
+        self._emit(EngineErrorEvent(error=error, recoverable=True))
+        self._emit(EngineStatus(status="resumed", detail=f"kept the current connection ({reason})"))
+        return True
+
     async def _flush(self, ws: ClientConnection) -> bool:
         """Replay audio sent since the handle, then the messages queued during the switch."""
         replay = list(self._replay)
@@ -952,6 +983,9 @@ class GeminiLiveConnection(EngineConnection):
                     self._replay.append(rest)
                     self._replay_audio += rest.audio_duration
                 return False
+        return await self._flush_outbox(ws)
+
+    async def _flush_outbox(self, ws: ClientConnection) -> bool:
         while self._outbox:
             entry = self._outbox.popleft()
             self._outbox_audio -= entry.audio_duration
