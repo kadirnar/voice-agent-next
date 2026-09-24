@@ -40,6 +40,7 @@ A yellow row means a faster backend is one install away, and the row gives the c
 | Kokoro | ONNX Runtime | CUDA > CoreML > DirectML > CPU, when the installed ONNX Runtime build has them | Unchanged order; CUDA libraries are now loaded first and checked |
 | Silero VAD | ONNX Runtime | CPU (`force_cpu=True`) | A 32 ms window every 32 ms on a tiny model: a GPU round trip costs more than the inference |
 | Smart Turn | ONNX Runtime | CPU (`providers` default) | Runs once per pause, concurrently with the STT flush, so it is off the critical path |
+| Chatterbox, Qwen3-TTS | PyTorch | CUDA > MPS > CPU | Autoregressive models of 110M–1.7B parameters: real time needs a GPU ([chatterbox](providers/chatterbox.md), [qwen-tts](providers/qwen-tts.md)) |
 
 Explicit choices are never second-guessed: `device="cpu"` / `device="cuda"` for
 faster-whisper and `providers=[...]` for the ONNX models are used as given. With an explicit
@@ -57,6 +58,12 @@ faster-whisper and `providers=[...]` for the ONNX models are used as given. With
    raised mid-inference.
 3. The libraries load, but loading or the warm-up inference fails on the GPU (no kernels
    for this architecture, out of memory) → a WARNING with the error, and CPU.
+
+For the PyTorch models, `select_torch_backend()` picks CUDA only when torch sees the GPU
+*and* was compiled for its architecture: torch < 2.7 has no kernels for Blackwell GPUs
+(RTX 50xx, compute capability 12.0) and would fail at the first kernel. Otherwise the model
+runs on CPU and the reason and the fix (a CUDA build of torch) are logged and shown by
+`van doctor` ("torch device=auto").
 
 For the ONNX models, a CUDA execution provider whose libraries (cuBLAS, cuDNN, cuFFT,
 cuRAND, CUDA runtime) do not load is skipped, and when session creation still fails
@@ -104,7 +111,8 @@ runtimes are imported only if installed) and never raises:
 | `onnxruntime_info()` | version, execution providers, CUDA version of GPU builds, conflicting installed builds |
 | `ctranslate2_info()` | version, CUDA device count, CUDA compute types |
 | `find_cuda_libraries()` / `load_cuda_libraries()` | see above |
-| `select_ctranslate2_backend()` / `select_onnx_backend()` | a `Backend(device, compute_type, providers, reason, fix)` |
+| `torch_info()` | PyTorch version, CUDA version of the build, CUDA devices and their compute capability, the GPU architectures compiled in, MPS |
+| `select_ctranslate2_backend()` / `select_onnx_backend()` / `select_torch_backend()` | a `Backend(device, compute_type, providers, reason, fix)` |
 | `report()` | the `van doctor` rows |
 
 `clear_cache()` forgets detection results (for tests; loaded libraries stay loaded).
