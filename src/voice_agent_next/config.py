@@ -22,11 +22,20 @@ Example ``agent.yaml``::
 
     transport: {type: local}
 
+A config may start from a preset (:mod:`voice_agent_next.presets`, ``van presets``) and
+change only what differs::
+
+    extends: local-cpu
+    llm: ollama/qwen3.5:4b          # replaces the preset's LLM
+    stt: {language: en}             # a mapping without `provider:` tweaks the preset's STT
+    agent: {instructions: You are a pirate.}
+
 Strings of the form ``${ENV_VAR}`` or ``${ENV_VAR:-default}`` are expanded.
 """
 
 from __future__ import annotations
 
+import copy
 import importlib
 import json
 import os
@@ -45,6 +54,7 @@ __all__ = [
     "AppConfig",
     "ComponentSpec",
     "load_config",
+    "merge_config",
     "resolve_callable",
 ]
 
@@ -80,6 +90,8 @@ class AppConfig(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     session: dict[str, Any] = Field(default_factory=dict)
     transport: dict[str, Any] = Field(default_factory=lambda: {"type": "local"})
+    extends: str | None = None
+    """The preset this config starts from (``van presets`` lists them)."""
 
     def is_cascade(self) -> bool:
         return self.engine is None
@@ -135,9 +147,83 @@ def load_config(source: str | os.PathLike[str] | dict[str, Any]) -> AppConfig:
             raise ConfigurationError(f"unsupported config format: {suffix}")
     if not isinstance(data, dict):
         raise ConfigurationError("config root must be a mapping")
+    data = _apply_extends(data)
     cfg = AppConfig.model_validate(_expand_env(data))
     cfg.validate_components()
     return cfg
+
+
+_COMPONENT_KEYS = ("engine", "stt", "llm", "tts", "vad", "turn_detector")
+_CASCADE_KEYS = ("stt", "llm", "tts", "vad", "turn_detector")
+
+
+def _apply_extends(data: dict[str, Any]) -> dict[str, Any]:
+    name = data.get("extends")
+    if name is None:
+        return data
+    if not isinstance(name, str):
+        raise ConfigurationError(f"`extends:` must be a preset name, got {name!r}")
+    from .presets import get_preset  # the presets module imports this one
+
+    preset = get_preset(name)
+    merged = merge_config(dict(preset.config), {k: v for k, v in data.items() if k != "extends"})
+    merged["extends"] = preset.name
+    return merged
+
+
+def _merge_component(key: str, base: Any, override: Any) -> Any:
+    """A component spec over another: a mapping without ``provider:`` only changes options."""
+    if not isinstance(override, dict) or any(k in override for k in ("provider", "use", "fallback")):
+        return override
+    if base is None:
+        raise ConfigurationError(f"`{key}:` needs a `provider:` key (there is nothing to extend)")
+    if isinstance(base, str):
+        return {"provider": base, **override}
+    if isinstance(base, dict) and "fallback" not in base:
+        return {**base, **override}
+    raise ConfigurationError(
+        f"`{key}:` is a failover list in the base config: give the whole list, not only options"
+    )
+
+
+def _merge_mapping(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _merge_mapping(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """``override`` on top of ``base`` (both raw config mappings), as ``extends:`` does it.
+
+    * Sections (``agent``, ``session``, ``cascade``, ``transport``) merge key by key; a
+      ``transport`` of another ``type`` replaces the base one.
+    * A component (``engine``, ``stt``, ``llm``, ``tts``, ``vad``, ``turn_detector``) is
+      replaced, except that a mapping without ``provider:`` only changes the base
+      component's options (``stt: {language: fr}``). ``null`` removes a component.
+    * Setting ``engine:`` drops the base's cascade components, and setting a cascade
+      component drops the base's ``engine:``: a config is one or the other.
+    """
+    out = copy.deepcopy(base)
+    override = copy.deepcopy(override)
+    if override.get("engine") is not None:
+        for key in _CASCADE_KEYS:
+            out.pop(key, None)
+    if any(override.get(key) is not None for key in _CASCADE_KEYS):
+        out.pop("engine", None)
+    for key, value in override.items():
+        current = out.get(key)
+        if key in _COMPONENT_KEYS:
+            out[key] = _merge_component(key, current, value)
+        elif isinstance(value, dict) and isinstance(current, dict):
+            same_type = value.get("type", current.get("type")) == current.get("type")
+            out[key] = _merge_mapping(current, value) if key != "transport" or same_type else value
+        else:
+            out[key] = value
+    return out
 
 
 def resolve_callable(path: str) -> Any:
