@@ -143,7 +143,7 @@ Other tools can use the manager directly (`voice_agent_next.models`):
 ```python
 from voice_agent_next import models
 
-req = models.models_for_config("agent.yaml")      # or models_for("stt=...,tts=...")
+req = models.models_for_config("agent.yaml")  # or models_for("stt=...,tts=...")
 for info in req.models:
     if not models.model_status(info).cached:
         models.download_model(info)
@@ -161,11 +161,14 @@ A provider registers the files it downloads at import time, next to its pinned U
 from ..models import ModelFile, register_model
 
 register_model(
-    "silero",                       # provider name, as in @register_provider
-    "v6.2",                         # model id, as in create("vad", "silero/v6.2")
+    "silero",  # provider name, as in @register_provider
+    "v6.2",  # model id, as in create("vad", "silero/v6.2")
     kind="vad",
-    files=[ModelFile.from_url(URL, subdir="silero", filename="silero_vad_v6.2.onnx",
-                              sha256=SHA256, size=2_327_524)],
+    files=[
+        ModelFile.from_url(
+            URL, subdir="silero", filename="silero_vad_v6.2.onnx", sha256=SHA256, size=2_327_524
+        )
+    ],
     license="MIT",
     languages="any",
 )
