@@ -219,7 +219,7 @@ def select_audio_device(
     space-separated name substrings matched case-insensitively, in order, against
     ``"<device name>, <host API>"`` (``"usb"``, ``"Microphone WASAPI"``), like
     ``sounddevice`` does. When a name matches several devices, an exact name match wins,
-    then a device on the default device's host API; anything else is ambiguous.
+    then a device on the host API of the default device; anything else is ambiguous.
 
     Raises:
         ConfigurationError: no such device, not a ``kind`` device, or ambiguous name.
@@ -254,7 +254,9 @@ def select_audio_device(
     if len(matches) > 1:
         matches = [d for d in matches if d.name.lower() == query] or matches
     if len(matches) > 1:
-        default = next((d for d in usable if d.is_default(kind)), None)
+        default = next((d for d in usable if d.is_default(kind)), None) or next(
+            (d for d in devices if d.is_default_input or d.is_default_output), None
+        )
         if default is not None:
             matches = [d for d in matches if d.hostapi == default.hostapi] or matches
     if len(matches) > 1:
@@ -602,10 +604,10 @@ class LocalAudioTransport(Transport):
     # ----------------------------------------------------------------------- lifecycle
     async def start(self) -> None:
         """Open and start the microphone and speaker streams."""
-        if self._started:
-            return
         if self._closing:
             raise TransportError("LocalAudioTransport is closed")
+        if self._started:
+            return
         self._loop = asyncio.get_running_loop()
         if self._echo_canceller is not None and self._active_mode == "aec":
             self._echo_canceller.reset()
