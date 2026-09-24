@@ -535,10 +535,70 @@ async def test_serve_true_owns_the_server(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(LiquidAudioServer, "stop", stop)
     llm = LiquidAudioLLM(serve=True, server_options={"threads": 4})
     assert llm.server is not None and llm.server.threads == 4
+    assert llm.server.ctx_size == llm.context_size == liquid_audio.MANAGED_CONTEXT_SIZE
     await llm._ensure_server()
     assert llm.base_url == "http://127.0.0.1:18123/v1"
     await llm.aclose()
     assert started == ["start", "stop"]
+
+
+async def test_a_managed_server_that_died_is_restarted(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeLiquidServer(["First.", "After the restart."])
+    alive = {"up": False}
+    starts: list[int] = []
+
+    async def start(self: LiquidAudioServer) -> str:
+        self.port = 18124
+        alive["up"] = True
+        fake.context = []  # a new process: empty context
+        starts.append(1)
+        return self.base_url
+
+    monkeypatch.setattr(LiquidAudioServer, "start", start)
+    monkeypatch.setattr(LiquidAudioServer, "running", property(lambda self: alive["up"]))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if not alive["up"]:
+            raise httpx.ConnectError("connection refused")
+        return await fake.handle(request)
+
+    llm = LiquidAudioLLM(
+        server=LiquidAudioServer(),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    ctx = ChatContext()
+    ctx.add_message("user", "hello")
+    first, _ = await reply(llm, ctx)
+    ctx.add_message("assistant", first)
+    ctx.add_message("user", "still there?")
+    alive["up"] = False  # the server exits (out of context, killed...)
+    text, _ = await reply(llm, ctx)
+    await llm.aclose()
+    assert text == "After the restart." and len(starts) == 2
+    # the new process knows nothing: the conversation was replayed from scratch
+    assert fake.bodies[-1]["reset_context"] is True
+    assert [m["content"] for m in fake.bodies[-1]["messages"][1:]] == [
+        "hello",
+        "(Earlier you said: First.)",
+        "still there?",
+    ]
+
+
+async def test_the_context_is_reset_before_it_overflows() -> None:
+    server = FakeLiquidServer()
+    llm = llm_for(server, context_size=400, max_tokens=100)  # room for ~236 positions
+    ctx = ChatContext()
+    for i in range(12):
+        ctx.add_message("user", f"question number {i}")
+        text, _ = await reply(llm, ctx)
+        ctx.add_message("assistant", text)
+        assert llm._held_tokens <= 400 - 100 - 64 + 100  # prompt budget + one reply
+    await llm.aclose()
+    resets = [b["reset_context"] for b in server.bodies]
+    assert resets[0] and not resets[1] and 2 < sum(resets) < 12
+    # a reset replays the recent turns that fit, ending with the new question
+    body = next(b for b in server.bodies[1:] if b["reset_context"])
+    assert len(body["messages"]) > 2 and body["messages"][-1]["content"].startswith("question")
 
 
 # ---------------------------------------------------------------------- real server

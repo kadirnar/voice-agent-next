@@ -52,7 +52,7 @@ import numpy as np
 from ..audio.frame import AudioFrame
 from ..audio.resample import resample
 from ..chat import AudioContent, ChatContext, ChatMessage
-from ..errors import ConfigurationError, ProviderError
+from ..errors import ConfigurationError, ProviderConnectionError, ProviderError
 from ..llm import LLM, ChatChunk, CompletionUsage, LLMCapabilities, LLMStream, ToolChoice
 from ..registry import register_provider
 from ..tools import FunctionTool
@@ -77,6 +77,11 @@ INTERLEAVED_PROMPT = "Respond with interleaved text and audio."
 DEFAULT_BASE_URL = "http://127.0.0.1:8080/v1"
 OUTPUT_SAMPLE_RATE = 24_000
 INPUT_SAMPLE_RATE = 16_000
+SERVER_CONTEXT_SIZE = 4096
+"""The server's default context length (``-c``)."""
+MANAGED_CONTEXT_SIZE = 16_384
+"""Context length of a managed server (the model was trained with 128k): a spoken reply
+takes ~13 positions per second of audio, and the server exits when its context is full."""
 
 HF_REPO = "LiquidAI/LFM2.5-Audio-1.5B-GGUF"
 HF_REVISION = "7d525f883a077e20afb782f2ff618edcae0e39e4"
@@ -384,6 +389,8 @@ class _Turn:
     role: str  # "user" | "assistant"
     key: tuple[Any, ...]
     content: Any  # user: str | list of parts; assistant: its text
+    tokens: int = 0
+    """Estimated context positions of the message as sent."""
 
 
 def _audio_digest(frame: AudioFrame) -> str:
@@ -394,15 +401,26 @@ def _normalize(text: str) -> str:
     return " ".join(text.split())
 
 
+_MESSAGE_TOKENS = 8  # chat-template tokens around each message
+_AUDIO_TOKENS_PER_SECOND = 13.0  # the audio encoder's rate (measured: ~41 tokens for 3.2 s)
+
+
+def _text_tokens(text: str) -> int:
+    return len(text) // 3 + 1
+
+
 def _user_turn(msg: ChatMessage) -> _Turn | None:
     parts: list[dict[str, Any]] = []
     key: list[Any] = ["user", msg.id]
+    tokens = _MESSAGE_TOKENS
     for c in msg.content:
         if isinstance(c, str):
             if c.strip():
                 parts.append({"type": "text", "text": c})
                 key.append(("text", c))
+                tokens += _text_tokens(c)
         elif isinstance(c, AudioContent) and c.frame:
+            tokens += round(c.frame.duration * _AUDIO_TOKENS_PER_SECOND) + 2
             frame = c.frame
             if frame.sample_rate != INPUT_SAMPLE_RATE:
                 frame = resample(frame, INPUT_SAMPLE_RATE)
@@ -411,7 +429,7 @@ def _user_turn(msg: ChatMessage) -> _Turn | None:
     if not parts:
         return None
     content: Any = parts[0]["text"] if len(parts) == 1 and parts[0]["type"] == "text" else parts
-    return _Turn("user", tuple(key), content)
+    return _Turn("user", tuple(key), content, tokens)
 
 
 def _turns(ctx: ChatContext) -> tuple[list[_Turn], list[str]]:
@@ -433,6 +451,17 @@ def _turns(ctx: ChatContext) -> tuple[list[_Turn], list[str]]:
             if turn is not None:
                 turns.append(turn)
     return turns, instructions
+
+
+@dataclass(frozen=True)
+class _Plan:
+    """One request: its messages, whether it resets the server's context, the keys of the
+    turns the server holds once it is sent, and their estimated context positions."""
+
+    messages: list[dict[str, Any]]
+    reset: bool
+    keys: list[tuple[Any, ...]]
+    tokens: int
 
 
 # ------------------------------------------------------------------------------- LLM
@@ -469,6 +498,11 @@ class LiquidAudioLLM(LLM):
             template (``{text}`` = the reply as heard). ``None`` drops them.
         max_replay_turns: most recent messages replayed after a reset (the server's
             context is limited; older turns are forgotten).
+        context_size: the server's context length in tokens (its ``-c``; default: the
+            managed server's ``ctx_size``, else the server's default of 4096). The server
+            *exits* when its context overflows, and every reply (its audio frames
+            included) stays in it, so the provider resets the context and replays the
+            recent turns before a request could overflow it.
         timeout: HTTP timeout (connect and between streamed chunks).
     """
 
@@ -488,6 +522,7 @@ class LiquidAudioLLM(LLM):
         temperature: float | None = None,
         assistant_note: str | None = "(Earlier you said: {text})",
         max_replay_turns: int | None = 8,
+        context_size: int | None = None,
         timeout: float = 60.0,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -504,7 +539,8 @@ class LiquidAudioLLM(LLM):
             max_tokens=max_tokens,
         )
         if serve and server is None:
-            server = LiquidAudioServer(quant=quant, **dict(server_options or {}))
+            options = {"ctx_size": MANAGED_CONTEXT_SIZE, **dict(server_options or {})}
+            server = LiquidAudioServer(quant=quant, **options)
         self.server = server
         self._owns_server = serve
         self._base_url = (base_url or first_env(self.BASE_URL_ENV) or "").rstrip("/") or None
@@ -512,6 +548,10 @@ class LiquidAudioLLM(LLM):
             self._base_url = DEFAULT_BASE_URL
         self.assistant_note = assistant_note
         self.max_replay_turns = max_replay_turns
+        if context_size is None:
+            server_ctx = server.ctx_size if server is not None else None
+            context_size = server_ctx or SERVER_CONTEXT_SIZE
+        self.context_size = context_size
         self.timeout = timeout
         self._client = http_client
         self._owns_client = http_client is None
@@ -520,6 +560,8 @@ class LiquidAudioLLM(LLM):
         are serialized."""
         self._held: list[tuple[Any, ...]] | None = None
         """Keys of the turns the server's context holds (``None``: unknown -> reset)."""
+        self._held_tokens = 0
+        """Estimated context positions in use on the server."""
         self._warned_instructions = False
         self.resets = 0
         """Context resets so far (the first request always resets)."""
@@ -538,8 +580,14 @@ class LiquidAudioLLM(LLM):
             )
         return self._client
 
+    @property
+    def managed(self) -> bool:
+        """The server runs as a subprocess of this provider (``serve`` / ``server``)."""
+        return self.server is not None and self._base_url is None
+
     async def _ensure_server(self) -> None:
-        if self.server is not None and self._base_url is None:
+        if self.managed and self.server is not None and not self.server.running:
+            self._held = None  # a (re)started server has an empty context
             await self.server.start()
 
     def _chat(
@@ -565,12 +613,12 @@ class LiquidAudioLLM(LLM):
         )
 
     # ------------------------------------------------------------ context tracking
-    def plan(self, ctx: ChatContext) -> tuple[list[dict[str, Any]], bool, list[tuple[Any, ...]]]:
-        """The request for ``ctx``: ``(messages, reset_context, keys)``, where ``keys``
-        describe the turns the server holds once the request is sent.
+    def plan(self, ctx: ChatContext) -> _Plan:
+        """The request for ``ctx``.
 
         Only the new user turns are sent while the server's context is a prefix of the
-        history; otherwise the context is reset and the conversation replayed.
+        history and has room for them and the reply; otherwise the context is reset and
+        the most recent turns are replayed (as many as fit).
         """
         turns, instructions = _turns(ctx)
         if instructions and not self._warned_instructions:
@@ -582,30 +630,46 @@ class LiquidAudioLLM(LLM):
             )
         keys = [t.key for t in turns]
         held = self._held
+        budget = self.context_size - (self.max_tokens or 1024) - 64
         if (
             held is not None
             and len(keys) > len(held)
             and keys[: len(held)] == held
             and all(t.role == "user" for t in turns[len(held) :])
         ):
-            messages = [{"role": "user", "content": t.content} for t in turns[len(held) :]]
-            return messages, False, keys
-        replay = turns
-        if self.max_replay_turns is not None:
-            replay = turns[-self.max_replay_turns :] if self.max_replay_turns > 0 else []
-            while replay and replay[0].role != "user" and len(replay) > 1:
-                replay = replay[1:]
+            new = turns[len(held) :]
+            tokens = self._held_tokens + sum(t.tokens for t in new)
+            if tokens <= budget:
+                messages = [{"role": "user", "content": t.content} for t in new]
+                return _Plan(messages, False, keys, tokens)
+            logger.debug("%s: the context is nearly full: resetting it", PROVIDER)
         messages = [{"role": "system", "content": INTERLEAVED_PROMPT}]
-        for turn in replay:
+        tokens = _MESSAGE_TOKENS + _text_tokens(INTERLEAVED_PROMPT)
+        replay: list[tuple[str, dict[str, Any], int]] = []  # (role, message, tokens)
+        limit = len(turns) if self.max_replay_turns is None else max(1, self.max_replay_turns)
+        for i, turn in enumerate(reversed(turns)):  # the most recent turns that fit
             if turn.role == "user":
-                messages.append({"role": "user", "content": turn.content})
+                message = {"role": "user", "content": turn.content}
+                cost = turn.tokens
             elif self.assistant_note:
                 note = self.assistant_note.format(text=turn.content)
-                messages.append({"role": "user", "content": note})
-        return messages, True, keys
+                message = {"role": "user", "content": note}
+                cost = _MESSAGE_TOKENS + _text_tokens(note)
+            else:
+                continue
+            if i >= limit or (replay and tokens + cost > budget):
+                break
+            replay.append((turn.role, message, cost))
+            tokens += cost
+        replay.reverse()
+        while len(replay) > 1 and replay[0][0] != "user":  # not a reply to a forgotten turn
+            tokens -= replay.pop(0)[2]
+        messages += [message for _, message, _ in replay]
+        return _Plan(messages, True, keys, tokens)
 
-    def _sent(self, keys: list[tuple[Any, ...]] | None) -> None:
+    def _sent(self, keys: list[tuple[Any, ...]] | None, tokens: int = 0) -> None:
         self._held = keys
+        self._held_tokens = tokens
 
     # -------------------------------------------------------------------- lifecycle
     async def warmup(self) -> None:
@@ -647,27 +711,30 @@ class _LiquidAudioStream(LLMStream):
         llm: LiquidAudioLLM = self._llm  # type: ignore[assignment]
         await llm._ensure_server()
         async with llm._lock:
-            messages, reset, keys = llm.plan(self.ctx)
-            text = await self._request(llm, messages, reset, keys)
-            if text is None and not reset:  # an error before any output: retry from scratch
-                llm._held = None
-                messages, reset, keys = llm.plan(self.ctx)
-                text = await self._request(llm, messages, reset, keys, retry=False)
+            try:
+                plan = llm.plan(self.ctx)
+                text = await self._request(llm, plan)
+                if text is None and not plan.reset:  # failed before any output: start over
+                    llm._held = None
+                    await self._request(llm, llm.plan(self.ctx), retry=False)
+            except ProviderConnectionError:
+                server = llm.server
+                if not llm.managed or server is None or server.running or self._first_token:
+                    raise
+                # the managed server died (e.g. out of memory): restart it and retry once
+                logger.warning(
+                    "%s: the server exited; restarting it:\n%s", PROVIDER, server.log_tail()
+                )
+                await llm._ensure_server()
+                await self._request(llm, llm.plan(self.ctx), retry=False)
 
-    async def _request(
-        self,
-        llm: LiquidAudioLLM,
-        messages: list[dict[str, Any]],
-        reset: bool,
-        keys: list[tuple[Any, ...]],
-        *,
-        retry: bool = True,
-    ) -> str | None:
+    async def _request(self, llm: LiquidAudioLLM, plan: _Plan, *, retry: bool = True) -> str | None:
         """Stream one request; returns the reply text, or ``None`` when the server failed
         before any output (and ``retry`` allows another attempt)."""
+        reset = plan.reset
         body: dict[str, Any] = {
             "model": llm.model,
-            "messages": messages,
+            "messages": plan.messages,
             "stream": True,
             "reset_context": reset,
         }
@@ -707,10 +774,10 @@ class _LiquidAudioStream(LLMStream):
             raise transport_error(PROVIDER, exc, url) from exc
         reply = "".join(text)
         if finished:  # the server holds the history + its complete reply
-            held = list(keys)
+            held = list(plan.keys)
             if reply.strip():
                 held.append(("assistant", _normalize(reply)))
-            llm._sent(held)
+            llm._sent(held, plan.tokens + steps + _MESSAGE_TOKENS)
         self._push(
             ChatChunk(
                 self.request_id,
