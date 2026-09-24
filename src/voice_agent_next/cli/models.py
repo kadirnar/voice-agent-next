@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from typing import Annotated, Any
 
 import typer
@@ -172,6 +173,9 @@ def download(
         TimeRemainingColumn(),
         console=console,
         transient=False,
+        # bars only on an interactive terminal: piped output (CI logs, FORCE_COLOR) keeps
+        # the plain per-model lines instead of a live display that overwrites them
+        disable=not sys.stdout.isatty(),
     ) as bar:
         for m, _ in pending:
             progress = _progress_reporter(bar, m.name)

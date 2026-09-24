@@ -430,7 +430,18 @@ def test_models_for_config_file(tmp_path: Path) -> None:
 
 # ------------------------------------------------------------------------ CLI
 def invoke(*args: str) -> Any:
-    return CliRunner().invoke(app, ["models", *args], env={"COLUMNS": "250"})
+    # CI sets FORCE_COLOR and the CLI's console is created at import: swap in a plain one
+    # so assertions see the same text on every runner
+    from rich.console import Console
+
+    import voice_agent_next.cli.models as cli_models
+
+    saved = cli_models.console
+    cli_models.console = Console(no_color=True, force_terminal=False, width=250)
+    try:
+        return CliRunner().invoke(app, ["models", *args], env={"COLUMNS": "250"})
+    finally:
+        cli_models.console = saved
 
 
 @pytest.fixture

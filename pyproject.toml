@@ -128,6 +128,12 @@ dev = [
   "opentelemetry-api>=1.27",  # tracing tests (in-memory span exporter)
   "opentelemetry-sdk>=1.27",
 ]
+# documentation site: `uv run --group docs mkdocs serve` (mkdocs.yml)
+docs = [
+  "mkdocs>=1.6,<2",
+  "mkdocs-material>=9.5",
+  "mkdocstrings[python]>=0.26",
+]
 
 [tool.uv.sources]
 # Linux/Windows: CPU wheels (~200 MB) instead of the multi-GB CUDA build; macOS wheels on PyPI

@@ -9,7 +9,7 @@ local or cloud — that measures what the user *hears*. Design rationale:
 | --- | --- | --- |
 | **T1 latency** | voice-to-voice latency on the call recording, cold start, dead air | `van bench latency` |
 | **T2 ASR** | WER/CER, RTFx, final latency (TTFS), first partial, interim stability | `van bench asr` |
-| T3 TTS | TTFA, RTF, round-trip WER, MOS predictors | planned (#42) |
+| **T3 TTS** | TTFA (leading silence counts), RTF, underruns, round-trip WER/CER, hard-text accuracy, DNSMOS | `van bench tts` |
 | **T4 VAD / turn-taking** | VAD frame metrics and onset/offset lag; end-of-turn on eot-bench; turn-taking battery (premature replies, barge-in, false barge-ins) | `van bench vad`, `van bench turns`, `van bench turn-taking` |
 | T5 S2S quality | Big Bench Audio, VoiceBench | planned (#44) |
 | T6 tool use | scripted tool scenarios, τ-Voice | planned (#45) |
@@ -36,6 +36,9 @@ van bench report bench-results/<run-id>   # re-render report.md from the result 
 # T2: any STT on pinned LibriSpeech / FLEURS smoke subsets (downloaded once, ~80 MB)
 van bench asr --stt faster-whisper/base
 van bench asr --stt sherpa-onnx/nemo-fastconformer-en-80ms --mode streaming
+
+# T3: any TTS on 20 pinned agent sentences, batch + LLM-paced streaming, round-trip WER
+van bench tts --tts kokoro --stt faster-whisper/small.en --mos dnsmos
 
 # T4: VADs on a labelled corpus (LibriSpeech smoke + noise), turn detectors on eot-bench,
 # and the turn-taking battery on any engine
@@ -272,6 +275,90 @@ rankings. Real-time streaming runs take as long as the audio (~7 min for LibriSp
 The Markdown table (`--markdown`, also in `report.md` under "Results by dataset") has one
 row per dataset; the report also lists the utterances with the most errors (normalized
 reference vs. hypothesis).
+
+## T3: TTS (`van bench tts`)
+
+Speed, smoothness and intelligibility of any registered TTS provider on a pinned text set:
+
+```bash
+van bench tts --tts mock                                             # offline plumbing check
+van bench tts --tts kokoro --stt faster-whisper/small.en             # + round-trip WER
+van bench tts --tts pocket-tts --stt faster-whisper/small.en --mos dnsmos
+van bench tts --tts sherpa-onnx/piper-en_US-libritts_r-medium --mode streaming \
+    --words-per-second 20 --repeats 3
+van bench tts --tts cartesia --texts my-prompts.yaml --no-audio
+```
+
+**Modes** (`--mode both` is the default):
+
+* `batch` — `tts.synthesize(text)`: the whole text is known up front.
+* `streaming` — the voice-agent case: `tts.stream()` receives the text **word by word at
+  an LLM-like pace** (`--words-per-second`, default 15 ≈ 20 tokens/s; 0 pushes it at
+  once). Sentence segmentation, one-sentence prefetch and per-sentence silence trimming
+  (`SentenceStreamAdapter`) or the provider's native input streaming run exactly as in a
+  live cascade, so TTFA includes waiting for the first sentence to be complete.
+
+Every request is timed on its own (no concurrency). `tts.warmup()` and `--warmup-requests`
+(default 1 per mode, reported as `extra.cold_start`) run first. Each audio chunk is
+time-stamped when the harness receives it, and playback is simulated by a real-time
+player that starts with the first chunk. Round-trip transcription and MOS prediction run
+after the timed phase, so they never compete with synthesis for the CPU.
+
+### T3 metrics
+
+Metric keys are prefixed with the mode (`batch.ttfa_ms`, `streaming.rt_wer`, ...).
+
+| Metric | Definition |
+| --- | --- |
+| `ttfa_ms` | **time to first audio**: request (batch) or first pushed word (streaming) → the first *audible* sample plays. The onset is found with the T1 reference VAD (10 ms frames ≥ −40 dBFS starting ≥ 100 ms of speech, refined to the sample) and placed on the simulated playout, so **leading silence counts** |
+| `ttfb_ms` | request → first audio chunk received (what providers usually report) |
+| `leading_silence_ms`, `trailing_silence_ms` | silence before the onset and after the last 10 ms frame at the threshold level |
+| `rtf` | synthesis wall time ÷ audio duration (< 1 = faster than real time). Streaming RTF includes waiting for the paced text. `extra.modes.<mode>.rtf_total` = Σ time ÷ Σ audio |
+| `underruns`, `stall_ms` | chunks that arrived more than 10 ms after the player ran dry, and the silence that inserted. `extra.modes.<mode>.underruns_per_min` is per minute of audio; `rates.<mode>.underrun_rate` = share of clips with ≥ 1 underrun |
+| `chunk_gap_max_ms`, `chunk_jitter_ms` | largest inter-arrival gap between chunks and the standard deviation of the gaps — a stall detector that does not depend on the playout model |
+| `rt_wer`, `rt_cer` | **round-trip** corpus error rates (Σ edits ÷ Σ reference length) of the `--stt` transcript against the input text, after the T2 normalizer (`--normalizer`, default Whisper English). CER is the headline for languages written without spaces |
+| `hardtext_acc` | share of *entities* (numbers, amounts, dates, times, phone numbers, e-mail addresses, URLs, abbreviations) found in the transcript in one of their accepted spoken forms. Digit groups are also compared without separators, so `4:30` matches "four thirty" |
+| `perfect_rate` | share of clips transcribed without a single word error |
+| `dnsmos_sig`, `dnsmos_bak`, `dnsmos_ovrl` | `--mos dnsmos`: DNSMOS P.835 predicted speech quality, background noise and overall quality (1–5) |
+
+**Round trip.** Pick a fixed, strong English ASR (e.g. `faster-whisper/small.en` or
+`large-v3-turbo`) and keep it for every comparison: the error rate depends on it as much
+as on the TTS. The normalizer and error counting are shared with T2 (`bench.text_norm`,
+`bench.wer`), so the Whisper normalizer unifies number formats ("42" vs "forty two",
+"$42.50" vs "forty two dollars and fifty cents"). Some differences survive it, e.g.
+`7 AM` vs `7 a.m.`, which is why hard text is scored separately with explicit
+alternatives. Without `--stt` the round trip is skipped (and noted).
+
+**MOS predictors** are optional. `--mos dnsmos` downloads Microsoft's DNSMOS P.835
+`sig_bak_ovr.onnx` (1.2 MB, CC BY 4.0, pinned commit + SHA-256) into the model cache and
+runs it with `onnxruntime` (`onnx` extra), scoring 16 kHz audio exactly like the reference
+`dnsmos_local.py` (clips tiled to ≥ 9.01 s, 1 s hop, published calibration polynomials).
+If the predictor cannot be loaded (no `onnxruntime`, `VAN_OFFLINE=1` without a cached
+model), the run continues without it and says so in the notes. MOS predictors are
+regression signals, not rankings (TTSDS2 found they track human ratings inconsistently
+across domains): compare a system with itself. UTMOSv2 needs PyTorch and a large
+checkpoint and is not built in; any object with `load()`, `score(audio)` and `describe()`
+(`bench.mos.MOSPredictor`) can be passed to `run_tts_benchmark(mos=...)`.
+
+### Text sets
+
+`smoke` (default) is `src/voice_agent_next/bench/data/tts_smoke.json`: 20 agent-style
+English sentences we wrote (CC0) — short replies, questions, two long sentences and hard
+text (order numbers, `$42.50`, `12%`, `2.5 miles`, `March 3rd at 4:30 PM`, a phone number,
+an e-mail address, a URL, `Dr.`/`Mrs.`, `NYC`, `B12`, `7 AM`) with 18 scored entities.
+The manifest records the whole set and its SHA-256 (the dataset id is
+`tts-smoke@sha256:<first 12>`); changing a text changes every result, so bump the set's
+`version` with it. `--limit N` keeps the first N texts.
+
+Your own texts: `--texts file.txt` (one text per line, `#` comments) or a JSON/YAML file
+with a list of texts or `{name, language, texts: [...]}`, where a text is a string or
+`{id, text, category, entities: [[accepted form, ...], ...]}`.
+
+**Reading the numbers.** 20 texts are a smoke test: enough to see a 2× TTFA difference
+or a broken number reading, not to rank two good voices. Use `--repeats 3` or more for
+latency comparisons, run one system at a time on an otherwise idle machine, and state the
+hardware. Every clip is saved as `artifacts/<mode>/<text id>.wav` (`--no-audio` to skip)
+so you can listen to what was scored.
 
 ## T4: VAD, end-of-turn and turn-taking
 
@@ -535,6 +622,23 @@ results = asyncio.run(
     )
 )
 print(results.summary.rates["wer"], results.summary.extra["rtfx"])
+```
+
+```python
+from voice_agent_next.bench.tracks.tts import TTSOptions, run_tts_benchmark
+
+results = asyncio.run(
+    run_tts_benchmark(
+        "kokoro",
+        "smoke",
+        TTSOptions(modes=("streaming",)),
+        stt="faster-whisper/small.en",
+        mos="dnsmos",
+        out_dir="bench-results",
+    )
+)
+summary = results.summary
+print(summary.metrics["streaming.ttfa_ms"].p50, summary.rates["streaming.rt_wer"])
 ```
 
 Building blocks for other tracks: `CallerEmulator` (caller), `DuplexRecording` (stereo

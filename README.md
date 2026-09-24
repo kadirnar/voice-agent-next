@@ -4,6 +4,8 @@
 
 > Status: **alpha** — 52 providers (local and cloud), native speech-to-speech engines and streaming cascades behind one runtime, a benchmark suite; APIs may still change. See the [roadmap](ROADMAP.md) and the [research report](docs/research/REPORT.md).
 
+**Documentation:** [kadirnar.github.io/voice-agent-next](https://kadirnar.github.io/voice-agent-next/) (build it locally: `uv sync --group docs && uv run mkdocs serve`).
+
 ## Why
 
 Voice agents are built in two ways:
