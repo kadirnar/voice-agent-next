@@ -628,9 +628,9 @@ class _Connection:
                 await self.send("response.output_audio_transcript.delta", **where, delta=delta)
                 spoken = upto
             piece = audio.slice(i * chunk, min(duration, (i + 1) * chunk))
-            await self.send("response.output_audio.delta", **where, delta=piece.to_base64())
-            item.audio_ms += piece.duration_ms
+            item.audio_ms += piece.duration_ms  # counted first: never less than the client got
             active.audio_ms += piece.duration_ms
+            await self.send("response.output_audio.delta", **where, delta=piece.to_base64())
             await asyncio.sleep(piece.duration * self.server.realtime_factor)
         await self.send("response.output_audio.done", **where)
         await self.send("response.output_audio_transcript.done", **where, transcript=text)
