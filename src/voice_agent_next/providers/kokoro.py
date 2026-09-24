@@ -28,6 +28,7 @@ import asyncio
 import logging
 import os
 import re
+import sys
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -410,6 +411,11 @@ class KokoroTTS(TTS):
         kokoro_onnx = require("kokoro_onnx", extra=_EXTRA, package="kokoro-onnx")
         ort = require("onnxruntime", extra=_EXTRA)
         _quiet_phonemizer()
+        if sys.version_info >= (3, 14) and self.g2p is None:
+            logger.warning(
+                "kokoro-onnx supports Python < 3.14; with phonemizer 3.4 on 3.14, espeak-ng "
+                "can fail to find its data and exit the process. Use Python 3.11-3.13 or g2p=."
+            )
         t0 = now()
         model_path = _local_file(self._model_path, self._variant.onnx)
         voices_path = _local_file(self._voices_path, self._variant.voices)

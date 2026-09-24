@@ -8,6 +8,7 @@ and only runs with ``-m model``.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import threading
 import time
@@ -441,14 +442,21 @@ async def test_list_voices_and_reuse_after_aclose(backend: FakeBackend) -> None:
 
 # ------------------------------------------------------------------- real model
 @pytest.mark.model
-@pytest.mark.timeout(900)  # first run downloads ~142 MB
+@pytest.mark.timeout(900)  # the first run downloads the model
 async def test_real_model_synthesizes_a_sentence() -> None:
+    """int8 by default (smallest download, but slow on x86 CPUs); pick another model with
+    ``VAN_KOKORO_TEST_MODEL=v1.0 uv run pytest -m model tests/providers/test_kokoro.py -s``.
+    """
     pytest.importorskip("kokoro_onnx")
-    tts = KokoroTTS(model="v1.0-int8")
+    model = os.environ.get("VAN_KOKORO_TEST_MODEL", "v1.0-int8")
+    tts = KokoroTTS(model=model)
     metrics: list[TTSMetrics] = []
     tts.on("metrics", metrics.append)
     await tts.warmup()
-    assert len(await tts.list_voices()) == 54
+    voices = await tts.list_voices()
+    assert tts.voice in voices
+    if tts.model.startswith("v1.0"):
+        assert len(voices) == 54
 
     text = "Hello! This is Kokoro, speaking from a local ONNX model."
     t0 = now()
@@ -470,6 +478,6 @@ async def test_real_model_synthesizes_a_sentence() -> None:
     assert metrics[-1].error is None and metrics[-1].ttfb is not None
     assert ttfb is not None
     print(
-        f"\nkokoro v1.0-int8: TTFB {ttfb * 1000:.0f} ms, RTF {elapsed / audio.duration:.3f} "
+        f"\nkokoro {tts.model}: TTFB {ttfb * 1000:.0f} ms, RTF {elapsed / audio.duration:.3f} "
         f"({audio.duration:.2f} s of audio in {elapsed:.2f} s)"
     )
