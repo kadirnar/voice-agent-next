@@ -79,7 +79,7 @@ def test_function_calls_and_responses_pair_up() -> None:
     ctx.add_function_output("c4", "no call", name="x")  # no call: dropped
     calls = {"c1": CallMeta(signature=SIG, api_id=True)}
     prompt = to_gemini_contents(ctx, calls=calls)
-    user, model, responses = prompt.contents
+    _user, model, responses = prompt.contents
     assert model == {
         "role": "model",
         "parts": [

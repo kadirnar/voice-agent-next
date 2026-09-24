@@ -330,16 +330,21 @@ class _AudioDecoder:
 
     def __init__(self) -> None:
         self._resampler = StreamResampler(SAMPLE_RATE, 1)
+        self._odd_byte = b""
         self.got_audio = False
 
     def decode(self, data: bytes, mime_type: str | None) -> list[AudioFrame]:
         mime = (mime_type or "").lower()
-        if mime.startswith(("audio/wav", "audio/x-wav", "audio/wave")) or data[:4] == b"RIFF":
+        wav = mime.startswith(("audio/wav", "audio/x-wav", "audio/wave"))
+        if wav or (not mime and data[:4] == b"RIFF"):
             frame = _wav_frame(data)
         elif not mime or mime.startswith(("audio/l16", "audio/pcm")):
             match = _RATE.search(mime)
             rate = int(match.group(1)) if match else SAMPLE_RATE
-            frame = AudioFrame(data[: len(data) - len(data) % 2], rate, 1)
+            data = self._odd_byte + data  # a sample may be split across chunks
+            cut = len(data) - len(data) % 2
+            data, self._odd_byte = data[:cut], data[cut:]
+            frame = AudioFrame(data, rate, 1)
         else:
             raise ProviderError(
                 f"Gemini TTS returned unsupported audio format {mime_type!r}", provider=PROVIDER
