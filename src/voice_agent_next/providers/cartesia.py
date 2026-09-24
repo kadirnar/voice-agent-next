@@ -167,7 +167,8 @@ async def _ws_connect(
 
 async def _close_ws(ws: ClientConnection) -> None:
     with contextlib.suppress(Exception):
-        await asyncio.wait_for(ws.close(), 2.0)
+        async with asyncio.timeout(2.0):
+            await ws.close()
 
 
 async def _raise_task_error(
@@ -690,6 +691,8 @@ class _CartesiaSynthesizeStream(SynthesizeStream):
 
     @staticmethod
     async def _next_message(ctx: _TTSContext, timeout: float) -> dict[str, Any] | ProviderError:
+        # asyncio.timeout rather than wait_for: on Python 3.11, wait_for can swallow the
+        # cancellation of an interrupted stream when a message arrives at the same time
         while True:
             wait = timeout
             if ctx.closed_at is not None:
@@ -701,7 +704,8 @@ class _CartesiaSynthesizeStream(SynthesizeStream):
                         provider=_PROVIDER,
                     )
             try:
-                return await asyncio.wait_for(ctx.messages.recv(), wait)
+                async with asyncio.timeout(wait):
+                    return await ctx.messages.recv()
             except TimeoutError:
                 continue  # re-check: the input may have ended in the meantime
 
@@ -716,7 +720,8 @@ class _CartesiaSynthesizeStream(SynthesizeStream):
             if ctx.ended or ctx.conn.closed:
                 continue
             try:
-                await asyncio.wait_for(ctx.conn.send({"context_id": ctx.id, "cancel": True}), 1.0)
+                async with asyncio.timeout(1.0):
+                    await ctx.conn.send({"context_id": ctx.id, "cancel": True})
             except Exception as exc:  # best effort: the socket may already be gone
                 logger.debug("Cartesia TTS: cancelling context %s failed: %r", ctx.id, exc)
 
@@ -898,7 +903,8 @@ class _CartesiaSTTStream(STTStream):
             if not sender.done():
                 raise _closed_error("STT")  # the server ended the stream while audio was flowing
             try:  # all audio sent and `close` requested: collect the last results
-                await asyncio.wait_for(receiver, stt.close_timeout)
+                async with asyncio.timeout(stt.close_timeout):
+                    await receiver
             except TimeoutError:
                 logger.warning(
                     "Cartesia STT: no end of stream %.1fs after close", stt.close_timeout

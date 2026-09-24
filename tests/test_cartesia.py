@@ -349,6 +349,23 @@ async def test_stream_options_are_sent_with_every_input(tts_server: FakeTTSServe
     assert audio.sample_rate == 16_000 and audio.duration == pytest.approx(4 * WORD)
 
 
+async def test_concurrent_streams_share_the_socket(tts_server: FakeTTSServer) -> None:
+    tts_server.delays = {0: 0.2}  # interleave the two contexts on the wire
+    tts = make_tts(tts_server)
+    streams = [tts.stream(), tts.stream()]
+    for stream, text in zip(streams, ("One two three. ", "Four five. "), strict=True):
+        stream.push_text(text)
+        stream.end_input()
+    results = await asyncio.gather(*(collect_tts(s) for s in streams))
+    await tts.aclose()
+
+    assert tts_server.handshakes == 1
+    durations = [audio_of(items).duration for items in results]
+    assert durations == pytest.approx([3 * WORD, 2 * WORD])
+    values = [set(audio_of(items).to_numpy().tolist()) for items in results]
+    assert len(values[0]) == len(values[1]) == 1 and values[0] != values[1]
+
+
 async def test_aclose_cancels_the_open_context(tts_server: FakeTTSServer) -> None:
     tts = make_tts(tts_server)
     metrics: list[TTSMetrics] = []
