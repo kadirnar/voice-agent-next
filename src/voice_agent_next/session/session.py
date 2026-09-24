@@ -78,6 +78,8 @@ __all__ = ["AgentSession", "SessionOptions"]
 
 _MAX_ONSET_LAG = 0.5
 """Upper bound (s) on how long after its onset an engine reports user speech."""
+_SAY_REQUEST_TTL = 10.0
+"""A ``say()`` whose response has not started within this many seconds is forgotten."""
 
 
 @dataclass(slots=True)
@@ -414,6 +416,7 @@ class AgentSession(EventEmitter):
         if self._barge is not None:
             self._end_barge_in(self._barge)  # the app decided: no verdict needed
         await self._interrupt()
+        await self._ensure_playback()
 
     async def update_instructions(self, instructions: str) -> None:
         self.agent.instructions = instructions
@@ -507,8 +510,7 @@ class AgentSession(EventEmitter):
             await self._on_barge_in_superseded()
             turn = self._turn if self._turn is not None and not self._turn.closed else None
             started = _Response(ev.response_id, ev.timestamp, turn)
-            if self._say_requests and ev.timestamp >= self._say_requests[0].created:
-                started.allow_interruptions = self._say_requests.popleft().allow_interruptions
+            started.allow_interruptions = self._say_request_for(ev.timestamp)
             self._responses[ev.response_id] = started
             self._current = started
             if self.agent_state != AgentState.SPEAKING:
@@ -535,6 +537,15 @@ class AgentSession(EventEmitter):
             self.emit("error", SessionError(ev.error, ev.recoverable))
             if not ev.recoverable:
                 self._schedule_close("engine_error")
+
+    def _say_request_for(self, started_at: float) -> bool | None:
+        """``allow_interruptions`` of the ``say()`` that started a response at ``started_at``."""
+        requests = self._say_requests
+        while requests and started_at - requests[0].created > _SAY_REQUEST_TTL:
+            requests.popleft()  # the engine never started a response for it
+        if requests and started_at >= requests[0].created:
+            return requests.popleft().allow_interruptions
+        return None
 
     def _on_input_transcript(self, ev: InputTranscript) -> None:
         self.emit("user_transcript", UserTranscript(ev.text, ev.is_final, ev.item_id, ev.language))
@@ -799,6 +810,13 @@ class AgentSession(EventEmitter):
             self._end_barge_in(barge)
             if verdict == Verdict.FALSE_INTERRUPTION:
                 self._emit_false_interruption(barge, resumed=False, paused=0.0)
+        await self._ensure_playback()
+
+    async def _ensure_playback(self) -> None:
+        """Invariant: audio is only held back while an overlap has playback paused."""
+        barge = self._barge
+        if not self._send_gate.is_set() and (barge is None or barge.paused_at is None):
+            await self._resume_playback()
 
     def _watch_aftermath(self, barge: _BargeIn) -> None:
         """After a confirmed interruption, watch whether the user really takes the turn."""

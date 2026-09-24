@@ -509,23 +509,24 @@ async def test_without_resume_the_agent_keeps_talking_until_confirmed() -> None:
 
 
 async def test_uninterruptible_say_discards_user_audio() -> None:
-    engine = MockEngine(responses=["Got it."], realtime_factor=1.0)
+    notice = "This call may be recorded for quality purposes."  # ~1.6 s
+    engine = MockEngine(responses=["Got it."], realtime_factor=1.0, chars_per_second=30.0)
     session = AgentSession(engine)
     rec = Recorder(session)
     transport = LoopbackTransport(realtime_playout=True)
     await session.start(Agent("x"), transport)
-    await session.say(ANSWER, allow_interruptions=False)
+    await session.say(notice, allow_interruptions=False)
     await wait_for(lambda: session.agent_state == AgentState.SPEAKING)
     await asyncio.sleep(0.2)
-    await burst(transport, 0.8, silence=0.6)  # the user talks over it
-    await asyncio.sleep(0.3)
+    await burst(transport, 0.8, silence=0.4)  # the user talks over it
+    await asyncio.sleep(0.2)
     assert not transport.pause_times and not rec.interrupted()
     assert not [e for e in rec.of("user_state_changed") if e.new_state == UserState.SPEAKING]
     conn: Any = session.connection
-    assert conn.received_audio >= 1.3  # the engine got (silent) audio, not the speech
-    await wait_for(lambda: session.agent_state == AgentState.LISTENING, 6)
+    assert conn.received_audio >= 1.1  # the engine got (silent) audio, not the speech
+    await wait_for(lambda: session.agent_state == AgentState.LISTENING, 4)
     [said] = assistant_messages(session)
-    assert said.text == ANSWER and not said.interrupted
+    assert said.text == notice and not said.interrupted
     await burst(transport, 0.6, silence=0.6)  # once it is done, the user is heard again
     await wait_for(lambda: len(assistant_messages(session)) == 2, 4)
     await session.aclose()
