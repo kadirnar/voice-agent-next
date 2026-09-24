@@ -181,7 +181,8 @@ class RealtimeServer:
         model: served name of ``engine`` (default: the spec string or the engine's model).
         default_model: model used when the client sends no ``?model=`` (default: the first).
         accept_any_model: serve the default model for unknown ``?model=`` names instead of
-            rejecting the connection (HTTP 404) — for clients with a hard-coded model name.
+            rejecting the connection (HTTP 404), for clients with a hard-coded model name
+            (``gpt-realtime``...). ``None`` (default): only when a single model is served.
         host / port: listening address (``port=0`` picks a free port; see :attr:`port`).
         api_keys: accepted bearer tokens (``None``: no authentication). Compared in
             constant time; never logged.
@@ -204,7 +205,7 @@ class RealtimeServer:
         models: Mapping[str, EngineSource] | None = None,
         model: str | None = None,
         default_model: str | None = None,
-        accept_any_model: bool = False,
+        accept_any_model: bool | None = None,
         host: str = "127.0.0.1",
         port: int = 8000,
         api_keys: str | Sequence[str] | None = None,
@@ -234,7 +235,9 @@ class RealtimeServer:
         if any(not isinstance(k, str) or not k for k in keys):
             raise ConfigurationError("api_keys must be non-empty strings")
         self._keys = [k.encode() for k in keys]
-        self.accept_any_model = accept_any_model
+        self.accept_any_model = (
+            len(self.models) == 1 if accept_any_model is None else accept_any_model
+        )
         self.host = host
         self.port = port
         self.max_sessions = max_sessions
