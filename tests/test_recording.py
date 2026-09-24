@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from voice_agent_next.providers.mock import MockEngine, MockToolCall, synth_spee
 from voice_agent_next.session import SessionRecorder
 from voice_agent_next.tools import function_tool
 from voice_agent_next.transports import LoopbackTransport
+from voice_agent_next.transports.loopback import PlayedAudio
 from voice_agent_next.utils import now
 
 from .test_session import Recorder, make_session, speak, wait_for
@@ -38,6 +40,16 @@ def active(x: np.ndarray, rate: int, threshold: int = 500) -> tuple[float, float
     idx = np.flatnonzero(np.abs(x.astype(np.int32)) > threshold)
     assert len(idx), "channel is silent"
     return idx[0] / rate, (idx[-1] + 1) / rate
+
+
+def underruns(played: list[PlayedAudio], until: float = float("inf")) -> float:
+    """Seconds the simulated speaker ran dry between agent frames (before ``until``): a
+    stalled runner delivers a real-time reply late, and the recording keeps those gaps."""
+    starts = [p for p in played if p.start_time < until]
+    return sum(
+        max(0.0, cur.start_time - (prev.start_time + prev.frame.duration))
+        for prev, cur in itertools.pairwise(starts)
+    )
 
 
 def timeline(path: Path) -> list[dict[str, Any]]:
@@ -178,7 +190,7 @@ async def test_session_recording_aligns_user_and_agent_audio(tmp_path: Path) -> 
     played = transport.played_log
     assert a0 == pytest.approx(played[0].start_time - origin, abs=TOL)
     heard = sum(p.frame.duration for p in played)
-    assert a1 - a0 == pytest.approx(heard, abs=TOL)
+    assert a1 - a0 == pytest.approx(heard + underruns(played), abs=TOL)
     assert a0 > u1  # the reply follows the question on the same clock
     # the whole call is there, and no more
     # ends with the call; loaded runners (macOS CI) deliver the last frames ~0.25 s late
@@ -217,7 +229,8 @@ async def test_barge_in_truncates_the_recorded_agent_audio(tmp_path: Path) -> No
     b0, b1 = active(agent_until_barge, rate)
     assert b0 == pytest.approx(a0, abs=TOL)
     assert b1 == pytest.approx(stopped - recorder.origin, abs=TOL)
-    assert b1 - b0 == pytest.approx(interrupted.played, abs=TOL)
+    gaps = underruns(transport.played_log, until=stopped)
+    assert b1 - b0 == pytest.approx(interrupted.played + gaps, abs=TOL)
     # nothing of the long answer after the cut (only possibly the short "Okay." reply)
     after = agent[round((stopped - recorder.origin + TOL) * rate) :]
     okay = [p for p in transport.played_log if p.start_time > stopped + TOL]
