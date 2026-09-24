@@ -21,42 +21,24 @@ import numpy.typing as npt
 
 from ..audio.frame import AudioFrame
 from ..audio.resample import resample
+from ..audio.timeline import TimelineTrack
 from ..audio.wav import write_wav
 
 __all__ = ["DuplexRecording", "Label", "read_labels", "write_labels"]
 
 
-class _Track:
-    """Mono int16 audio assembled from time-stamped segments (later segments overwrite)."""
-
-    def __init__(self, sample_rate: int) -> None:
-        self.sample_rate = sample_rate
-        self._segments: list[tuple[int, npt.NDArray[np.int16]]] = []
-        self._end = 0
+class _Track(TimelineTrack):
+    """One channel of a :class:`DuplexRecording` (later segments overwrite)."""
 
     def add(self, samples: npt.NDArray[np.int16], offset: float) -> None:
-        start = round(offset * self.sample_rate)
-        if start < 0:  # drop audio from before the origin
-            samples = samples[-start:]
-            start = 0
-        if len(samples) == 0:
-            return
-        self._segments.append((start, samples))
-        self._end = max(self._end, start + len(samples))
+        self.write(self.position(offset), samples)
 
     @property
     def num_samples(self) -> int:
-        return self._end
+        return self.end
 
     def render(self, num_samples: int | None = None) -> npt.NDArray[np.int16]:
-        n = self._end if num_samples is None else num_samples
-        out = np.zeros(n, dtype=np.int16)
-        for start, samples in self._segments:
-            if start >= n:
-                continue
-            chunk = samples[: n - start]
-            out[start : start + len(chunk)] = chunk
-        return out
+        return self.read(num_samples)
 
 
 class DuplexRecording:

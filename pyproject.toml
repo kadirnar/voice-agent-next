@@ -58,6 +58,13 @@ resample = ["soxr>=0.5"]
 audio = ["sounddevice>=0.5", "soxr>=0.5"]
 aec = ["livekit>=1.0"]
 onnx = ["onnxruntime>=1.19"]
+# --- GPU runtime libraries (see docs/hardware.md) ---------------------------------
+# cuBLAS 12 for CTranslate2 4.x (faster-whisper on NVIDIA GPUs; 12.8+ has Blackwell
+# kernels). voice_agent_next.hardware loads it from site-packages: no LD_LIBRARY_PATH.
+# ONNX Runtime models need `onnxruntime-gpu` in place of `onnxruntime` instead.
+cuda = [
+  "nvidia-cublas-cu12>=12.8; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')",
+]
 # --- VAD / turn detection (local) ----------------------------------------------
 silero = ["onnxruntime>=1.19"]
 smart-turn = ["onnxruntime>=1.19"]
@@ -77,6 +84,8 @@ google = ["google-genai>=2.25"]
 openai = ["openai>=2.0"]
 # --- transports -------------------------------------------------------------------
 webrtc = ["aiortc>=1.9"]
+# --- observability -----------------------------------------------------------------
+otel = ["opentelemetry-api>=1.27"]  # tracing API only: pick your own SDK and exporter
 # --- benchmark ----------------------------------------------------------------------
 bench = ["jiwer>=3.0"]
 # --- bundles ------------------------------------------------------------------------
@@ -102,6 +111,8 @@ dev = [
   "mypy>=1.11",
   "types-PyYAML>=6.0",
   "soxr>=0.5",
+  "opentelemetry-api>=1.27",  # tracing tests (in-memory span exporter)
+  "opentelemetry-sdk>=1.27",
 ]
 
 [tool.hatch.build.targets.wheel]
