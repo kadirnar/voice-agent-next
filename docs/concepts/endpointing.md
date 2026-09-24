@@ -198,13 +198,24 @@ and 12 fragments; Silero VAD · Smart Turn v3.2 · sherpa-onnx `zipformer-en-kro
 streaming STT · Ollama `lfm2.5-1.2b-instruct` · sherpa-onnx Kokoro int8; Ryzen 5 5600,
 back to back, other jobs running on the machine):
 
-LOCAL_TABLE
+| run | policy | chosen delay p50 | end-of-turn p50 | v2v p50 / p90 | cut-offs (fragments answered) | false commits |
+|---|---|---:|---:|---:|---:|---:|
+| 1 | fixed | 400 ms | 401 ms | 2,564 / 3,796 ms | 6 / 12 | 0 |
+| 1 | dynamic | **323 ms** | **361 ms** | 1,951 / 2,922 ms | 5 / 12 | 0 |
+| 2* | fixed | 400 ms | 424 ms | 3,251 / 4,956 ms | 5 / 12 | 0 |
+| 2* | dynamic | **324 ms** | 432 ms | 4,251 / 6,348 ms | **3 / 12** | 2 |
+
+\* Run 2 overlapped the full unit-test suite on the same CPU, so its timings (STT,
+Smart Turn, TTS) are inflated. Only the chosen delays and the cut-offs are comparable.
 
 Smart Turn judges "I would like to book a table for" complete on this synthetic voice, so
 both policies answer that fragment every time. Neither policy can fix a confident wrong
-verdict; only dictation mode or a better detector can. The end-of-turn delay is where
-the policies differ. The v2v numbers are dominated by Kokoro int8's first audio
-(1.2–1.7 s on the shared CPU) and vary a lot between runs.
+verdict; only dictation mode or a better detector can. On the other fragments, dynamic
+endpointing answered 2 of 18 fragments over both runs, against 5 of 18 with the fixed
+policy. Its chosen delay is ~75 ms shorter at the
+median. In run 1 that shortened the end of turn by 40 ms. The v2v numbers are dominated
+by Kokoro int8's first audio (1.2–1.7 s, and more on the shared CPU) and vary too much
+between runs to show a 40–80 ms change. Use the end-of-turn delay to compare policies.
 
 ## Limitations
 
