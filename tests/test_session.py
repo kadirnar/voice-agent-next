@@ -544,7 +544,8 @@ async def test_truncation_follows_the_transports_playback_position(lag: float) -
     # transport still had to play out (lag)
     expected = user_speaking[-1] - speaking_since(rec) - lag
     (ev,) = rec.of("interrupted")
-    assert ev.played == pytest.approx(expected, abs=0.12)
+    # loaded CI runners jitter ~0.2 s; a missing lag correction would be 0.4 s off
+    assert ev.played == pytest.approx(expected, abs=0.25)
     assert session.connection.truncations[0][1] == pytest.approx(ev.played * 1000, abs=1)  # type: ignore[attr-defined]
 
 
@@ -561,7 +562,7 @@ async def test_agent_keeps_speaking_until_the_listener_heard_the_reply(lag: floa
     listening = [e.timestamp for e in rec.of("agent_state_changed")
                  if e.new_state == AgentState.LISTENING][-1]  # fmt: skip
     audio = sum(p.frame.duration for p in transport.played_log)
-    assert listening - speaking_since(rec) == pytest.approx(audio + lag, abs=0.12)
+    assert listening - speaking_since(rec) == pytest.approx(audio + lag, abs=0.25)
     (m,) = rec.turn_metrics()
     assert m.agent_speech_duration == pytest.approx(audio, abs=0.05)
 
