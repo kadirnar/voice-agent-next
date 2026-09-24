@@ -85,6 +85,8 @@ def _spec_name(spec: ComponentSpec | None) -> str:
         return "none"
     if isinstance(spec, str):
         return spec
+    if isinstance(spec, list):
+        return "|".join(_spec_name(s) for s in spec)
     target = str(spec.get("provider") or spec.get("use") or "?")
     model = spec.get("model")
     return f"{target}/{model}" if model and "/" not in target else target
