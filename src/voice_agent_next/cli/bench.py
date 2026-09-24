@@ -52,7 +52,7 @@ _TABLE_METRICS = (
 
 @app.callback()
 def _bench() -> None:
-    """Benchmark suite: T1 latency, T2 ASR, T7 framework overhead (more: see ROADMAP M6)."""
+    """Benchmark suite: T1 latency, T2 ASR, T3 TTS, T7 framework overhead (see ROADMAP M6)."""
 
 
 def _num(value: float | None) -> str:
@@ -226,11 +226,13 @@ def report(
     """Re-render report.md from a run directory and print it."""
     from ..bench.results import REPORT_FILE, load_run
     from ..bench.tracks import asr, latency, overhead
+    from ..bench.tracks import tts as tts_track
 
     renderers = {
         latency.TRACK: latency.render_latency_report,
         overhead.TRACK: overhead.render_overhead_report,
         asr.TRACK: asr.render_asr_report,
+        tts_track.TRACK: tts_track.render_tts_report,
     }
     try:
         results = load_run(run_dir)
@@ -739,3 +741,167 @@ def overhead(
     _append(summary, gate.to_markdown() + "\n" + run_md)
     if not gate.passed:
         raise typer.Exit(1)
+
+
+# -------------------------------------------------------------------------- T3 TTS
+
+
+def _print_tts(results: object) -> None:
+    from rich.markup import escape
+
+    from ..bench.report import fmt
+    from ..bench.results import RunResults
+    from ..bench.tracks.tts import MODES
+
+    assert isinstance(results, RunResults)
+    s = results.summary
+    table = Table(title=f"{s.track} · {escape(s.system)} · {s.dataset}", title_justify="left")
+    for col in ("mode", "n", "TTFA p50", "TTFA p95", "TTFB p50", "lead sil. p50", "RTF p50",
+                "underruns/min", "rt WER", "rt CER", "hard text", "DNSMOS ovrl"):  # fmt: skip
+        table.add_column(col, justify="left" if col == "mode" else "right")
+
+    def pct(x: float | None) -> str:
+        return "-" if x is None else f"{100 * x:.1f}%"
+
+    for mode in MODES:
+        ttfa = s.metrics.get(f"{mode}.ttfa_ms")
+        if ttfa is None:
+            continue
+        ttfb = s.metrics[f"{mode}.ttfb_ms"]
+        lead = s.metrics[f"{mode}.leading_silence_ms"]
+        rtf = s.metrics[f"{mode}.rtf"]
+        ovrl = s.metrics.get(f"{mode}.dnsmos_ovrl")
+        info = s.extra.get("modes", {}).get(mode, {})
+        table.add_row(
+            mode, str(ttfa.n), fmt(ttfa.p50, 0, unit=" ms"), fmt(ttfa.p95, 0, unit=" ms"),
+            fmt(ttfb.p50, 0, unit=" ms"), fmt(lead.p50, 0, unit=" ms"), fmt(rtf.p50, 3),
+            fmt(info.get("underruns_per_min"), 2), pct(s.rates.get(f"{mode}.rt_wer")),
+            pct(s.rates.get(f"{mode}.rt_cer")), pct(s.rates.get(f"{mode}.hardtext_acc")),
+            fmt(ovrl.mean if ovrl else None, 2),
+        )  # fmt: skip
+    console.print(table)
+    if results.directory is not None:
+        console.print(f"results: [bold]{results.directory}[/bold] (report.md, summary.json)")
+    for note in results.manifest.notes:
+        console.print(f"[yellow]note:[/yellow] {escape(note)}")
+
+
+@app.command("tts")
+def tts_command(
+    tts: Annotated[
+        str,
+        typer.Option(
+            "--tts",
+            help="TTS spec: kokoro, pocket-tts, sherpa-onnx/piper-en_US-libritts_r-medium, "
+            "or an inline mapping like '{provider: mock, ttfb: 0.1}'",
+        ),
+    ],
+    stt: Annotated[
+        str | None,
+        typer.Option(help="STT for round-trip WER, e.g. faster-whisper/small.en (default: skip)"),
+    ] = None,
+    texts: Annotated[
+        str, typer.Option("--texts", "-t", help="Text set: smoke or a .txt/.json/.yaml file")
+    ] = "smoke",
+    mode: Annotated[
+        str, typer.Option(help="batch, streaming (LLM-paced text input) or both")
+    ] = "both",
+    repeats: Annotated[int, typer.Option(min=1, help="Requests per text and mode")] = 1,
+    limit: Annotated[int | None, typer.Option(min=1, help="Use only the first N texts")] = None,
+    words_per_second: Annotated[
+        float, typer.Option(min=0.0, help="Streaming text pace (0: push the text at once)")
+    ] = 15.0,
+    warmup_requests: Annotated[
+        int, typer.Option(min=0, help="Untimed warm-up requests per mode")
+    ] = 1,
+    mos: Annotated[
+        str, typer.Option(help="MOS predictor: none or dnsmos (1.2 MB ONNX, onnx extra)")
+    ] = "none",
+    normalizer: Annotated[
+        str, typer.Option(help="Round-trip normalizer: auto, whisper-english, basic-english, none")
+    ] = "auto",
+    language: Annotated[
+        str | None, typer.Option(help="STT language (default: the text set's)")
+    ] = None,
+    timeout: Annotated[float, typer.Option(min=0.1, help="Seconds per request")] = 120.0,
+    out: Annotated[Path, typer.Option("--out", "-o", help="Results directory")] = Path(
+        "bench-results"
+    ),
+    run_id: Annotated[str | None, typer.Option(help="Run directory name")] = None,
+    label: Annotated[str | None, typer.Option(help="System label used in reports")] = None,
+    audio: Annotated[
+        bool, typer.Option("--audio/--no-audio", help="Save every clip as WAV")
+    ] = True,
+    seed: Annotated[int, typer.Option(help="Bootstrap seed")] = 0,
+    as_json: Annotated[bool, typer.Option("--json", help="Print summary.json to stdout")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """T3: TTS time to first audio, RTF, stalls, round-trip WER and MOS predictors.
+
+    Examples:
+
+        van bench tts --tts mock
+
+        van bench tts --tts kokoro --stt faster-whisper/small.en
+
+        van bench tts --tts pocket-tts --mode streaming --words-per-second 20 --mos dnsmos
+    """
+    from ..bench.system import parse_component_spec
+    from ..bench.tracks.tts import MODES, TTSItem, TTSOptions, load_texts, run_tts_benchmark
+    from ..errors import VoiceAgentError
+
+    _tolerate_narrow_console()
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    modes = MODES if mode == "both" else (mode,)
+    try:
+        text_set = load_texts(texts).limited(limit)
+        options = TTSOptions(
+            modes=modes,
+            repeats=repeats,
+            warmup_requests=warmup_requests,
+            words_per_second=words_per_second,
+            timeout=timeout,
+            normalizer=normalizer,
+            language=language,
+            save_audio=audio,
+            seed=seed,
+        )
+        options.validate()
+        tts_spec = parse_component_spec(tts)
+        stt_spec = parse_component_spec(stt)
+    except (VoiceAgentError, ValueError, OSError) as exc:
+        err.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(2) from exc
+    assert tts_spec is not None
+    err.print(
+        f"[bold]van bench tts[/bold] · {tts} · {text_set.dataset_id()} "
+        f"({len(text_set.texts)} texts) · {', '.join(modes)} x {repeats}",
+        highlight=False,
+    )
+
+    def on_item(item: TTSItem) -> None:
+        if item.error:
+            status = f"error: {item.error}"
+        else:
+            ttfa = "-" if item.ttfa_ms is None else f"{item.ttfa_ms:,.0f} ms"
+            rtf = "-" if item.rtf is None else f"{item.rtf:.3f}"
+            status = f"TTFA {ttfa}  RTF {rtf}"
+        err.print(f"  {item.mode:<9} {item.text_id:<18} {status}", highlight=False, markup=False)
+
+    try:
+        results = asyncio.run(
+            run_tts_benchmark(
+                tts_spec, text_set, options, stt=stt_spec, mos=mos, out_dir=out,
+                run_id=run_id, label=label, on_item=on_item,
+            )
+        )  # fmt: skip
+    except (VoiceAgentError, ValueError) as exc:
+        err.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    if as_json:
+        typer.echo(json.dumps(results.summary.model_dump(mode="json"), indent=2))
+    else:
+        _print_tts(results)
