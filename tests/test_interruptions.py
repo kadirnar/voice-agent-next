@@ -312,9 +312,10 @@ async def test_cough_pauses_then_resumes() -> None:
     assert after  # playback continued after the resume
     [answer] = assistant_messages(session)
     assert answer.text == ANSWER and not answer.interrupted
+    # a false interruption does not end the agent's turn: no LISTENING flicker
     states = [e.new_state for e in rec.of("agent_state_changed")]
-    i = states.index(AgentState.SPEAKING)
-    assert states[i : i + 3] == [AgentState.SPEAKING, AgentState.LISTENING, AgentState.SPEAKING]
+    assert states == [AgentState.LISTENING, AgentState.THINKING, AgentState.SPEAKING,
+                      AgentState.CLOSED]  # fmt: skip
 
 
 async def test_backchannel_resumes_without_a_new_turn() -> None:

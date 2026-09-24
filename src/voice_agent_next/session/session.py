@@ -916,9 +916,9 @@ class AgentSession(EventEmitter):
                 if self._clock_paused_at == t:
                     self._transport_paused = False
                     self._unfreeze_clock()
-        # else: the short look-ahead already handed to the transport plays out
-        if self.agent_state in (AgentState.SPEAKING, AgentState.THINKING):
-            self._set_agent_state(AgentState.LISTENING)
+        # else: the short look-ahead already handed to the transport plays out.
+        # The agent state is left as is: LISTENING means the agent's turn is over (clients
+        # finalize its transcript), which is only true once the interruption is confirmed.
 
     async def _resume_playback(self) -> None:
         paused_at = self._clock_paused_at
