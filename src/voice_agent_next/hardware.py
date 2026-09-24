@@ -42,10 +42,10 @@ __all__ = [
     "CTRANSLATE2_CUDA_LIBRARIES",
     "CUDA_EXTRA_HINT",
     "EXECUTION_PROVIDERS",
+    "GPU",
     "ONNXRUNTIME_CUDA_LIBRARIES",
     "ONNXRUNTIME_GPU_HINT",
     "ONNX_DEVICES",
-    "GPU",
     "AppleSilicon",
     "Backend",
     "CTranslate2Info",
@@ -154,8 +154,8 @@ class _NvmlMemory(ctypes.Structure):
 
 def _nvml_candidates() -> list[str]:
     if sys.platform == "win32":
-        system32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
-        nvsmi = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "NVIDIA Corporation"
+        system32 = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32"
+        nvsmi = Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "NVIDIA Corporation"
         return [str(system32 / "nvml.dll"), str(nvsmi / "NVSMI" / "nvml.dll")]
     if sys.platform == "darwin":
         return []
@@ -483,7 +483,12 @@ _LIBRARY_SPECS: dict[str, tuple[str, tuple[str, ...], tuple[str, ...], str]] = {
         ("cublasLt64_{v}.dll", "cublas64_{v}.dll"),
         "nvidia-cublas{cu}",
     ),
-    "cudart": ("CUDA runtime {v}", ("libcudart.so.{v}",), ("cudart64_{v}.dll",), "nvidia-cuda-runtime{cu}"),  # fmt: skip
+    "cudart": (
+        "CUDA runtime {v}",
+        ("libcudart.so.{v}",),
+        ("cudart64_{v}.dll",),
+        "nvidia-cuda-runtime{cu}",
+    ),
     "cufft": ("cuFFT {fft}", ("libcufft.so.{fft}",), ("cufft64_{fft}.dll",), "nvidia-cufft{cu}"),
     "curand": ("cuRAND 10", ("libcurand.so.10",), ("curand64_10.dll",), "nvidia-curand{cu}"),
     "cudnn": ("cuDNN 9", ("libcudnn.so.9",), ("cudnn64_9.dll",), "nvidia-cudnn-cu{v}"),
@@ -513,7 +518,8 @@ def _wheel_dirs(search_path: Sequence[str], windows: bool) -> list[Path]:
     wheels share one (``nvidia/cu13/lib``); on Windows the DLLs are in ``bin`` (CUDA 13:
     ``bin/x86_64`` or ``bin/arm64``, the wheel's architecture).
     """
-    subdirs = ("bin", os.path.join("bin", "x86_64"), os.path.join("bin", "arm64")) if windows else ("lib",)  # fmt: skip
+    bins = ("bin", os.path.join("bin", "x86_64"), os.path.join("bin", "arm64"))
+    subdirs = bins if windows else ("lib",)
     dirs: list[Path] = []
     seen: set[str] = set()
     for entry in search_path:
@@ -593,7 +599,11 @@ def _companions(library: CudaLibrary) -> list[str]:
 
     The cuDNN 9 shim opens them by name; on Linux it finds them next to itself.
     """
-    if library.component != "cudnn" or library.path is None or not library.files[0].endswith(".dll"):
+    if (
+        library.component != "cudnn"
+        or library.path is None
+        or not library.files[0].endswith(".dll")
+    ):
         return []
     return sorted(p.name for p in library.path.glob("cudnn_*64_9.dll"))
 
@@ -696,12 +706,16 @@ def select_ctranslate2_backend(
     info = ctranslate2_info(ct2)
     assert info is not None
     if device == "cpu":
-        return Backend("cpu", ctranslate2_compute_type(ct2, "cpu", compute_type), reason="requested")
+        return Backend(
+            "cpu", ctranslate2_compute_type(ct2, "cpu", compute_type), reason="requested"
+        )
     libraries: tuple[CudaLibrary, ...] = ()
     if info.cuda_major is not None and (info.cuda_devices or device == "cuda"):
         libraries = load_cuda_libraries(CTRANSLATE2_CUDA_LIBRARIES, info.cuda_major)
     if device != "auto":
-        return Backend(device, ctranslate2_compute_type(ct2, device, compute_type), reason="requested")
+        return Backend(
+            device, ctranslate2_compute_type(ct2, device, compute_type), reason="requested"
+        )
 
     def cpu(reason: str, fix: str | None = None) -> Backend:
         return Backend("cpu", ctranslate2_compute_type(ct2, "cpu", compute_type), (), reason, fix)
@@ -720,7 +734,9 @@ def select_ctranslate2_backend(
                 f"CTranslate2 {info.version} needs CUDA {needed}",
                 "update the NVIDIA driver",
             )
-        return cpu(f"{nvidia.gpu_name()} found, but CTranslate2 {info.version} has no CUDA support here")
+        return cpu(
+            f"{nvidia.gpu_name()} found, but CTranslate2 {info.version} has no CUDA support here"
+        )
     gpu = nvidia.gpu_name(device_index)
     if any(not lib.loaded for lib in libraries):
         return cpu(f"{gpu} found but {_missing(libraries)} is missing", CUDA_EXTRA_HINT)
@@ -846,7 +862,9 @@ def report() -> list[tuple[str, str]]:
     row("NVIDIA GPU", lambda: _describe_nvidia(nvidia))
     apple = detect_apple_silicon()
     if apple is not None:
-        row("Apple silicon", lambda: f"{apple}; mlx {'installed' if apple.mlx else 'not installed'}")
+        row(
+            "Apple silicon", lambda: f"{apple}; mlx {'installed' if apple.mlx else 'not installed'}"
+        )
 
     ct2 = ctranslate2_info()
     if ct2 is not None:
@@ -887,7 +905,9 @@ def report() -> list[tuple[str, str]]:
             )
         row(
             "onnxruntime device=auto (Kokoro)",
-            lambda: _describe_backend(select_onnx_backend(accelerators=("cuda", "coreml", "directml"))),
+            lambda: _describe_backend(
+                select_onnx_backend(accelerators=("cuda", "coreml", "directml"))
+            ),
         )
     return rows
 
