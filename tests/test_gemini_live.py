@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import pytest
 
-from voice_agent_next import function_tool
+from voice_agent_next import Agent, AgentSession, AgentState, ChatMessage, function_tool
 from voice_agent_next.audio import AudioFrame
 from voice_agent_next.chat import FunctionCallOutput
 from voice_agent_next.engine import EngineOptions
@@ -38,10 +39,11 @@ from voice_agent_next.events import (
     ResponseToolCall,
     ToolCallCancelled,
 )
-from voice_agent_next.metrics import EngineMetrics
+from voice_agent_next.metrics import EngineMetrics, TurnMetrics
 from voice_agent_next.providers.google.live import GeminiLiveConnection, GeminiLiveEngine
 from voice_agent_next.providers.mock import synth_speech
 from voice_agent_next.testing.gemini_live import FakeGeminiLiveServer, FakeReply, FakeToolCall
+from voice_agent_next.transports import LoopbackTransport
 
 KEY = "fake-gemini-key"
 
@@ -416,6 +418,7 @@ async def test_server_side_interruption_without_voice_activity(fake: Callable[..
     await conn.aclose()
 
     (started,) = events.of(InputSpeechStarted)  # only `interrupted` signals the barge-in
+    assert started.audio_time is None  # (no voiceActivity offset to report)
     kinds = events.kinds()
     assert kinds.index("InputSpeechStarted") < kinds.index("ResponseDone")
     assert events.of(ResponseDone)[0].status == "cancelled"
@@ -677,3 +680,234 @@ async def test_auth_failure_during_reconnect_is_fatal(fake: Callable[..., Any]) 
     errors = [e for e in events.items if type(e).__name__ == "EngineErrorEvent"]
     assert len(errors) == 1 and not errors[0].recoverable
     assert isinstance(errors[0].error, AuthenticationError)
+
+
+# ------------------------------------------------------- end-to-end with AgentSession
+class Recorder:
+    def __init__(self, session: AgentSession) -> None:
+        self.events: list[tuple[str, Any]] = []
+        for name in ("user_transcript", "agent_transcript", "tool_call", "tool_result",
+                     "interrupted", "metrics", "error", "close"):  # fmt: skip
+            session.on(name, self._make(name))
+
+    def _make(self, name: str) -> Callable[[Any], None]:
+        return lambda ev: self.events.append((name, ev))
+
+    def of(self, name: str) -> list[Any]:
+        return [ev for n, ev in self.events if n == name]
+
+    def turn_metrics(self) -> list[TurnMetrics]:
+        return [m for m in self.of("metrics") if isinstance(m, TurnMetrics)]
+
+
+async def speak_to(
+    transport: LoopbackTransport, seconds: float = 0.8, silence: float = 0.6
+) -> None:
+    await transport.play_user_audio(synth_speech(seconds, 16_000), realtime=False)
+    await transport.play_user_audio(AudioFrame.silence(silence, 16_000), realtime=False)
+
+
+def history(session: AgentSession) -> list[tuple[str, str]]:
+    return [(i.role, i.text) for i in session.history.items if isinstance(i, ChatMessage)]
+
+
+async def test_session_turn_with_greeting_and_transcripts(fake: Callable[..., Any]) -> None:
+    server = await fake(replies=["Hi! Nice to meet you."], transcripts=["hello gemini"])
+    session = AgentSession(engine_for(server))
+    rec = Recorder(session)
+    transport = LoopbackTransport()
+    await session.start(Agent("Be nice.", greeting="Welcome."), transport)
+    await wait_for(lambda: session.agent_state == AgentState.LISTENING and bool(rec.of("agent_transcript")))  # fmt: skip
+    await speak_to(transport)
+    await wait_for(lambda: len(rec.turn_metrics()) == 1)
+    transport.end_user_audio()  # the user hangs up
+    await asyncio.wait_for(session.wait_closed(), 5)
+
+    assert history(session) == [
+        ("assistant", "Welcome."), ("user", "hello gemini"), ("assistant", "Hi! Nice to meet you.")
+    ]  # fmt: skip
+    finals = [e.text for e in rec.of("user_transcript") if e.is_final]
+    assert finals == ["hello gemini"]
+    assert [e.text for e in rec.of("user_transcript") if not e.is_final] == [
+        "hello",
+        "hello gemini",
+    ]
+    m = rec.turn_metrics()[0]  # (audio pushed faster than real time: values not asserted)
+    assert m.voice_to_voice is not None and m.end_of_turn_delay is not None
+    assert not m.interrupted
+    played = sum(p.frame.duration for p in transport.played_log)
+    assert played == pytest.approx((len("Welcome.") + len("Hi! Nice to meet you.")) / 15, abs=0.15)
+    assert session.usage.engine_output_audio_tokens > 0
+    assert rec.of("close")[0].reason == "user_disconnected"
+    assert server.setups[0]["systemInstruction"] == {"parts": [{"text": "Be nice."}]}
+
+
+async def test_session_tool_call_round_trip(fake: Callable[..., Any]) -> None:
+    calls: list[str] = []
+
+    @function_tool
+    async def weather(city: str) -> str:
+        """Weather lookup."""
+        calls.append(city)
+        return f"sunny in {city}"
+
+    server = await fake(replies=[FakeToolCall("weather", {"city": "Paris"}), "It is sunny in Paris."],
+                        transcripts=["weather in paris?"])  # fmt: skip
+    session = AgentSession(engine_for(server))
+    rec = Recorder(session)
+    await session.start(Agent("x", tools=[weather]), LoopbackTransport())
+    await speak_to(session.transport)  # type: ignore[arg-type]
+    await wait_for(lambda: len(rec.turn_metrics()) == 1)
+    await session.aclose()
+
+    assert calls == ["Paris"]
+    assert rec.of("tool_result")[0].output.output == "sunny in Paris"
+    (response,) = server.connection.tool_responses
+    assert response["response"] == {"result": "sunny in Paris"}
+    assert response["scheduling"] == "WHEN_IDLE"
+    kinds = [getattr(i, "role", i.type) for i in session.history.items]
+    assert kinds == ["user", "function_call", "function_call_output", "assistant"]
+    assert history(session)[-1] == ("assistant", "It is sunny in Paris.")
+    m = rec.turn_metrics()[0]
+    assert m.tool_calls == 1 and m.voice_to_voice is not None
+
+
+async def test_session_barge_in_cancels_the_running_tool(fake: Callable[..., Any]) -> None:
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    @function_tool
+    async def slow_lookup(query: str) -> str:
+        """A slow search."""
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return "done"
+
+    filler = "Let me look that up for you, this could take a little while, please hold on."
+    server = await fake(replies=[FakeReply(filler, [FakeToolCall("slow_lookup", {"query": "flights"})])],
+                        realtime_factor=1.0)  # fmt: skip
+    session = AgentSession(engine_for(server))
+    rec = Recorder(session)
+    transport = LoopbackTransport(realtime_playout=True)
+    await session.start(Agent("x", tools=[slow_lookup]), transport)
+    await speak_to(transport, 0.6, 0.5)
+    await asyncio.wait_for(started.wait(), 5)
+    await wait_for(lambda: session.agent_state == AgentState.SPEAKING)
+    await asyncio.sleep(0.5)
+    await transport.play_user_audio(synth_speech(0.4, 16_000), realtime=False)  # barge in
+    await asyncio.wait_for(cancelled.wait(), 5)  # toolCallCancellation reached the tool
+    await wait_for(lambda: bool(rec.of("interrupted")))
+    await session.aclose()
+
+    assert server.connection.interruptions == 1
+    assert not rec.of("tool_result") and not server.connection.tool_responses
+    kinds = [getattr(i, "role", i.type) for i in session.history.items]
+    assert kinds[:2] == ["user", "function_call"] and "function_call_output" not in kinds
+    said = [
+        i for i in session.history.items if isinstance(i, ChatMessage) and i.role == "assistant"
+    ]
+    assert said and said[-1].interrupted and len(said[-1].text) < len(filler)
+
+
+@pytest.mark.parametrize("voice_activity", [True, False])
+async def test_session_server_side_interruption(
+    fake: Callable[..., Any], voice_activity: bool
+) -> None:
+    long_answer = "This is a very long answer that keeps going and going for quite a while. " * 3
+    server = await fake(replies=[long_answer], transcripts=["tell me a story"], realtime_factor=1.0,
+                        voice_activity=voice_activity)  # fmt: skip
+    session = AgentSession(engine_for(server))
+    rec = Recorder(session)
+    transport = LoopbackTransport(realtime_playout=True)
+    await session.start(Agent("x"), transport)
+    await speak_to(transport, 0.6, 0.5)
+    await wait_for(lambda: session.agent_state == AgentState.SPEAKING)
+    await asyncio.sleep(1.0)  # let ~1 s of the answer play
+    await transport.play_user_audio(synth_speech(0.4, 16_000), realtime=False)  # barge in
+    await wait_for(lambda: bool(rec.of("interrupted")))
+    await session.aclose()
+
+    ev = rec.of("interrupted")[0]
+    assert 0.5 < ev.played < 2.5
+    assert transport.clear_times, "transport playback must be cleared"
+    assert server.connection.interruptions == 1  # the server stopped generating too
+    said = [
+        i for i in session.history.items if isinstance(i, ChatMessage) and i.role == "assistant"
+    ]
+    assert said[-1].interrupted and 0 < len(said[-1].text) < len(long_answer.strip())
+    m = rec.turn_metrics()[0]
+    assert m.interrupted and m.agent_speech_duration == pytest.approx(ev.played, abs=0.3)
+
+
+@pytest.mark.parametrize("voice_activity", [True, False])
+async def test_session_voice_to_voice_matches_external_measurement(
+    fake: Callable[..., Any], voice_activity: bool
+) -> None:
+    from voice_agent_next.utils import now
+
+    server = await fake(replies=["Okay then."], realtime_factor=1.0, voice_activity=voice_activity)
+    session = AgentSession(engine_for(server))
+    rec = Recorder(session)
+    transport = LoopbackTransport(realtime_playout=True)
+    await session.start(Agent("x"), transport)
+    await transport.play_user_audio(synth_speech(0.6, 16_000))  # real time
+    speech_end = now()
+    await transport.play_user_audio(AudioFrame.silence(1.0, 16_000))
+    await wait_for(lambda: bool(rec.turn_metrics()), 5)
+    await session.aclose()
+
+    m = rec.turn_metrics()[0]
+    heard = transport.played_log[0].start_time - speech_end  # what the simulated user measured
+    assert m.voice_to_voice == pytest.approx(0.4, abs=0.15)  # the fake server's VAD silence
+    assert m.voice_to_voice == pytest.approx(heard, abs=0.08)
+
+
+async def test_session_continues_across_a_go_away_rotation(fake: Callable[..., Any]) -> None:
+    server = await fake(replies=["First answer.", "Second answer."], transcripts=["one", "two"])
+    session = AgentSession(engine_for(server))
+    rec = Recorder(session)
+    transport = LoopbackTransport()
+    await session.start(Agent("x"), transport)
+    await speak_to(transport)
+    await wait_for(lambda: len(rec.turn_metrics()) == 1)
+    await wait_for(lambda: len(server.connection.handles) == 2)
+    await server.go_away(time_left=10.0)
+    conn = session.connection
+    assert isinstance(conn, GeminiLiveConnection)
+    await wait_for(lambda: conn.resumptions == 1)
+    await speak_to(transport)
+    await wait_for(lambda: len(rec.turn_metrics()) == 2)
+    await session.aclose()
+
+    assert history(session) == [
+        ("user", "one"), ("assistant", "First answer."), ("user", "two"), ("assistant", "Second answer.")
+    ]  # fmt: skip
+    first, second = server.connections
+    assert second.session is first.session and second.user_turns == ["two"]
+    assert not rec.of("error")
+
+
+# ------------------------------------------------------------------- real API (opt-in)
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")),
+    reason="needs GOOGLE_API_KEY or GEMINI_API_KEY",
+)
+async def test_real_gemini_live_turn() -> None:
+    engine = GeminiLiveEngine(model=os.environ.get("GEMINI_LIVE_MODEL"))
+    conn = await engine.connect(EngineOptions(instructions="Answer in one short sentence."))
+    assert isinstance(conn, GeminiLiveConnection)
+    events = Events(conn)
+    await conn.send_text("Say hello and tell me the capital of France.")
+    await asyncio.wait_for(events.wait(lambda: bool(events.of(ResponseDone)), timeout=60), 65)
+    await conn.aclose()
+
+    audio = events.of(ResponseAudio)
+    assert audio and all(a.frame.sample_rate == 24_000 for a in audio)
+    assert sum(a.frame.duration for a in audio) > 0.3
+    assert "paris" in "".join(e.delta for e in events.of(ResponseText)).lower()
+    assert events.of(ResponseDone)[0].status == "completed"
+    assert conn.resumption_handle is not None

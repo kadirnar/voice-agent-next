@@ -551,6 +551,8 @@ class GeminiLiveConnection(EngineConnection):
         self._activity_open = False
         self._last_input_transcript_at = 0.0
         self._last_commit_pos = 0.0
+        self._answered_until = 0.0
+        """Input position up to which user speech has been answered (never replayed)."""
         # ---- tools
         self._pending_calls: dict[str, str] = {}
         self._stale_calls: set[str] = set()
@@ -812,8 +814,17 @@ class GeminiLiveConnection(EngineConnection):
             logger.warning("gemini-live: reconnect buffer full, dropped %.2fs of audio", dropped)
 
     def _trim_replay(self) -> None:
+        """A new handle arrived: keep only what the resumed state may be missing -- the
+        audio sent in the last ``resume_replay`` seconds, minus speech already answered."""
         cutoff = now() - self._e.resume_replay
-        while self._replay and self._replay[0].sent_at < cutoff:
+        while self._replay:
+            head = self._replay[0]
+            answered = (
+                head.audio_start is not None
+                and head.audio_start + head.audio_duration <= self._answered_until
+            )
+            if head.sent_at >= cutoff and not answered:
+                break
             self._replay_audio -= self._replay.popleft().audio_duration
 
     # ----------------------------------------------------------------- rotation
@@ -1259,6 +1270,8 @@ class GeminiLiveConnection(EngineConnection):
             if user.committed:
                 if user.closed_at is None:
                     user.closed_at = now()
+                if user.speech_end is not None:
+                    self._answered_until = max(self._answered_until, user.speech_end)
             elif not had_output and not waiting and user.text:
                 self._emit_user_final(user)  # the model chose not to answer
                 self._user = None
