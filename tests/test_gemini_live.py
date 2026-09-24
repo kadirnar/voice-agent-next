@@ -949,3 +949,15 @@ async def test_real_gemini_live_turn() -> None:
     assert "paris" in "".join(e.delta for e in events.of(ResponseText)).lower()
     assert events.of(ResponseDone)[0].status == "completed"
     assert conn.resumption_handle is not None
+
+
+async def test_close_while_reconnecting_does_not_hang(fake: Callable[..., Any]) -> None:
+    server = await fake()
+    conn, events = await connect(server)
+    server.reject_status = 503  # reconnects keep failing (with backoff)
+    await server.drop()
+    await events.wait(lambda: bool(events.of(EngineStatus)))
+    await asyncio.wait_for(conn.aclose(), 3)
+    assert conn.closed
+    await conn.send_audio(AudioFrame.silence(0.02, 16_000))  # ignored after close
+    await conn.send_text("ignored")

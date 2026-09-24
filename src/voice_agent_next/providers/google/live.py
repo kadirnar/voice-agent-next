@@ -511,6 +511,7 @@ class GeminiLiveConnection(EngineConnection):
         self._tasks = BackgroundTasks("gemini-live")
         # ---- transport
         self._ws: ClientConnection | None = None
+        self._retired: set[ClientConnection] = set()
         self._epoch = 0
         self._recv_task: asyncio.Task[None] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
@@ -587,8 +588,10 @@ class GeminiLiveConnection(EngineConnection):
         await cancel_and_wait(*[t for t in tasks if t is not None and t is not current])
         await self._tasks.cancel_all()
         ws, self._ws = self._ws, None
-        if ws is not None:
-            await _close_quietly(ws)
+        for sock in [ws, *self._retired]:
+            if sock is not None:
+                await _close_quietly(sock)
+        self._retired.clear()
         if self._vad is not None:
             self._vad.close()
         if self._server_turn_open or self._gen is not None:
@@ -747,6 +750,10 @@ class GeminiLiveConnection(EngineConnection):
             code, reason = ws.close_code, ws.close_reason or ""
         except ConnectionClosed as exc:
             code, reason = _close_info(exc)
+        except Exception:
+            logger.exception("gemini-live: receiving failed")
+            code, reason = None, "receive failed"
+            await _close_quietly(ws)
         if self._closed or epoch != self._epoch:
             return
         error = _close_error(code, reason)
@@ -922,7 +929,7 @@ class GeminiLiveConnection(EngineConnection):
             old = self._ws
             self._switch(ws, early, resumed=handle is not None)
             if old is not None and old is not ws:
-                self._tasks.spawn(_close_quietly(old), name="gemini-live-close-old")
+                self._retire(old)
             if await self._flush(ws) and ws.state is State.OPEN:
                 self._switching = False  # outbox empty; no await since the check
                 if handle is not None:
@@ -956,6 +963,16 @@ class GeminiLiveConnection(EngineConnection):
         if not resumed:
             self._handle = None
         self._install(ws, early)
+
+    def _retire(self, ws: ClientConnection) -> None:
+        """Close a replaced connection in the background (``aclose`` finishes the job)."""
+        self._retired.add(ws)
+
+        async def close() -> None:
+            await _close_quietly(ws)
+            self._retired.discard(ws)
+
+        self._tasks.spawn(close(), name="gemini-live-close-old")
 
     async def _keep_current(
         self, ws: ClientConnection, reason: str, error: Exception, *, retry_in: float
