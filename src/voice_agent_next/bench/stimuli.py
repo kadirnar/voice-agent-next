@@ -410,6 +410,7 @@ def noise_burst(duration: float, sample_rate: int, *, seed: int = 0) -> AudioFra
     n = max(1, round(duration * sample_rate))
     rng = np.random.default_rng(seed)
     x = rng.standard_normal(n)
+
     # crude band-pass (~200 Hz - 3 kHz): difference of two one-pole low-passes
     def lowpass(sig: np.ndarray, fc: float) -> np.ndarray:
         a = math.exp(-2.0 * math.pi * fc / sample_rate)
@@ -541,7 +542,8 @@ async def render_stimuli(scenario: Scenario, *, turns: int | None = None) -> lis
             audio, gain_db = normalize_loudness(audio, loudness, span)
         cache[i] = Stimulus(
             id=scenario.turn_id(i),
-            text=spec.text or (" ".join(p.text for p in spec.parts if p.text) if spec.parts else None),
+            text=spec.text
+            or (" ".join(p.text for p in spec.parts if p.text) if spec.parts else None),
             audio=_pad_to_chunks(audio, scenario.chunk),
             speech_start=span[0],
             speech_end=span[1],
