@@ -79,6 +79,7 @@ MINIMAL_THINKING_MODELS = (
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
     "gemini-3-flash-preview",
 )
 """Gemini 3 models that accept ``thinking_level="minimal"`` (the others start at ``low``)."""
