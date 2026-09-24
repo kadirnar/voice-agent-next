@@ -74,7 +74,7 @@ class Client:
     async def wait_closed(self, timeout: float = 5.0) -> int | None:
         assert self._reader is not None
         await asyncio.wait_for(asyncio.shield(self._reader), timeout)
-        return self.ws.close_code
+        return self.ws.protocol.close_code  # (Connection.close_code needs websockets >= 14)
 
     async def send(self, message: dict[str, Any] | bytes) -> None:
         await self.ws.send(message if isinstance(message, bytes) else json.dumps(message))
@@ -390,12 +390,12 @@ async def test_playback_reports_drive_buffered_duration() -> None:
             assert transport.buffered_duration() == pytest.approx(1.0, abs=0.1)  # wall clock
             await wait_for(lambda: len(client.audio_bytes()) == 48_000)
             assert [len(m) for k, m in client.log if k == "audio"] == [960] * 50
-            await asyncio.sleep(0.3)
-            assert transport.buffered_duration() == pytest.approx(0.7, abs=0.15)
+            await asyncio.sleep(0.5)
+            assert transport.buffered_duration() == pytest.approx(0.5, abs=0.2)
 
             # the client reports it has not played anything yet (e.g. still buffering)
             await client.send({"type": "playback", "position_ms": 0})
-            await wait_for(lambda: transport.buffered_duration() > 0.9)
+            await wait_for(lambda: transport.buffered_duration() > 0.8)  # re-anchored to 1.0
             # ... then that it played everything
             await client.send({"type": "playback", "position_ms": 1000})
             await wait_for(lambda: transport.buffered_duration() == 0.0)

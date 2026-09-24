@@ -478,10 +478,9 @@ class WebSocketServerTransport(Transport):
         except Exception:
             logger.exception("WebSocket reader failed (%s)", self.session_id)
         finally:
-            logger.info(
-                "WebSocket client disconnected (%s, code %s)", self.session_id, websocket.close_code
-            )
             self._on_disconnected()
+            code = getattr(websocket.protocol, "close_code", None)  # websockets >= 13
+            logger.info("WebSocket client disconnected (%s, code %s)", self.session_id, code)
 
     async def _write_loop(self) -> None:
         websocket = self.websocket

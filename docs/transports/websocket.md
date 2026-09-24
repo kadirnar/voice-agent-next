@@ -286,10 +286,16 @@ messages in order, so `clear_audio()` also drops audio that has not reached the 
 ### `serve_websocket()` / `WebSocketAgentServer`
 
 ```python
-server = await serve_websocket(session_factory, agent_factory, host="127.0.0.1", port=8765,
-                               max_sessions=20, origins=["https://app.example.com"])
+server = await serve_websocket(
+    session_factory,
+    agent_factory,
+    host="127.0.0.1",
+    port=8765,
+    max_sessions=20,
+    origins=["https://app.example.com"],
+)
 print(server.url, server.port, server.sessions)
-await server.serve_forever()   # or: async with WebSocketAgentServer(...) as server: ...
+await server.serve_forever()  # or: async with WebSocketAgentServer(...) as server: ...
 ```
 
 For every connection, the server:
