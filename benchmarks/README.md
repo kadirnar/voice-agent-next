@@ -398,7 +398,9 @@ from voice_agent_next.bench.tracks.asr import AsrOptions, run_asr_benchmark
 
 data = load_asr_dataset("librispeech-test-clean-smoke")
 results = asyncio.run(
-    run_asr_benchmark("faster-whisper/base", data, AsrOptions(mode="batch"), out_dir="bench-results")
+    run_asr_benchmark(
+        "faster-whisper/base", data, AsrOptions(mode="batch"), out_dir="bench-results"
+    )
 )
 print(results.summary.rates["wer"], results.summary.extra["rtfx"])
 ```
