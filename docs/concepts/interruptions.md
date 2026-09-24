@@ -70,7 +70,10 @@ behaviour before this policy existed).
 from voice_agent_next import AgentSession, SessionOptions
 
 session = AgentSession(
-    stt="deepgram/nova-3", llm="openai/gpt-4.1-mini", tts="cartesia/sonic-2", vad="silero",
+    stt="deepgram/nova-3",
+    llm="openai/gpt-4.1-mini",
+    tts="cartesia/sonic-2",
+    vad="silero",
     options=SessionOptions(min_interruption_words=1),  # streaming STT: ignore coughs and noise
 )
 
