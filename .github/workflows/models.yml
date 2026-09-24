@@ -1,0 +1,47 @@
+name: model tests
+
+# Real-model tests (`pytest -m model`) on all three OSes: native wheels (onnxruntime,
+# ctranslate2, kokoro-onnx, livekit APM), model downloads and pinned checksums are exactly
+# what breaks silently between releases. Weekly, on demand, and on PRs labelled `ci:models`.
+on:
+  schedule:
+    - cron: "17 4 * * 1"  # Mondays 04:17 UTC
+  workflow_dispatch:
+  pull_request:
+    types: [labeled, synchronize]
+
+concurrency:
+  group: models-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  models:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:models')
+    name: models (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      # short paths: espeak-ng data inside the Kokoro cache hits MAX_PATH on Windows otherwise
+      VAN_CACHE_DIR: ${{ runner.temp }}/van
+      HF_HOME: ${{ runner.temp }}/hf
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: model cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/van
+            ${{ runner.temp }}/hf
+          key: models-${{ runner.os }}-${{ hashFiles('src/voice_agent_next/providers/**/*.py', 'tests/providers/**/*.py', 'tests/test_aec.py') }}
+          restore-keys: models-${{ runner.os }}-
+      - run: uv sync --extra silero --extra smart-turn --extra faster-whisper --extra kokoro --extra aec
+      - run: uv run pytest -q -m model --durations=15

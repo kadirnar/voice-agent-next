@@ -44,7 +44,7 @@ Rules:
 
 * Unit tests must not touch the network or download models. Use fake servers (`websockets.serve` on `127.0.0.1:0`, `httpx.MockTransport`) that replay the provider's real protocol messages.
 * Real-API tests: `@pytest.mark.integration`, skipped unless the API key env var is set.
-* Real-model tests: `@pytest.mark.model`, skipped unless the dependency is installed; keep downloads small.
+* Real-model tests: `@pytest.mark.model`, skipped unless the dependency is installed; keep downloads small. They run weekly on Linux, macOS and Windows (`.github/workflows/models.yml`) and on PRs labelled `ci:models` — add the label when you touch a local model provider.
 * Tests that need audio hardware: `@pytest.mark.audio_device`.
 * Timing assertions must use generous tolerances (CI runners are slow; Windows timers are coarse).
 
