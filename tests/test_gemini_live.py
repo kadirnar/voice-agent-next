@@ -18,6 +18,7 @@ from voice_agent_next import Agent, AgentSession, AgentState, ChatMessage, funct
 from voice_agent_next.audio import AudioFrame
 from voice_agent_next.chat import FunctionCallOutput
 from voice_agent_next.engine import EngineOptions
+from voice_agent_next.engines.rotation import SummarizeHistory
 from voice_agent_next.errors import (
     AuthenticationError,
     ConfigurationError,
@@ -39,7 +40,6 @@ from voice_agent_next.events import (
     ResponseToolCall,
     ToolCallCancelled,
 )
-from voice_agent_next.engines.rotation import SummarizeHistory
 from voice_agent_next.metrics import EngineMetrics, RotationMetrics, TurnMetrics
 from voice_agent_next.providers.google.live import GeminiLiveConnection, GeminiLiveEngine
 from voice_agent_next.providers.mock import MockLLM, synth_speech

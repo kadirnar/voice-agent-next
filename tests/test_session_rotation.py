@@ -190,7 +190,9 @@ def test_recorder_keeps_what_was_heard() -> None:
     rec.observe(ResponseStarted(response_id="r1"))
     rec.observe(ResponseText(response_id="r1", item_id="a1", delta="Hello there, "))
     rec.observe(ResponseText(response_id="r1", item_id="a1", delta="how are you?"))
-    rec.observe(ResponseAudio(response_id="r1", item_id="a1", frame=AudioFrame.silence(2.0, 24_000)))
+    rec.observe(
+        ResponseAudio(response_id="r1", item_id="a1", frame=AudioFrame.silence(2.0, 24_000))
+    )
     rec.observe(InputTranscript(item_id="u1", text="hi", is_final=True))  # late transcript
     assert texts(rec.history) == [("user", "hi"), ("assistant", "Hello there, how are you?")]
     version = rec.version
@@ -288,7 +290,7 @@ async def test_forced_rotation_carries_the_conversation(closing: list[EngineConn
 
 async def test_rotation_waits_while_the_agent_speaks(closing: list[EngineConnection]) -> None:
     inner = MockEngine(responses=["A long answer that takes a while to speak out loud."],
-                       realtime_factor=1.0)  # fmt: skip
+                       realtime_factor=1.0, chars_per_second=40.0)  # fmt: skip
     _, conn, rec, _ = await open_rotating(inner)
     closing.append(conn)
     await conn.create_response()
@@ -329,7 +331,7 @@ async def test_deadline_forces_the_switch_and_buffers_audio(
     inner.connect_delay = 0.3  # the next connection is slow to open
     conn.rotate("test", deadline=now())
     sent = 0.0
-    while not rec.statuses()[-1:] == ["reconnected"]:
+    while rec.statuses()[-1:] != ["reconnected"]:
         await feed(conn, AudioFrame.silence(0.02, 16_000))
         sent += 0.02
         await asyncio.sleep(0.01)

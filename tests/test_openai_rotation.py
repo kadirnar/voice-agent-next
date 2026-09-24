@@ -87,7 +87,9 @@ async def test_forced_rotation_carries_the_conversation_to_a_new_session() -> No
     async with server, rotating(server) as (conn, rec, metrics):
         await user_turn(conn)
         await rec.wait(lambda: rec.of(ResponseDone))
-        await wait_for(lambda: server.sent_events("conversation.item.input_audio_transcription.completed"))
+        await wait_for(
+            lambda: server.sent_events("conversation.item.input_audio_transcription.completed")
+        )
         first_session = conn.session_id
         stop = asyncio.Event()
         mic = asyncio.create_task(keep_talking(conn, stop))  # the microphone never stops
@@ -165,7 +167,7 @@ async def test_rotation_before_the_session_limit() -> None:
     policy = RotationPolicy(lead=2.0, force_margin=0.5, quiet_period=0.05)
     async with FakeRealtimeServer(expires_in=3.0) as server:
         start = now()
-        async with rotating(server, policy=policy) as (conn, rec, metrics):
+        async with rotating(server, policy=policy) as (_, rec, metrics):
             await rec.wait(lambda: metrics, timeout=5)
             # expires_at is whole seconds: the limit is 2-3 s, the rotation after half of it
             assert 0.9 < now() - start < 3.0
@@ -179,7 +181,9 @@ async def test_drop_reconnects_with_history_and_buffered_audio() -> None:
     async with server, rotating(server, reconnect_backoff=0.3) as (conn, rec, metrics):
         await user_turn(conn)
         await rec.wait(lambda: rec.of(ResponseDone))
-        await wait_for(lambda: server.sent_events("conversation.item.input_audio_transcription.completed"))
+        await wait_for(
+            lambda: server.sent_events("conversation.item.input_audio_transcription.completed")
+        )
         mark = len(server.received)
         await server.drop()
         await rec.wait(lambda: statuses(rec) == ["reconnecting"])
@@ -247,15 +251,15 @@ async def test_carry_over_strategy_is_pluggable() -> None:
 
 
 async def test_failed_rotation_keeps_the_current_session() -> None:
-    async with FakeRealtimeServer(replies=["ok"]) as server:
-        async with rotating(server) as (conn, rec, metrics):
-            server.reject_status = 503
-            conn.rotate("test", deadline=now())
-            await rec.wait(lambda: "resumed" in statuses(rec))
-            assert statuses(rec)[:2] == ["reconnecting", "resumed"]
-            assert rec.of(EngineErrorEvent)[0].recoverable and not metrics
-            server.reject_status = None
-            await rec.wait(lambda: metrics, timeout=5)  # retried
-            await conn.create_response()
-            await rec.wait(lambda: rec.of(ResponseDone))
-            assert spoken(rec) == "ok"
+    server = FakeRealtimeServer(replies=["ok"])
+    async with server, rotating(server) as (conn, rec, metrics):
+        server.reject_status = 503
+        conn.rotate("test", deadline=now())
+        await rec.wait(lambda: "resumed" in statuses(rec))
+        assert statuses(rec)[:2] == ["reconnecting", "resumed"]
+        assert rec.of(EngineErrorEvent)[0].recoverable and not metrics
+        server.reject_status = None
+        await rec.wait(lambda: metrics, timeout=5)  # retried
+        await conn.create_response()
+        await rec.wait(lambda: rec.of(ResponseDone))
+        assert spoken(rec) == "ok"
