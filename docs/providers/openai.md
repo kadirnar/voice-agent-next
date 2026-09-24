@@ -219,8 +219,11 @@ Without a TTS, the cascade plays that voice directly: no STT and no TTS
 (see [omni models](../concepts/omni-models.md)).
 
 ```python
-session = AgentSession(llm={"provider": "openai", "model": "gpt-audio", "voice": "marin"},
-                       vad="silero", turn_detector="smart_turn")
+session = AgentSession(
+    llm={"provider": "openai", "model": "gpt-audio", "voice": "marin"},
+    vad="silero",
+    turn_detector="smart_turn",
+)
 ```
 
 Any OpenAI-compatible server that streams audio the same way (for example vLLM-Omni

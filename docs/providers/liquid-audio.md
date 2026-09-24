@@ -59,7 +59,7 @@ llama-liquid-audio-server -m LFM2.5-Audio-1.5B-Q4_0.gguf -mm mmproj-LFM2.5-Audio
 ```
 
 ```python
-llm = "liquid-audio"   # http://127.0.0.1:8080/v1, or LIQUID_AUDIO_BASE_URL
+llm = "liquid-audio"  # http://127.0.0.1:8080/v1, or LIQUID_AUDIO_BASE_URL
 llm = {"provider": "liquid-audio", "base_url": "http://gpu-box:8080/v1", "context_size": 16384}
 ```
 
