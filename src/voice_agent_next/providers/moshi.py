@@ -24,13 +24,14 @@ the turn-based event protocol like this:
 
 * a **response** is a stretch of agent speech: it starts at the first text token or
   output chunk above ``speech_threshold_db`` and ends after ``response_gap`` seconds
-  with neither (the pause belongs to it; the silence between responses is not
-  forwarded). Text tokens -> ``ResponseText``;
+  (``yield_gap`` while the user is talking) with neither (the pause belongs to it; the
+  silence between responses is not forwarded). Text tokens -> ``ResponseText``;
 * **user speech** comes from a local energy VAD on the sent audio. ``InputSpeechStarted``
   / ``InputSpeechStopped`` are reported while the agent is quiet; speech *over* the agent
   is left to the model (Moshi resolves overlaps itself), so the session's barge-in
   policy never pauses, truncates or cancels Moshi. If the agent falls silent while the
-  user keeps talking, ``InputSpeechStarted`` is reported then. ``report_overlap=True``
+  user keeps talking, ``InputSpeechStarted`` is reported then (``handover_delay`` later,
+  once the session has played the response's tail). ``report_overlap=True``
   reports overlapping speech too (the session then applies its interruption policy);
 * a **turn**: the first agent response after user speech is preceded by
   ``InputCommitted`` (there is no user transcript: Moshi does not transcribe the user),
@@ -257,6 +258,11 @@ class MoshiEngine(S2SEngine):
             processes 80 ms steps).
         speech_threshold_db: output level (dBFS) above which agent audio counts as speech.
         response_gap: agent silence (s, no text either) that ends a response.
+        yield_gap: shorter silence that ends it while the user is talking (the model
+            yielded the floor).
+        handover_delay: user speech that continues after a response ended is reported
+            this long after the end, once the session has played the response's tail
+            (reported earlier, it would count as a barge-in on that tail).
         preroll: seconds of audio before a detected speech onset that are included in the
             response (keeps the first syllable's attack).
         report_overlap: also report user speech while the agent speaks, letting the
@@ -292,6 +298,8 @@ class MoshiEngine(S2SEngine):
         frame_duration: float = 0.08,
         speech_threshold_db: float = -40.0,
         response_gap: float = 0.64,
+        yield_gap: float = 0.24,
+        handover_delay: float = 0.3,
         preroll: float = 0.08,
         report_overlap: bool = False,
         user_vad_threshold_db: float = -40.0,
@@ -342,6 +350,8 @@ class MoshiEngine(S2SEngine):
         self.frame_samples = frame_samples
         self.speech_threshold_db = speech_threshold_db
         self.response_gap = response_gap
+        self.yield_gap = min(yield_gap, response_gap)
+        self.handover_delay = handover_delay
         self.preroll = preroll
         self.report_overlap = report_overlap
         self.user_vad_threshold_db = user_vad_threshold_db
@@ -490,7 +500,9 @@ class MoshiConnection(EngineConnection):
         self._user_reported = False
         self._user_pending = False
         """The user spoke since the agent's last response (the next one commits a turn)."""
+        self._user_speech_start: float | None = None
         self._user_speech_end: float | None = None
+        self._response_ended_at: float | None = None
         self._input_since_response = 0.0
         self._warned: set[str] = set()
 
@@ -713,9 +725,7 @@ class MoshiConnection(EngineConnection):
             if ev.type == VADEventType.START_OF_SPEECH:
                 self._user_speaking = True
                 self._user_pending = True
-                start = max(0.0, ev.audio_time - ev.speech_duration)
-                if self._resp is None or self._e.report_overlap:
-                    self._report_user_start(start)
+                self._user_speech_start = max(0.0, ev.audio_time - ev.speech_duration)
             elif ev.type == VADEventType.END_OF_SPEECH:
                 self._user_speaking = False
                 end = max(0.0, ev.audio_time - ev.silence_duration)
@@ -723,6 +733,18 @@ class MoshiConnection(EngineConnection):
                 if self._user_reported:
                     self._user_reported = False
                     self._emit(InputSpeechStopped(audio_time=end))
+        if self._user_speaking and not self._user_reported and self._floor_free():
+            self._report_user_start(self._user_speech_start)
+
+    def _floor_free(self) -> bool:
+        """User speech may be reported: the agent is quiet (and the tail of its last
+        response has been played), or overlaps are reported anyway."""
+        if self._e.report_overlap:
+            return True
+        if self._resp is not None:
+            return False
+        ended = self._response_ended_at
+        return ended is None or now() - ended >= self._e.handover_delay
 
     def _report_user_start(self, audio_time: float | None) -> None:
         if not self._user_reported:
@@ -784,8 +806,11 @@ class MoshiConnection(EngineConnection):
         self._forward(resp, frame)
         if loud:
             resp.last_activity = self._out_pos
-        elif self._out_pos - resp.last_activity >= self._e.response_gap:
+        elif self._out_pos - resp.last_activity >= self._gap():
             self._end_response("completed")
+
+    def _gap(self) -> float:
+        return self._e.yield_gap if self._user_speaking else self._e.response_gap
 
     def _keep_preroll(self, frame: AudioFrame) -> None:
         self._preroll.append(frame)
@@ -829,9 +854,7 @@ class MoshiConnection(EngineConnection):
         self._emit_metrics(resp, cancelled=status == "cancelled")
         self._input_since_response = 0.0
         self._preroll.clear()
-        if self._user_speaking and not self._user_reported and not self._closed:
-            # the agent yielded while the user is still talking: the floor is theirs now
-            self._report_user_start(self.input_audio_time)
+        self._response_ended_at = now()
 
     def _emit_metrics(self, resp: _AgentResponse, *, cancelled: bool) -> None:
         ttfb = None
