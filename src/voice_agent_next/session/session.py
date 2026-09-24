@@ -266,10 +266,11 @@ class AgentSession(EventEmitter):
                 raise ConfigurationError("pass either engine=... or cascade components, not both")
             self.engine: S2SEngine = create("engine", engine)
         else:
-            if llm is None or tts is None:
+            if llm is None:  # (the cascade checks for tts=... unless the LLM speaks)
                 raise ConfigurationError(
                     "AgentSession needs engine=... (native speech-to-speech) or at least "
-                    "llm=... and tts=... (cascade; add stt=... unless the LLM takes audio)"
+                    "llm=... and tts=... (cascade; add stt=... unless the LLM takes audio, "
+                    "tts=... is optional when it outputs audio)"
                 )
             from ..engines.cascade import CascadeEngine
 

@@ -85,8 +85,8 @@ class AppConfig(BaseModel):
         return self.engine is None
 
     def validate_components(self) -> None:
-        if self.engine is None and (self.llm is None or self.tts is None):
-            raise ConfigurationError(
+        if self.engine is None and self.llm is None:  # `tts:` is checked by the cascade:
+            raise ConfigurationError(  # optional for audio-output LLMs
                 "config needs `engine:` or a cascade with at least `llm:` and `tts:`"
             )
         if self.engine is not None and any(

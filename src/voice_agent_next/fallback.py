@@ -347,8 +347,19 @@ class _Chain(Generic[C]):
 
 
 def _all_caps(cls: type[Any], caps: Sequence[Any]) -> Any:
-    """The capabilities every provider has (intersection of boolean flags)."""
-    return cls(**{f.name: all(getattr(c, f.name) for c in caps) for f in dataclasses.fields(cls)})
+    """The capabilities every provider has: the intersection of boolean flags; other fields
+    (e.g. an audio sample rate) keep the value all providers share, else the default."""
+    default = cls()
+
+    def merge(name: str) -> Any:
+        values = [getattr(c, name) for c in caps]
+        if all(isinstance(v, bool) for v in values):
+            return all(values)
+        return (
+            values[0] if values and all(v == values[0] for v in values) else getattr(default, name)
+        )
+
+    return cls(**{f.name: merge(f.name) for f in dataclasses.fields(cls)})
 
 
 def _no_providers(kind: str) -> ProviderError:
@@ -511,7 +522,7 @@ class _FallbackLLMStream(LLMStream):
                         f"no first token within {timeout:g}s", provider=chain.labels[i]
                     ) from None
                 if not committed[0]:
-                    if not (chunk.delta or chunk.tool_calls):
+                    if not (chunk.delta or chunk.tool_calls or chunk.audio):
                         held.append(chunk)
                         continue
                     commit()

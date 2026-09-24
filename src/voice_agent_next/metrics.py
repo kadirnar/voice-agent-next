@@ -61,7 +61,9 @@ class LLMMetrics:
     model: str
     request_id: str
     ttft: float | None = None
-    """Time to first token (text delta or tool call)."""
+    """Time to first token (text delta, tool call or audio)."""
+    ttfb: float | None = None
+    """Time to the first audio chunk (audio-output models only)."""
     duration: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0

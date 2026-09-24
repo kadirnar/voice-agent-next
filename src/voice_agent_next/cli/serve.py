@@ -111,7 +111,7 @@ def build_models(
         sources.append((model_name or _source_name(source), _load_source(source)))
     cascade = {"stt": stt, "llm": llm, "tts": tts, "turn_detector": turn_detector}
     if any(v is not None for v in cascade.values()):
-        if llm is None or tts is None:
+        if llm is None:  # --tts is optional for audio-output LLMs (the cascade checks)
             raise ConfigurationError("a cascade needs at least --llm and --tts (and --stt)")
         engine = CascadeEngine(
             stt=parse_component_spec(stt), llm=parse_component_spec(llm),
