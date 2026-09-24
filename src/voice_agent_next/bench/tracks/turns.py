@@ -250,7 +250,7 @@ def _evaluate(
             ]
             for p in front
             if p.cutoff_rate <= 0.3
-        ],  # fmt: skip
+        ],
     }
 
 
@@ -321,8 +321,15 @@ def turns_markdown_table(results: RunResults) -> str:
     rows = []
     for name, key in ((s.system, "detector"), ("VAD baseline (silence only)", "vad_baseline")):
         h = x.get(key) or {}
-        rows.append([name, _pct(h.get("false_cutoff_at_300ms")), _pct(h.get("false_cutoff_at_600ms")),
-                     _ms(h.get("latency_at_5pct_ms")), _ms(h.get("latency_at_10pct_ms"))])  # fmt: skip
+        rows.append(
+            [
+                name,
+                _pct(h.get("false_cutoff_at_300ms")),
+                _pct(h.get("false_cutoff_at_600ms")),
+                _ms(h.get("latency_at_5pct_ms")),
+                _ms(h.get("latency_at_10pct_ms")),
+            ]
+        )
     table = markdown_table(
         ["system", "false cutoffs @ 300 ms", "false cutoffs @ 600 ms", "latency @ 5% cutoffs",
          "latency @ 10% cutoffs"],
@@ -370,9 +377,11 @@ _METHOD = """\
 def turns_report_spec(results: RunResults) -> ReportSpec:
     opts = results.manifest.options
     method = _METHOD.format(
-        score_point=opts.get("score_point", 0.2), lag=opts.get("transcript_lag", 0.5),
-        min_ep=opts.get("min_endpointing_delay", 0.4), max_ep=opts.get("max_endpointing_delay", 2.5),
-    )  # fmt: skip
+        score_point=opts.get("score_point", 0.2),
+        lag=opts.get("transcript_lag", 0.5),
+        min_ep=opts.get("min_endpointing_delay", 0.4),
+        max_ep=opts.get("max_endpointing_delay", 2.5),
+    )
     sections = [("Operating points", turns_markdown_table(results))]
     by_dataset = results.summary.extra.get("datasets") or {}
     if by_dataset:

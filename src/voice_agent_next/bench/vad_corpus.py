@@ -313,4 +313,3 @@ def build_vad_corpus(
         "sources": [s["sha256"] for s in source_info],
     }
     return VadCorpus(clips, source_info, params)
-

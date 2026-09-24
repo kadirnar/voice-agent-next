@@ -221,17 +221,15 @@ def _analyze_battery(
             f_on = min(len(mask) - 1, max(0, int(uon / fd)))
             lo, hi = max(0, f_on - 5), min(len(mask), f_on + 6)
             overlapped = bool(mask[lo:hi].any()) if len(mask) else False
-            stop = _first_silence(mask, f_on, min(len(mask), int(math.ceil(nxt / fd))), gap_frames)
-            stop = None if stop is None else stop * fd
+            stop_frame = _first_silence(mask, f_on, min(len(mask), math.ceil(nxt / fd)), gap_frames)
+            stop = None if stop_frame is None else stop_frame * fd
             if not overlapped:
                 stop = None
             session_int = any(uon - 0.05 <= t < nxt for t in interruptions)
             after = [t for t in onsets if stop is not None and stop < t < nxt]
             yielded = stop is not None and stop <= uoff + options.yield_window
             resumed = bool(yielded and not session_int and after)
-            talk = float(
-                mask[int(uon / fd) : int(math.ceil(uoff / fd))].sum() * fd * 1000.0
-            )
+            talk = float(mask[int(uon / fd) : math.ceil(uoff / fd)].sum() * fd * 1000.0)
             data.update(
                 overlapped=overlapped,
                 agent_stop_s=None if stop is None else round(stop, 6),
@@ -279,7 +277,9 @@ def summarize_turn_taking(
     false_pop = bc + noise
     yielded = [it for it in false_pop if it.yielded]
 
-    def rate(pop: Sequence[TurnTakingItem], pred: Callable[[TurnTakingItem], bool]) -> float | None:
+    def rate(
+        pop: Sequence[TurnTakingItem], pred: Callable[[TurnTakingItem], bool | None]
+    ) -> float | None:
         return round(sum(bool(pred(it)) for it in pop) / len(pop), 6) if pop else None
 
     metrics = {
@@ -449,7 +449,9 @@ async def run_turn_taking_benchmark(
                 events: list[float] = []
                 false_ints.append(events)
 
-                def hook(session: AgentSession, _t: LoopbackTransport, ev: list[float] = events) -> None:
+                def hook(
+                    session: AgentSession, _t: LoopbackTransport, ev: list[float] = events
+                ) -> None:
                     session.on("agent_false_interruption", lambda _e: ev.append(now()))
 
                 def turn_done(turn: TurnTiming, index: int = index) -> None:

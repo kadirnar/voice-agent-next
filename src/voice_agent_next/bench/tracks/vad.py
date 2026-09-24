@@ -235,7 +235,9 @@ def _auc(prob: np.ndarray, lab: np.ndarray) -> float | None:
 def _vad_name(vad: VAD, spec: Any) -> str:
     if isinstance(spec, str):
         return spec
-    return f"{vad.provider}/{vad.model}" if vad.model and vad.model != vad.provider else vad.provider
+    return (
+        f"{vad.provider}/{vad.model}" if vad.model and vad.model != vad.provider else vad.provider
+    )
 
 
 def summarize_vad(
@@ -332,8 +334,9 @@ def vad_report_spec(results: RunResults) -> ReportSpec:
     return ReportSpec(
         title=f"VAD (T4) · {results.summary.system}",
         metric_labels=labels,
-        rate_labels={k: k.replace(".", " · ") + " (mean over conditions)"
-                     for k in results.summary.rates},  # fmt: skip
+        rate_labels={
+            k: k.replace(".", " · ") + " (mean over conditions)" for k in results.summary.rates
+        },
         sections=[("Per condition", vad_markdown_table(results)), ("Method", method)],
     )
 
@@ -438,4 +441,3 @@ async def run_vad_benchmark(
     if directory is not None:
         _write_run(directory, results)
     return results
-
