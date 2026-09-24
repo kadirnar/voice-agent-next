@@ -503,11 +503,18 @@ class LiquidAudioLLM(LLM):
             *exits* when its context overflows, and every reply (its audio frames
             included) stays in it, so the provider resets the context and replays the
             recent turns before a request could overflow it.
+        trim_leading_silence: drop the near-silent audio the model emits before it starts
+            speaking — LFM2.5-Audio opens every reply with 0.4–0.9 s at −52…−67 dBFS, which
+            the caller would hear as extra latency. Chunks quieter than this level (dBFS)
+            are dropped until the first louder one (the last 80 ms are kept as a lead-in),
+            for at most ``MAX_TRIM`` seconds. ``None`` keeps them.
         timeout: HTTP timeout (connect and between streamed chunks).
     """
 
     provider = PROVIDER
     BASE_URL_ENV: ClassVar[tuple[str, ...]] = ("LIQUID_AUDIO_BASE_URL",)
+    MAX_TRIM: ClassVar[float] = 1.5
+    """Most leading silence dropped per reply (seconds)."""
 
     def __init__(
         self,
@@ -523,6 +530,7 @@ class LiquidAudioLLM(LLM):
         assistant_note: str | None = "(Earlier you said: {text})",
         max_replay_turns: int | None = 8,
         context_size: int | None = None,
+        trim_leading_silence: float | None = -45.0,
         timeout: float = 60.0,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -552,6 +560,7 @@ class LiquidAudioLLM(LLM):
             server_ctx = server.ctx_size if server is not None else None
             context_size = server_ctx or SERVER_CONTEXT_SIZE
         self.context_size = context_size
+        self.trim_leading_silence = trim_leading_silence
         self.timeout = timeout
         self._client = http_client
         self._owns_client = http_client is None
@@ -748,6 +757,7 @@ class _LiquidAudioStream(LLMStream):
         text: list[str] = []
         steps = 0
         finished = False
+        trim = _LeadingSilence(llm.trim_leading_silence, llm.MAX_TRIM)
         try:
             async with llm._http().stream("POST", url, json=body) as resp:
                 if resp.status_code != 200:
@@ -767,9 +777,12 @@ class _LiquidAudioStream(LLMStream):
                             self._push(ChatChunk(self.request_id, delta=delta_text))
                         if frame is not None:
                             steps += 1
-                            self._push(ChatChunk(self.request_id, audio=frame))
+                            for out in trim.push(frame):
+                                self._push(ChatChunk(self.request_id, audio=out))
                         if reason:
                             finished = True
+                for out in trim.flush():  # a reply that never got louder
+                    self._push(ChatChunk(self.request_id, audio=out))
         except httpx.HTTPError as exc:
             raise transport_error(PROVIDER, exc, url) from exc
         reply = "".join(text)
@@ -786,6 +799,40 @@ class _LiquidAudioStream(LLMStream):
             )
         )
         return reply
+
+
+class _LeadingSilence:
+    """Drops the quiet chunks at the start of a reply (see ``trim_leading_silence``)."""
+
+    def __init__(self, threshold: float | None, max_trim: float) -> None:
+        self.threshold = threshold
+        self.max_trim = max_trim
+        self._held: list[AudioFrame] = []
+        self._held_duration = 0.0
+        self._done = threshold is None
+        self.trimmed = 0.0
+        """Seconds of audio dropped."""
+
+    def push(self, frame: AudioFrame) -> list[AudioFrame]:
+        if self._done:
+            return [frame]
+        assert self.threshold is not None
+        if frame.dbfs() >= self.threshold:  # speech starts: keep 80 ms of lead-in
+            self._done = True
+            lead = self._held[-1:]
+            self.trimmed = self._held_duration - sum(f.duration for f in lead)
+            self._held = []
+            return [*lead, frame]
+        self._held.append(frame)
+        self._held_duration += frame.duration
+        if self._held_duration > self.max_trim:  # not silence after all: keep everything
+            return self.flush()
+        return []
+
+    def flush(self) -> list[AudioFrame]:
+        self._done = True
+        held, self._held = self._held, []
+        return held
 
 
 def _parse_event(event: Mapping[str, Any]) -> Iterator[tuple[str, AudioFrame | None, str | None]]:

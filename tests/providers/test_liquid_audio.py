@@ -368,6 +368,28 @@ async def test_warmup_primes_the_server_and_forces_a_reset() -> None:
     assert server.bodies[1]["reset_context"] is True
 
 
+def test_leading_silence_is_trimmed() -> None:
+    def chunk(level_db: float) -> AudioFrame:
+        return AudioFrame.from_numpy(
+            np.full(CHUNK, 10 ** (level_db / 20), dtype=np.float32), 24_000
+        )
+
+    # LFM2.5-Audio's measured reply start: 0.4-0.9 s at -52...-67 dBFS, then speech
+    trim = liquid_audio._LeadingSilence(-45.0, 1.5)
+    quiet = [chunk(-57), chunk(-55), chunk(-64), chunk(-66), chunk(-59)]
+    out = [f for c in quiet for f in trim.push(c)]
+    assert out == []
+    speech = chunk(-25)
+    assert trim.push(speech) == [quiet[-1], speech]  # 80 ms of lead-in kept
+    assert trim.push(quiet[0]) == [quiet[0]]  # later pauses are untouched
+    assert trim.trimmed == pytest.approx(4 * 0.08)
+    # never more than max_trim: a quiet reply is played as it is
+    trim = liquid_audio._LeadingSilence(-45.0, 0.2)
+    got = [f for c in quiet for f in trim.push(c)]
+    assert got == quiet
+    assert liquid_audio._LeadingSilence(None, 1.5).push(quiet[0]) == [quiet[0]]
+
+
 # -------------------------------------------------------------------------- session
 
 
