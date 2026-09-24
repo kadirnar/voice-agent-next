@@ -35,15 +35,16 @@ from voice_agent_next.transports.telephony import serve_telephony
 
 def make_agent(transport) -> Agent:
     call = transport.call  # CallInfo: call_id, from_number, custom_parameters...
-    return Agent("You are a friendly phone assistant. Keep answers short.",
-                 greeting="Hello! How can I help?")
+    return Agent(
+        "You are a friendly phone assistant. Keep answers short.", greeting="Hello! How can I help?"
+    )
 
 
 async def main() -> None:
     server = await serve_telephony(
         lambda: AgentSession("openai/gpt-realtime"),  # or a cascade
         make_agent,
-        provider="twilio",           # "telnyx" | "vonage" | "plivo"
+        provider="twilio",  # "telnyx" | "vonage" | "plivo"
         host="0.0.0.0",
         port=8765,
         serializer_options={"account_sid": "AC...", "auth_token": "..."},  # optional
@@ -106,9 +107,15 @@ With Call Control, pass `stream_url`, `stream_track: "inbound_track"`,
 the serializer the same values:
 
 ```python
-serve_telephony(..., provider="telnyx",
-                serializer_options={"outbound_encoding": "L16", "outbound_sample_rate": 16000,
-                                    "api_key": "KEY..."})
+serve_telephony(
+    ...,
+    provider="telnyx",
+    serializer_options={
+        "outbound_encoding": "L16",
+        "outbound_sample_rate": 16000,
+        "api_key": "KEY...",
+    },
+)
 ```
 
 L16 is 16 kHz linear PCM. RTP carries L16 in network byte order, which is the serializer's
@@ -119,8 +126,7 @@ default (`l16_byteorder="big"`).
 ```python
 from voice_agent_next.transports.telephony import vonage_ncco
 
-ncco = vonage_ncco("wss://agent.example.com/vonage", sample_rate=16000,
-                   headers={"customer": "42"})
+ncco = vonage_ncco("wss://agent.example.com/vonage", sample_rate=16000, headers={"customer": "42"})
 # [{"action": "connect", "endpoint": [{"type": "websocket", "uri": "...",
 #   "content-type": "audio/l16;rate=16000", "headers": {"customer": "42"}}]}]
 ```
@@ -137,8 +143,11 @@ ending the call leg over REST so that it does not raise a `disconnected` event.
 ```python
 from voice_agent_next.transports.telephony import plivo_stream_xml
 
-xml = plivo_stream_xml("wss://agent.example.com/plivo",
-                       content_type="audio/x-l16;rate=16000", extra_headers={"customer": "42"})
+xml = plivo_stream_xml(
+    "wss://agent.example.com/plivo",
+    content_type="audio/x-l16;rate=16000",
+    extra_headers={"customer": "42"},
+)
 ```
 
 `contentType` is `audio/x-mulaw;rate=8000` (the default), `audio/x-l16;rate=8000` or
