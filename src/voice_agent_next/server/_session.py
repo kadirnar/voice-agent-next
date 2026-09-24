@@ -84,6 +84,8 @@ _REQUEST_TTL: Final = 30.0
 """A requested response that has not started after this long is forgotten."""
 _INBOX_HIGH, _INBOX_LOW = 4 * 2**20, 2**20
 """Queued client bytes at which the reader pauses / resumes (TCP backpressure)."""
+_OUTBOX_HIGH, _OUTBOX_LOW = 2 * 2**20, 512 * 2**10
+"""Bytes queued for the client at which engine events stop / resume being taken."""
 _FLUSH_TIMEOUT: Final = 2.0
 # ``EngineConnection.say`` and ``OpenAIRealtimeEngine.say`` ask for verbatim speech with
 # this sentence; engines with direct TTS access (the cascade) then speak it exactly.
@@ -220,6 +222,7 @@ class RealtimeSession:
         self._outbox: deque[_Out] = deque()
         self._outbox_bytes = 0
         self._outbox_ready = asyncio.Event()
+        self._drained = asyncio.Event()
         self._writer_stop = False
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[None]]] = {
             "session.update": self._on_session_update,
@@ -332,50 +335,64 @@ class RealtimeSession:
                     await self._on_client_message(item)
 
     async def _next(self) -> list[tuple[str, Any]]:
-        """The next engine event(s) or client message(s); engine events go first."""
-        events = self._events
-        if events is not None:
+        """The next engine event(s) or client message(s).
+
+        Engine events go first, except while the client is behind on reading what was
+        already sent (outbox above the high-water mark): then only client events are taken
+        until the writer catches up, so input audio, cancels and barge-in keep flowing
+        while the engine's output waits in its own queue.
+        """
+        while True:
+            events = self._events
+            take_engine = events is not None and self._outbox_bytes <= _OUTBOX_HIGH
+            if take_engine:
+                assert events is not None
+                try:
+                    return [("engine", events.recv_nowait())]
+                except asyncio.QueueEmpty:
+                    pass
+                except ChanClosed:
+                    self._events = None
+                    return [("engine", _ENGINE_CLOSED)]
             try:
-                return [("engine", events.recv_nowait())]
+                return [("client", self._client.recv_nowait())]
             except asyncio.QueueEmpty:
                 pass
             except ChanClosed:
-                self._events = None
-                return [("engine", _ENGINE_CLOSED)]
-        try:
-            return [("client", self._client.recv_nowait())]
-        except asyncio.QueueEmpty:
-            pass
-        except ChanClosed:
-            return [("client", _DISCONNECTED)]
-        waiters: dict[asyncio.Future[Any], str] = {
-            asyncio.ensure_future(self._client.recv()): "client"
-        }
-        if events is not None:
-            waiters[asyncio.ensure_future(events.recv())] = "engine"
-        try:
-            await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            for fut in waiters:
-                fut.cancel()  # no-op for finished ones; a woken getter passes its item on
-            await asyncio.gather(*waiters, return_exceptions=True)
-        got: list[tuple[str, Any]] = []
-        for fut, source in sorted(waiters.items(), key=lambda kv: kv[1] != "engine"):
-            if fut.cancelled():
-                continue
-            exc = fut.exception()
-            if isinstance(exc, ChanClosed):
-                if source == "engine":
-                    if self._events is events:
-                        self._events = None
-                    got.append(("engine", _ENGINE_CLOSED))
+                return [("client", _DISCONNECTED)]
+            waiters: dict[asyncio.Future[Any], str] = {
+                asyncio.ensure_future(self._client.recv()): "client"
+            }
+            if events is not None:
+                if take_engine:
+                    waiters[asyncio.ensure_future(events.recv())] = "engine"
                 else:
-                    got.append(("client", _DISCONNECTED))
-            elif exc is not None:
-                raise exc
-            elif source != "engine" or self._events is events:
-                got.append((source, fut.result()))
-        return got
+                    self._drained.clear()
+                    waiters[asyncio.ensure_future(self._drained.wait())] = "drained"
+            try:
+                await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for fut in waiters:
+                    fut.cancel()  # no-op for finished ones; a woken getter passes its item on
+                await asyncio.gather(*waiters, return_exceptions=True)
+            got: list[tuple[str, Any]] = []
+            for fut, source in sorted(waiters.items(), key=lambda kv: kv[1] != "engine"):
+                if fut.cancelled() or source == "drained":
+                    continue
+                exc = fut.exception()
+                if isinstance(exc, ChanClosed):
+                    if source == "engine":
+                        if self._events is events:
+                            self._events = None
+                        got.append(("engine", _ENGINE_CLOSED))
+                    else:
+                        got.append(("client", _DISCONNECTED))
+                elif exc is not None:
+                    raise exc
+                elif source != "engine" or self._events is events:
+                    got.append((source, fut.result()))
+            if got:
+                return got
 
     async def _read_loop(self) -> None:
         try:
@@ -406,6 +423,8 @@ class RealtimeSession:
                 out = self._outbox.popleft()
                 self._outbox_bytes -= len(out.payload)
                 await self.websocket.send(out.payload)
+                if self._outbox_bytes <= _OUTBOX_LOW:
+                    self._drained.set()
         except ConnectionClosed:
             pass
 
@@ -456,6 +475,8 @@ class RealtimeSession:
             else:
                 kept.append(out)
         self._outbox = kept
+        if self._outbox_bytes <= _OUTBOX_LOW:
+            self._drained.set()
 
     # ------------------------------------------------------------------ rendering
     def _render_session(self) -> dict[str, Any]:
@@ -1133,6 +1154,10 @@ class RealtimeSession:
         self, resp: _Response, ev: ResponseText | ResponseAudio | ResponseToolCall | ResponseDone
     ) -> None:
         if resp.finished:
+            return
+        if resp.cancel_reason is not None and not isinstance(ev, ResponseDone):
+            if isinstance(ev, ResponseAudio):  # generated before the cancel took effect
+                resp.purged_ms += ev.frame.duration_ms
             return
         if isinstance(ev, ResponseText):
             if not ev.delta:

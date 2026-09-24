@@ -62,6 +62,7 @@ from voice_agent_next.providers.mock import (
 )
 from voice_agent_next.providers.openai.realtime import VERBATIM_INSTRUCTIONS, OpenAIRealtimeEngine
 from voice_agent_next.server import RealtimeModel, RealtimeServer
+from voice_agent_next.server import _session as session_module
 from voice_agent_next.server._session import _VERBATIM
 from voice_agent_next.transports import LoopbackTransport
 from voice_agent_next.utils import now
@@ -1080,3 +1081,43 @@ def test_van_serve_runs_the_server(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "/v1/realtime" in ANSI.sub("", result.output)
     bad = CliRunner().invoke(cli_app, ["serve", "--protocol", "sip", "--port", "0"])
     assert bad.exit_code == 2 and "unknown protocol" in ANSI.sub("", bad.output)
+
+
+async def test_backpressure_keeps_client_events_flowing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client that does not read: engine output waits in the engine's queue, the
+    server's send buffer stays bounded and the client's cancel is still handled."""
+    monkeypatch.setattr(session_module, "_OUTBOX_HIGH", 64 * 1024)
+    monkeypatch.setattr(session_module, "_OUTBOX_LOW", 16 * 1024)
+    engine = MockEngine(responses=["word " * 400])  # 133 s of audio, generated instantly
+    async with serve(engine) as server, RawClient(realtime_path(server)) as c:
+        [session] = server.sessions
+        gate = asyncio.Event()
+        send = session.websocket.send
+
+        async def congested_send(message: Any, *args: Any, **kwargs: Any) -> None:
+            await gate.wait()
+            await send(message, *args, **kwargs)
+
+        session.websocket.send = congested_send  # type: ignore[method-assign]
+        await c.send("response.create")
+        await wait_for(lambda: session._outbox_bytes > 64 * 1024)
+        await asyncio.sleep(0.2)
+        assert session._outbox_bytes < 64 * 1024 + 20_000  # stopped taking engine events
+        await c.send("response.cancel")
+        await wait_for(lambda: session._active is None or session._active.cancel_reason)
+        gate.set()
+        done = (await c.wait("response.done"))["response"]
+        assert done["status"] == "cancelled"
+        assert done["status_details"]["reason"] == "client_cancelled"
+        assert len(c.audio_bytes()) / 2 / 24_000 < 5.0  # not the 133 s the engine generated
+
+
+async def test_session_expiry() -> None:
+    server = serve(MockEngine(), max_session_duration=0.3)
+    async with server as srv, RawClient(realtime_path(srv)) as c:
+        assert c.of("session.created")[0]["session"]["expires_at"] > 0
+        await wait_for(lambda: c.errors())
+        assert c.errors()[0]["code"] == "session_expired"
+        assert c._reader is not None
+        await asyncio.wait_for(c._reader, 5)
+        assert c.ws is not None and c.ws.close_code == 1000
