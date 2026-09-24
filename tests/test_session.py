@@ -1,0 +1,388 @@
+"""End-to-end tests of AgentSession with the native mock engine and the cascade."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
+from typing import Any
+
+import pytest
+
+from voice_agent_next import (
+    Agent,
+    AgentSession,
+    AgentState,
+    AudioFrame,
+    CascadeOptions,
+    ChatMessage,
+    LLMCapabilities,
+    SessionOptions,
+    function_tool,
+)
+from voice_agent_next.chat import AudioContent
+from voice_agent_next.errors import ConfigurationError
+from voice_agent_next.metrics import TurnMetrics
+from voice_agent_next.providers.energy import EnergyVAD
+from voice_agent_next.providers.mock import (
+    MockEngine,
+    MockLLM,
+    MockSTT,
+    MockToolCall,
+    MockTTS,
+    MockTurnDetector,
+    synth_speech,
+)
+from voice_agent_next.transports import FileTransport, LoopbackTransport
+
+
+class Recorder:
+    def __init__(self, session: AgentSession) -> None:
+        self.events: list[tuple[str, Any]] = []
+        for name in ("user_transcript", "agent_transcript", "tool_call", "tool_result",
+                     "interrupted", "metrics", "agent_state_changed", "error", "close"):  # fmt: skip
+            session.on(name, self._make(name))
+
+    def _make(self, name: str) -> Callable[[Any], None]:
+        return lambda ev: self.events.append((name, ev))
+
+    def of(self, name: str) -> list[Any]:
+        return [ev for n, ev in self.events if n == name]
+
+    def turn_metrics(self) -> list[TurnMetrics]:
+        return [m for m in self.of("metrics") if isinstance(m, TurnMetrics)]
+
+    def states(self) -> list[AgentState]:
+        return [ev.new_state for ev in self.of("agent_state_changed")]
+
+
+async def speak(
+    transport: LoopbackTransport, seconds: float = 0.8, then_silence: float = 0.6
+) -> None:
+    """The simulated user says something, then stays quiet (fast, not real time)."""
+    await transport.play_user_audio(synth_speech(seconds, 16_000), realtime=False)
+    await transport.play_user_audio(AudioFrame.silence(then_silence, 16_000), realtime=False)
+
+
+async def wait_for(predicate: Callable[[], bool], timeout: float = 5.0) -> None:
+    async def poll() -> None:
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout)
+
+
+def mock_cascade(**kw: Any) -> AgentSession:
+    return AgentSession(
+        stt=kw.pop("stt", MockSTT(transcripts=kw.pop("transcripts", None))),
+        llm=kw.pop("llm", MockLLM(responses=kw.pop("responses", None))),
+        tts=kw.pop("tts", MockTTS()),
+        vad=kw.pop("vad", EnergyVAD()),
+        turn_detector=kw.pop("turn_detector", None),
+        cascade_options=kw.pop("cascade_options", CascadeOptions(min_endpointing_delay=0.0)),
+        **kw,
+    )
+
+
+ENGINES = ["native", "cascade"]
+
+
+def make_session(kind: str, **kw: Any) -> AgentSession:
+    if kind == "native":
+        return AgentSession(
+            MockEngine(transcripts=kw.pop("transcripts", None), responses=kw.pop("responses", None),
+                       realtime_factor=kw.pop("realtime_factor", 0.0)),
+            **kw,
+        )  # fmt: skip
+    rf = kw.pop("realtime_factor", 0.0)
+    return mock_cascade(tts=MockTTS(realtime_factor=rf), **kw)
+
+
+# ----------------------------------------------------------------------------- basics
+
+
+def test_session_requires_engine_or_components() -> None:
+    with pytest.raises(ConfigurationError):
+        AgentSession()
+    with pytest.raises(ConfigurationError):
+        AgentSession("mock", llm="mock")
+    with pytest.raises(ConfigurationError):  # cascade without STT needs an audio LLM
+        AgentSession(llm="mock", tts="mock", vad="energy")
+
+
+@pytest.mark.parametrize("kind", ENGINES)
+async def test_greeting_then_turn_then_close_on_hangup(kind: str) -> None:
+    session = make_session(kind, transcripts=["hello agent"], responses=["Hi! Nice to meet you."])
+    rec = Recorder(session)
+    transport = LoopbackTransport()
+    await session.start(Agent("be nice", greeting="Welcome."), transport)
+    await wait_for(
+        lambda: session.agent_state == AgentState.LISTENING and len(rec.of("agent_transcript")) >= 1
+    )
+    await speak(transport)
+    await wait_for(lambda: any("Nice to meet" in e.delta for e in rec.of("agent_transcript")))
+    await wait_for(lambda: len(rec.turn_metrics()) == 1)
+    transport.end_user_audio()  # user hangs up
+    await asyncio.wait_for(session.wait_closed(), 2)
+
+    finals = [e.text for e in rec.of("user_transcript") if e.is_final]
+    assert finals == ["hello agent"]
+    roles = [(i.role, i.text) for i in session.history.items if isinstance(i, ChatMessage)]
+    assert roles == [
+        ("assistant", "Welcome."),
+        ("user", "hello agent"),
+        ("assistant", "Hi! Nice to meet you."),
+    ]
+    m = rec.turn_metrics()[0]  # (user audio was pushed faster than real time: values not asserted)
+    assert m.voice_to_voice is not None and m.response_ttfb is not None
+    assert not m.interrupted
+    assert rec.states()[-1] == AgentState.CLOSED
+    assert rec.of("close")[0].reason == "user_disconnected"
+    played = sum(p.frame.duration for p in transport.played_log)
+    assert played > 1.0  # greeting + answer were played
+
+
+@pytest.mark.parametrize("kind", ENGINES)
+async def test_tool_call_round_trip(kind: str) -> None:
+    calls: list[str] = []
+
+    @function_tool
+    async def get_weather(city: str) -> str:
+        """Weather lookup."""
+        calls.append(city)
+        return f"sunny in {city}"
+
+    session = make_session(
+        kind,
+        transcripts=["weather in paris?"],
+        responses=[MockToolCall("get_weather", {"city": "Paris"}), "It is sunny in Paris."],
+    )
+    rec = Recorder(session)
+    transport = LoopbackTransport()
+    await session.start(Agent("x", tools=[get_weather]), transport)
+    await speak(transport)
+    await wait_for(lambda: len(rec.turn_metrics()) == 1)
+    await session.aclose()
+
+    assert calls == ["Paris"]
+    assert rec.of("tool_result")[0].output.output == "sunny in Paris"
+    kinds = [getattr(i, "role", i.type) for i in session.history.items]
+    assert kinds == ["user", "function_call", "function_call_output", "assistant"]
+    m = rec.turn_metrics()[0]
+    assert m.tool_calls == 1 and m.voice_to_voice is not None
+    # no LISTENING flicker between the tool round and the spoken answer
+    states = rec.states()
+    first_speaking = states.index(AgentState.SPEAKING)
+    assert AgentState.LISTENING not in states[states.index(AgentState.THINKING) : first_speaking]
+
+
+@pytest.mark.parametrize("kind", ENGINES)
+async def test_max_tool_steps_stops_loop(kind: str) -> None:
+    @function_tool
+    async def again() -> str:
+        """Loop forever."""
+        return "call me again"
+
+    session = make_session(kind, transcripts=["go"], responses=[MockToolCall("again")] * 10)
+    session.options.max_tool_steps = 2
+    rec = Recorder(session)
+    transport = LoopbackTransport()
+    await session.start(Agent("x", tools=[again]), transport)
+    await speak(transport)
+    await wait_for(lambda: len(rec.turn_metrics()) == 1)
+    await asyncio.sleep(0.1)
+    await session.aclose()
+    assert len(rec.of("tool_call")) == 3  # 2 allowed rounds + the one that hit the limit
+    assert session.agent_state == AgentState.CLOSED
+
+
+# ----------------------------------------------------------------------- interruption
+
+
+@pytest.mark.parametrize("kind", ENGINES)
+async def test_barge_in_truncates_to_what_was_heard(kind: str) -> None:
+    long_answer = "This is a very long answer that keeps going and going for quite a while. " * 3
+    session = make_session(
+        kind, transcripts=["tell me a story"], responses=[long_answer], realtime_factor=1.0
+    )
+    rec = Recorder(session)
+    transport = LoopbackTransport(realtime_playout=True)
+    await session.start(Agent("x"), transport)
+    await speak(transport, 0.6, 0.5)
+    await wait_for(lambda: session.agent_state == AgentState.SPEAKING)
+    await asyncio.sleep(1.0)  # let ~1 s of the answer play
+    await transport.play_user_audio(synth_speech(0.4, 16_000), realtime=False)  # barge in
+    await wait_for(lambda: bool(rec.of("interrupted")))
+    await session.aclose()
+
+    ev = rec.of("interrupted")[0]
+    assert 0.5 < ev.played < 2.5
+    assert transport.clear_times, "transport playback must be cleared"
+    assistant = [
+        i for i in session.history.items if isinstance(i, ChatMessage) and i.role == "assistant"
+    ]
+    assert assistant[-1].interrupted
+    assert 0 < len(assistant[-1].text) < len(long_answer.strip())
+    m = rec.turn_metrics()[0]
+    assert m.interrupted and m.agent_speech_duration == pytest.approx(ev.played, abs=0.3)
+    # the engine was told how much was heard
+    conn = session.connection
+    if kind == "native":
+        assert conn.truncations and conn.truncations[0][1] == pytest.approx(
+            ev.played * 1000, abs=100
+        )  # type: ignore[attr-defined]
+    engine_msg = conn.chat_ctx.get(assistant[-1].id)  # type: ignore[attr-defined]
+    assert engine_msg.interrupted and len(engine_msg.text) < len(long_answer.strip())
+
+
+async def test_interruptions_can_be_disabled() -> None:
+    session = make_session("native", responses=["A long answer that takes a while to say out loud."],
+                           realtime_factor=1.0, options=SessionOptions(allow_interruptions=False))  # fmt: skip
+    rec = Recorder(session)
+    transport = LoopbackTransport(realtime_playout=True)
+    await session.start(Agent("x"), transport)
+    await speak(transport, 0.5, 0.5)
+    await wait_for(lambda: session.agent_state == AgentState.SPEAKING)
+    await transport.play_user_audio(synth_speech(0.3, 16_000), realtime=False)
+    await asyncio.sleep(0.3)
+    assert rec.of("interrupted") == []
+    await session.aclose()
+
+
+async def test_generate_reply_and_say_api() -> None:
+    session = make_session("native", responses=["Typed answer."])
+    rec = Recorder(session)
+    await session.start(Agent("x"), LoopbackTransport())
+    await session.generate_reply(user_input="typed question")
+    await wait_for(lambda: any("Typed answer" in e.delta for e in rec.of("agent_transcript")))
+    await session.say("Verbatim text.")
+    await wait_for(lambda: any("Verbatim text." in e.delta for e in rec.of("agent_transcript")))
+    await session.aclose()
+    texts = [i.text for i in session.history.items if isinstance(i, ChatMessage)]
+    assert texts == ["typed question", "Typed answer.", "Verbatim text."]
+
+
+# ---------------------------------------------------------------------- cascade only
+
+
+async def test_cascade_turn_detector_delays_commit_until_user_is_done() -> None:
+    td = MockTurnDetector(probability=0.1)  # "user is not done"
+    session = mock_cascade(
+        transcripts=["I would like to", "book a table"],
+        turn_detector=td,
+        cascade_options=CascadeOptions(min_endpointing_delay=0.0, max_endpointing_delay=0.6),
+    )
+    rec = Recorder(session)
+    transport = LoopbackTransport()
+    await session.start(Agent("x"), transport)
+    await speak(transport, 0.6, 0.55)  # pause long enough for VAD end-of-speech (0.5 s)
+    await asyncio.sleep(0.2)  # within max_endpointing_delay: not committed yet
+    assert not [e for e in rec.of("user_transcript") if e.is_final]
+    await speak(transport, 0.6, 0.55)  # user continues -> same turn
+    await wait_for(lambda: bool([e for e in rec.of("user_transcript") if e.is_final]), 3)
+    await session.aclose()
+    finals = [e.text for e in rec.of("user_transcript") if e.is_final]
+    assert finals == ["I would like to book a table"]
+    assert td.calls >= 2
+
+
+async def test_cascade_confident_turn_detector_commits_fast() -> None:
+    session = mock_cascade(
+        transcripts=["book a table."],
+        turn_detector=MockTurnDetector(),
+        cascade_options=CascadeOptions(min_endpointing_delay=0.0, max_endpointing_delay=5.0),
+    )
+    rec = Recorder(session)
+    transport = LoopbackTransport()
+    await session.start(Agent("x"), transport)
+    await speak(transport)
+    await wait_for(lambda: bool(rec.turn_metrics()), 2)  # far below max_endpointing_delay
+    await session.aclose()
+
+
+async def test_cascade_ignores_noise_without_transcript() -> None:
+    session = mock_cascade(stt=MockSTT(default_text=""))
+    rec = Recorder(session)
+    transport = LoopbackTransport()
+    await session.start(Agent("x"), transport)
+    await speak(transport)
+    await asyncio.sleep(0.3)
+    await session.aclose()
+    assert not rec.of("agent_transcript")
+    assert session.history.items == []
+
+
+async def test_half_cascade_passes_user_audio_to_audio_llm() -> None:
+    class AudioLLM(MockLLM):
+        def __init__(self, **kw: Any) -> None:
+            super().__init__(**kw)
+            self.capabilities = LLMCapabilities(audio_input=True)
+
+    llm = AudioLLM(responses=["I heard you."])
+    session = AgentSession(llm=llm, tts=MockTTS(), vad=EnergyVAD(),
+                           cascade_options=CascadeOptions(min_endpointing_delay=0.0))  # fmt: skip
+    rec = Recorder(session)
+    transport = LoopbackTransport()
+    await session.start(Agent("x"), transport)
+    await speak(transport, 0.7, 0.6)
+    await wait_for(lambda: any("I heard you" in e.delta for e in rec.of("agent_transcript")))
+    await session.aclose()
+    user_msg = llm.requests[0].last_message("user")
+    assert user_msg is not None and isinstance(user_msg.content[0], AudioContent)
+    assert user_msg.content[0].frame.duration > 0.6
+
+
+async def test_cascade_streams_sentences_to_tts_and_cleans_markdown() -> None:
+    tts = MockTTS()
+    session = mock_cascade(
+        transcripts=["hi"], responses=["**Hello** there, friend. Here is `code`. Bye!"], tts=tts
+    )
+    rec = Recorder(session)
+    transport = LoopbackTransport()
+    await session.start(Agent("x"), transport)
+    await speak(transport)
+    await wait_for(lambda: bool(rec.turn_metrics()))
+    await session.aclose()
+    assert tts.requests == ["Hello there, friend.", "Here is code.", "Bye!"]
+    spoken = "".join(e.delta for e in rec.of("agent_transcript"))
+    assert "**" not in spoken and "`" not in spoken
+
+
+async def test_file_transport_end_to_end(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from voice_agent_next.audio import read_wav, write_wav
+
+    src = tmp_path / "in.wav"
+    out = tmp_path / "out.wav"
+    write_wav(src, AudioFrame.concat([AudioFrame.silence(0.3, 16_000), synth_speech(0.8, 16_000)]))
+    session = make_session("native", responses=["File based answer."])
+    transport = FileTransport(src, out, realtime=False, trailing_silence=0.8, hold=0.5)
+    await asyncio.wait_for(session.run(Agent("x"), transport), 10)
+    reply = read_wav(out)
+    assert reply.sample_rate == 24_000 and reply.duration > 0.5
+
+
+@pytest.mark.parametrize("kind", ENGINES)
+async def test_voice_to_voice_latency_matches_external_measurement(kind: str) -> None:
+    from voice_agent_next.utils import now
+
+    if kind == "native":
+        session = AgentSession(MockEngine(response_delay=0.3, realtime_factor=1.0))
+        expected = 0.4 + 0.3  # engine VAD min_silence_duration + response delay
+    else:
+        session = mock_cascade(
+            llm=MockLLM(ttft=0.3), tts=MockTTS(realtime_factor=1.0),
+            vad=EnergyVAD(min_silence_duration=0.4),
+        )  # fmt: skip
+        expected = 0.4 + 0.3  # VAD silence + LLM time-to-first-token
+    rec = Recorder(session)
+    transport = LoopbackTransport(realtime_playout=True)
+    await session.start(Agent("x"), transport)
+    await transport.play_user_audio(synth_speech(0.6, 16_000))  # real time
+    speech_end = now()
+    await transport.play_user_audio(AudioFrame.silence(1.5, 16_000))
+    await wait_for(lambda: bool(rec.turn_metrics()), 5)
+    await session.aclose()
+    m = rec.turn_metrics()[0]
+    heard = transport.played_log[0].start_time - speech_end  # what the simulated user measured
+    assert m.voice_to_voice == pytest.approx(expected, abs=0.15)
+    assert m.voice_to_voice == pytest.approx(heard, abs=0.08)
+    assert m.end_of_turn_delay is not None and m.end_of_turn_delay == pytest.approx(0.4, abs=0.1)

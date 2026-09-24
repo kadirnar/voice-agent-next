@@ -1,0 +1,223 @@
+"""Metrics emitted by components and the session.
+
+Every component (STT, LLM, TTS, VAD, turn detector, engine) is an
+:class:`~voice_agent_next.utils.EventEmitter` and emits ``"metrics"`` events with one
+of the dataclasses below. :class:`~voice_agent_next.session.AgentSession` re-emits
+them and adds per-turn :class:`TurnMetrics` (voice-to-voice latency etc.).
+
+All durations are in **seconds**; ``timestamp`` is wall-clock ``time.time()``.
+"""
+
+from __future__ import annotations
+
+import math
+import time
+from collections.abc import Iterable, Sequence
+from dataclasses import asdict, dataclass, field
+from typing import Any, Literal, TypeAlias
+
+__all__ = [
+    "EOTMetrics",
+    "EngineMetrics",
+    "LLMMetrics",
+    "Metrics",
+    "STTMetrics",
+    "TTSMetrics",
+    "TurnMetrics",
+    "UsageSummary",
+    "VADMetrics",
+    "metrics_to_dict",
+    "percentile",
+    "summarize",
+]
+
+
+def _ts() -> float:
+    return time.time()
+
+
+@dataclass(slots=True, kw_only=True)
+class STTMetrics:
+    provider: str
+    model: str
+    request_id: str
+    audio_duration: float = 0.0
+    """Seconds of audio sent to the recognizer."""
+    duration: float = 0.0
+    """Processing time for batch recognition (0 for streaming)."""
+    latency: float | None = None
+    """Streaming: time from end-of-input/flush to the final transcript."""
+    streamed: bool = False
+    error: str | None = None
+    timestamp: float = field(default_factory=_ts)
+    type: Literal["stt"] = "stt"
+
+
+@dataclass(slots=True, kw_only=True)
+class LLMMetrics:
+    provider: str
+    model: str
+    request_id: str
+    ttft: float | None = None
+    """Time to first token (text delta or tool call)."""
+    duration: float = 0.0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+    tokens_per_second: float = 0.0
+    cancelled: bool = False
+    error: str | None = None
+    timestamp: float = field(default_factory=_ts)
+    type: Literal["llm"] = "llm"
+
+
+@dataclass(slots=True, kw_only=True)
+class TTSMetrics:
+    provider: str
+    model: str
+    request_id: str
+    ttfb: float | None = None
+    """Time from the first text input to the first audio byte."""
+    duration: float = 0.0
+    audio_duration: float = 0.0
+    characters: int = 0
+    streamed: bool = False
+    cancelled: bool = False
+    error: str | None = None
+    timestamp: float = field(default_factory=_ts)
+    type: Literal["tts"] = "tts"
+
+
+@dataclass(slots=True, kw_only=True)
+class VADMetrics:
+    provider: str
+    inference_count: int = 0
+    inference_duration_total: float = 0.0
+    audio_duration: float = 0.0
+    timestamp: float = field(default_factory=_ts)
+    type: Literal["vad"] = "vad"
+
+
+@dataclass(slots=True, kw_only=True)
+class EOTMetrics:
+    """End-of-turn (semantic turn detection) inference."""
+
+    provider: str
+    model: str
+    probability: float
+    threshold: float
+    inference_duration: float
+    end_of_turn: bool
+    timestamp: float = field(default_factory=_ts)
+    type: Literal["eot"] = "eot"
+
+
+@dataclass(slots=True, kw_only=True)
+class EngineMetrics:
+    """One response of a speech-to-speech engine."""
+
+    provider: str
+    model: str
+    response_id: str
+    ttfb: float | None = None
+    """Time from the response trigger (turn commit / create_response) to the first audio."""
+    duration: float = 0.0
+    input_text_tokens: int = 0
+    input_audio_tokens: int = 0
+    output_text_tokens: int = 0
+    output_audio_tokens: int = 0
+    cached_tokens: int = 0
+    cancelled: bool = False
+    timestamp: float = field(default_factory=_ts)
+    type: Literal["engine"] = "engine"
+
+
+@dataclass(slots=True, kw_only=True)
+class TurnMetrics:
+    """Session-level metrics for one agent turn (user speech -> agent reply)."""
+
+    turn_id: str
+    voice_to_voice: float | None = None
+    """User stopped speaking -> first agent audio handed to the transport."""
+    end_of_turn_delay: float | None = None
+    """User stopped speaking -> turn committed (endpointing delay)."""
+    response_ttfb: float | None = None
+    """Turn committed -> first agent audio."""
+    agent_speech_duration: float = 0.0
+    interrupted: bool = False
+    tool_calls: int = 0
+    timestamp: float = field(default_factory=_ts)
+    type: Literal["turn"] = "turn"
+
+
+Metrics: TypeAlias = (
+    STTMetrics | LLMMetrics | TTSMetrics | VADMetrics | EOTMetrics | EngineMetrics | TurnMetrics
+)
+
+
+def metrics_to_dict(m: Metrics) -> dict[str, Any]:
+    return asdict(m)
+
+
+def percentile(values: Sequence[float], q: float) -> float:
+    """Linear-interpolated percentile (``q`` in 0..100). NaN for empty input."""
+    xs = sorted(v for v in values if v is not None and not math.isnan(v))
+    if not xs:
+        return math.nan
+    if len(xs) == 1:
+        return xs[0]
+    k = (len(xs) - 1) * (q / 100.0)
+    lo = math.floor(k)
+    hi = math.ceil(k)
+    if lo == hi:
+        return xs[lo]
+    return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
+
+
+def summarize(values: Iterable[float | None]) -> dict[str, float]:
+    """count/mean/min/p50/p90/p95/p99/max of the non-None values."""
+    xs = [v for v in values if v is not None and not math.isnan(v)]
+    if not xs:
+        return {"count": 0}
+    return {
+        "count": len(xs),
+        "mean": sum(xs) / len(xs),
+        "min": min(xs),
+        "p50": percentile(xs, 50),
+        "p90": percentile(xs, 90),
+        "p95": percentile(xs, 95),
+        "p99": percentile(xs, 99),
+        "max": max(xs),
+    }
+
+
+@dataclass
+class UsageSummary:
+    """Aggregates usage across a session for cost estimation."""
+
+    stt_audio_seconds: float = 0.0
+    llm_prompt_tokens: int = 0
+    llm_completion_tokens: int = 0
+    llm_cached_tokens: int = 0
+    tts_characters: int = 0
+    tts_audio_seconds: float = 0.0
+    engine_input_audio_tokens: int = 0
+    engine_output_audio_tokens: int = 0
+    engine_input_text_tokens: int = 0
+    engine_output_text_tokens: int = 0
+
+    def add(self, m: Metrics) -> None:
+        if isinstance(m, STTMetrics):
+            self.stt_audio_seconds += m.audio_duration
+        elif isinstance(m, LLMMetrics):
+            self.llm_prompt_tokens += m.prompt_tokens
+            self.llm_completion_tokens += m.completion_tokens
+            self.llm_cached_tokens += m.cached_tokens
+        elif isinstance(m, TTSMetrics):
+            self.tts_characters += m.characters
+            self.tts_audio_seconds += m.audio_duration
+        elif isinstance(m, EngineMetrics):
+            self.engine_input_audio_tokens += m.input_audio_tokens
+            self.engine_output_audio_tokens += m.output_audio_tokens
+            self.engine_input_text_tokens += m.input_text_tokens
+            self.engine_output_text_tokens += m.output_text_tokens

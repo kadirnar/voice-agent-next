@@ -1,0 +1,22 @@
+name: Feature / task
+description: A unit of work on the roadmap
+labels: ["type:feature"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should exist when this is done, and why it matters.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope / design notes
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Checklist that defines "done" (tests, docs, platforms).
+    validations:
+      required: true

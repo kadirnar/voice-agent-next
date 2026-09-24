@@ -1,0 +1,21 @@
+name: Bug report
+description: Something does not work as documented
+labels: ["type:bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      render: python
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Output of `van doctor`
+      render: text
