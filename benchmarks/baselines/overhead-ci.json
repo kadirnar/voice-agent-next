@@ -15,5 +15,642 @@
       "require_ci_separation": false
     }
   },
-  "entries": {}
+  "entries": {
+    "linux": {
+      "tier": "smoke",
+      "run_id": "overhead-Linux",
+      "created": "2026-09-24T17:21:58+00:00",
+      "config_sha256": "a1ecfb4d3ae05747a9c30180f91c167a83b7f56800013015fae0ae3ceb70fc4c",
+      "git_sha": "e05d1db0864bbfcfa3bdd0f632858fe1aa2412a4",
+      "machine": "AMD EPYC 7763 64-Core Processor · 2 threads · Linux 6.17.0-1022-azure · Python 3.12.3",
+      "metrics": {
+        "micro.resample_16k_to_24k_us": {
+          "value": 9.2828,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            9.0588,
+            14.1918
+          ],
+          "n": 9
+        },
+        "micro.resample_16k_to_24k_numpy_us": {
+          "value": 79.2501,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            78.1088,
+            87.0893
+          ],
+          "n": 9
+        },
+        "micro.resample_48k_to_16k_us": {
+          "value": 14.401,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            14.3378,
+            16.0191
+          ],
+          "n": 9
+        },
+        "micro.frame_rms_us": {
+          "value": 6.3008,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            6.2681,
+            7.7614
+          ],
+          "n": 9
+        },
+        "micro.frame_concat_us": {
+          "value": 1.1628,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            1.1547,
+            1.1901
+          ],
+          "n": 9
+        },
+        "micro.frame_slice_us": {
+          "value": 1.017,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            1.0049,
+            1.073
+          ],
+          "n": 9
+        },
+        "micro.energy_vad_us": {
+          "value": 14.6198,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            14.517,
+            14.7371
+          ],
+          "n": 9
+        },
+        "micro.silence_trimmer_us": {
+          "value": 20.2588,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            20.1524,
+            20.7565
+          ],
+          "n": 9
+        },
+        "micro.g711_ulaw_encode_us": {
+          "value": 19.906,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            19.7919,
+            20.0155
+          ],
+          "n": 9
+        },
+        "micro.g711_ulaw_decode_us": {
+          "value": 2.4857,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            2.4733,
+            2.5171
+          ],
+          "n": 9
+        },
+        "micro.g711_alaw_encode_us": {
+          "value": 22.5874,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            22.4831,
+            23.1081
+          ],
+          "n": 9
+        },
+        "micro.g711_alaw_decode_us": {
+          "value": 2.4702,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            2.4569,
+            2.5099
+          ],
+          "n": 9
+        },
+        "micro.sentence_segmenter_us": {
+          "value": 4.3382,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            4.2709,
+            4.4555
+          ],
+          "n": 9
+        },
+        "micro.tts_text_filter_us": {
+          "value": 13.5961,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            13.5425,
+            13.8764
+          ],
+          "n": 9
+        },
+        "micro.event_emit_us": {
+          "value": 1.1145,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            1.1133,
+            1.1264
+          ],
+          "n": 9
+        },
+        "micro.chan_roundtrip_us": {
+          "value": 0.1814,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            0.1805,
+            0.1822
+          ],
+          "n": 9
+        },
+        "e2e.engine.v2v_ms": {
+          "value": 402.092,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            401.405,
+            403.134
+          ],
+          "n": 6
+        },
+        "e2e.engine.overhead_ms": {
+          "value": 2.092,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            1.405,
+            3.134
+          ],
+          "n": 6
+        },
+        "e2e.engine-delay.v2v_ms": {
+          "value": 652.587,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            652.17,
+            653.254
+          ],
+          "n": 6
+        },
+        "e2e.engine-delay.overhead_ms": {
+          "value": 2.587,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            2.171,
+            3.254
+          ],
+          "n": 6
+        },
+        "e2e.cascade.v2v_ms": {
+          "value": 602.433,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            601.787,
+            602.704
+          ],
+          "n": 6
+        },
+        "e2e.cascade.overhead_ms": {
+          "value": 2.433,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            1.788,
+            2.704
+          ],
+          "n": 6
+        },
+        "e2e.cascade-delay.v2v_ms": {
+          "value": 614.906,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            614.323,
+            616.282
+          ],
+          "n": 6
+        },
+        "e2e.cascade-delay.overhead_ms": {
+          "value": 4.906,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            4.323,
+            6.282
+          ],
+          "n": 6
+        },
+        "e2e.overhead_ms": {
+          "value": 2.677,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            2.361,
+            3.196
+          ],
+          "n": 24
+        },
+        "e2e.frame_jitter_ms": {
+          "value": 0.334,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            0.239,
+            0.457
+          ],
+          "n": 24
+        },
+        "e2e.loop_lag_ms": {
+          "value": 1.401,
+          "stat": "p99",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            1.383,
+            1.412
+          ],
+          "n": 4421
+        },
+        "flush.flush_ms": {
+          "value": 0.059,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            0.053,
+            0.07
+          ],
+          "n": 10
+        }
+      }
+    },
+    "windows": {
+      "tier": "smoke",
+      "run_id": "overhead-Windows",
+      "created": "2026-09-24T17:22:12+00:00",
+      "config_sha256": "a1ecfb4d3ae05747a9c30180f91c167a83b7f56800013015fae0ae3ceb70fc4c",
+      "git_sha": "e05d1db0864bbfcfa3bdd0f632858fe1aa2412a4",
+      "machine": "AMD64 Family 25 Model 17 Stepping 1, AuthenticAMD · 2 threads · Windows 2025Server · Python 3.12.10",
+      "metrics": {
+        "micro.resample_16k_to_24k_us": {
+          "value": 7.5734,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            7.5388,
+            8.9573
+          ],
+          "n": 9
+        },
+        "micro.resample_16k_to_24k_numpy_us": {
+          "value": 66.2512,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            65.5092,
+            67.1568
+          ],
+          "n": 9
+        },
+        "micro.resample_48k_to_16k_us": {
+          "value": 7.4867,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            7.4701,
+            7.682
+          ],
+          "n": 9
+        },
+        "micro.frame_rms_us": {
+          "value": 5.7169,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            5.6855,
+            5.8478
+          ],
+          "n": 9
+        },
+        "micro.frame_concat_us": {
+          "value": 1.0854,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            1.0754,
+            1.1052
+          ],
+          "n": 9
+        },
+        "micro.frame_slice_us": {
+          "value": 0.868,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            0.8651,
+            0.8695
+          ],
+          "n": 9
+        },
+        "micro.energy_vad_us": {
+          "value": 10.6098,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            10.3613,
+            12.7024
+          ],
+          "n": 9
+        },
+        "micro.silence_trimmer_us": {
+          "value": 16.2916,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            16.1836,
+            16.5095
+          ],
+          "n": 9
+        },
+        "micro.g711_ulaw_encode_us": {
+          "value": 20.0987,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            20.0759,
+            26.5419
+          ],
+          "n": 9
+        },
+        "micro.g711_ulaw_decode_us": {
+          "value": 2.2851,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            2.2805,
+            2.2966
+          ],
+          "n": 9
+        },
+        "micro.g711_alaw_encode_us": {
+          "value": 22.3466,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            22.2045,
+            27.485
+          ],
+          "n": 9
+        },
+        "micro.g711_alaw_decode_us": {
+          "value": 2.3058,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            2.2942,
+            2.3166
+          ],
+          "n": 9
+        },
+        "micro.sentence_segmenter_us": {
+          "value": 3.7405,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            3.7102,
+            3.9793
+          ],
+          "n": 9
+        },
+        "micro.tts_text_filter_us": {
+          "value": 11.8429,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            11.7727,
+            11.8808
+          ],
+          "n": 9
+        },
+        "micro.event_emit_us": {
+          "value": 0.9129,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            0.9095,
+            0.9282
+          ],
+          "n": 9
+        },
+        "micro.chan_roundtrip_us": {
+          "value": 0.1751,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            0.1745,
+            0.1759
+          ],
+          "n": 9
+        },
+        "e2e.engine.v2v_ms": {
+          "value": 402.921,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            401.316,
+            410.524
+          ],
+          "n": 6
+        },
+        "e2e.engine.overhead_ms": {
+          "value": 2.92,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            1.316,
+            10.524
+          ],
+          "n": 6
+        },
+        "e2e.engine-delay.v2v_ms": {
+          "value": 651.311,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            641.998,
+            655.331
+          ],
+          "n": 6
+        },
+        "e2e.engine-delay.overhead_ms": {
+          "value": 1.31,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            -8.002,
+            5.331
+          ],
+          "n": 6
+        },
+        "e2e.cascade.v2v_ms": {
+          "value": 585.527,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            581.923,
+            600.403
+          ],
+          "n": 6
+        },
+        "e2e.cascade.overhead_ms": {
+          "value": -14.473,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            -18.077,
+            0.403
+          ],
+          "n": 6
+        },
+        "e2e.cascade-delay.v2v_ms": {
+          "value": 597.991,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            586.074,
+            620.637
+          ],
+          "n": 6
+        },
+        "e2e.cascade-delay.overhead_ms": {
+          "value": -12.009,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            -23.925,
+            10.637
+          ],
+          "n": 6
+        },
+        "e2e.overhead_ms": {
+          "value": 1.188,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            -11.238,
+            2.331
+          ],
+          "n": 24
+        },
+        "e2e.frame_jitter_ms": {
+          "value": 6.679,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            5.726,
+            8.163
+          ],
+          "n": 24
+        },
+        "e2e.loop_lag_ms": {
+          "value": 15.01,
+          "stat": "p99",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            14.778,
+            15.247
+          ],
+          "n": 6203
+        },
+        "flush.flush_ms": {
+          "value": 0.066,
+          "stat": "p50",
+          "unit": "ms",
+          "rule": "latency",
+          "ci95": [
+            0.06,
+            0.076
+          ],
+          "n": 10
+        }
+      }
+    }
+  }
 }
