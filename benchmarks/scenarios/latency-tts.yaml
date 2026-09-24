@@ -1,0 +1,27 @@
+# T1 latency — stimuli synthesized with a TTS provider instead of synthetic tones.
+#
+# Real speech matters for engines with a real STT / audio model (a tone is not speech).
+# Every utterance is synthesized once before the run, resampled to 16 kHz, normalized to
+# -20 dBFS and its speech span annotated automatically on the clean audio.
+#
+# `tts: mock` keeps this file runnable offline; switch it to a local or cloud TTS spec
+# (for example `kokoro` or `{provider: cartesia/sonic-2, voice: <id>}`) for real speech.
+name: latency-tts
+version: 1
+description: >-
+  Scripted questions synthesized with a registered TTS (default: mock, swap for a real
+  voice); speech boundaries annotated automatically.
+sample_rate: 16000
+loudness_dbfs: -20.0
+lead_in: 0.5
+stimuli: tts
+tts: mock
+reply_timeout: 8.0
+gap_after_reply: 0.3
+turns:
+  - {id: "time", text: "What time is it?"}
+  - {id: "weather", text: "How is the weather today?"}
+  - {id: "table", text: "Book a table for two."}
+  - {id: "order", text: "Where is my order?"}
+  - {id: "open", text: "Are you open on Sunday?"}
+  - {id: "flight", text: "Change my flight to Friday."}

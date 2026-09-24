@@ -1,0 +1,45 @@
+# T1 latency — longer, more conversational user turns (synthetic speech).
+#
+# Utterances of 1-3.5 s (`pause` adds a minimum silence after an utterance). Useful to
+# see how endpointing and STT scale with turn length. Run with at least 3 sessions x 40
+# turns for nightly-style numbers:
+#
+#   van bench latency --engine <spec> -s benchmarks/scenarios/latency-conversational.yaml \
+#       --turns 40 --sessions 3
+name: latency-conversational
+version: 1
+description: >-
+  Longer conversational user turns (1-3.5 s of synthetic speech) for endpointing- and
+  STT-sensitive latency measurements.
+sample_rate: 16000
+loudness_dbfs: -20.0
+lead_in: 1.0
+stimuli: synthetic
+reply_timeout: 10.0
+gap_after_reply: 0.5
+turns:
+  - id: intro
+    text: Hi, I would like to know whether you still have tables available for tonight.
+    duration: 3.2
+  - id: party
+    text: We are four people, two adults and two kids.
+    duration: 2.0
+  - id: time
+    text: Around seven thirty would be perfect.
+    duration: 1.6
+  - id: allergy
+    text: One of the kids has a nut allergy, is that a problem for the kitchen?
+    duration: 3.0
+  - id: parking
+    text: Is there parking nearby?
+    duration: 1.1
+    pause: 0.3
+  - id: confirm
+    text: Great, please book it under the name Taylor and send me a confirmation.
+    duration: 3.4
+  - id: change
+    text: Actually, can we make it eight instead?
+    duration: 1.7
+  - id: bye
+    text: Perfect, thank you so much, bye.
+    duration: 1.5

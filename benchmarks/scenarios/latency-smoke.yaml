@@ -1,0 +1,30 @@
+# T1 latency — smoke tier (the default of `van bench latency`).
+#
+# Short scripted questions rendered as deterministic synthetic speech (a tone with
+# syllable-rate modulation): no models, no network, identical audio on every machine.
+# `--turns N` cycles through the list. This file mirrors the built-in scenario of the
+# same name (voice_agent_next.bench.stimuli.BUILTIN_SCENARIOS); a unit test keeps the
+# two identical, so edit both together.
+name: latency-smoke
+version: 1
+description: >-
+  T1 smoke tier: short scripted questions rendered as deterministic synthetic speech
+  (no models, no network). Cycled to the requested number of turns.
+sample_rate: 16000
+chunk: 0.02             # real-time streaming chunk (s)
+loudness_dbfs: -20.0    # RMS of every stimulus' speech span
+lead_in: 0.5            # silence before the first utterance (s)
+stimuli: synthetic
+reply_timeout: 8.0      # no agent speech this long after the user stopped -> missed turn
+gap_after_reply: 0.25   # the caller speaks again once the agent is idle and quiet this long
+turns:
+  - {id: "time", text: "What time is it?", duration: 0.6}
+  - {id: "weather", text: "How is the weather today?", duration: 0.8}
+  - {id: "table", text: "Book a table for two.", duration: 0.7}
+  - {id: "yes", text: "Yes, please.", duration: 0.4}
+  - {id: "order", text: "Where is my order?", duration: 0.6}
+  - {id: "open", text: "Are you open on Sunday?", duration: 0.7}
+  - {id: "card", text: "I lost my card.", duration: 0.5}
+  - {id: "flight", text: "Change my flight to Friday.", duration: 0.9}
+  - {id: "repeat", text: "Can you repeat that?", duration: 0.6}
+  - {id: "thanks", text: "Thanks, that is all.", duration: 0.6}
