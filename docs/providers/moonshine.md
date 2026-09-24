@@ -151,7 +151,20 @@ has already completed the line (after ~0.4 s of silence), a flush returns in ~1 
 session excluded; Silero VAD, Smart Turn v3.2, Ollama `LiquidAI/lfm2.5-1.2b-instruct`,
 Kokoro v1.0 fp16; the runs were made back to back):
 
-MOONSHINE_T1_TABLE
+| STT | v2v p50 | v2v p90 | end-of-turn delay p50 / p90 | STT final after flush p50 / p90 | TTS first audio p50 | dead air (> 2 s) |
+|---|---:|---:|---:|---:|---:|---:|
+| faster-whisper `base` (CPU int8), `StreamAdapter` | 1,220 ms | 1,798 ms | 632 / 822 ms | 372 / 559 ms | 402 ms | 9.1 % |
+| **Moonshine `small-streaming`** (default, `update_interval` 0.5) | **1,118 ms** | **1,578 ms** | **465 / 561 ms** | **208 / 302 ms** | 503 ms | 9.1 % |
+| Moonshine `small-streaming`, `update_interval` 0.2 | 1,145 ms | 1,802 ms | 409 / 560 ms | 146 / 297 ms | 579 ms | 4.5 % |
+| Moonshine `medium-streaming` | 1,400 ms | 2,062 ms | 576 / 770 ms | 315 / 506 ms | 572 ms | 13.6 % |
+
+Moonshine `small-streaming` cuts the end-of-turn delay by ~170 ms at p50 and ~260 ms at p90
+compared with faster-whisper `base`, bringing it close to the cascade's 400 ms floor.
+Inside the pipeline the flush takes longer than it does alone, because it competes for the
+CPU with Smart Turn, Silero and any pass already running. `update_interval: 0.2` takes
+end-of-turn to the floor, but the extra CPU slows the concurrent Kokoro synthesis, so v2v
+does not improve on this 6-core machine. `medium-streaming` is too heavy for this CPU next
+to Kokoro: use it on a faster CPU, or when accuracy matters more than latency.
 
 End-of-turn delay is measured from the end of the user's speech until the turn is
 committed to the LLM. With a turn detector the cascade waits at least 400 ms
