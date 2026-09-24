@@ -362,9 +362,9 @@ class PocketTTS(TTS):
     ) -> Path:
         """Save the state of ``voice`` as ``.safetensors``: reloading it is much faster
         than encoding the audio prompt again, and needs no gated weights."""
-        target = Path(dest).expanduser()
 
         def run() -> Path:
+            target = Path(dest).expanduser()
             state = self._voice_state(str(voice))
             pocket_tts = require("pocket_tts", extra=_EXTRA, package="pocket-tts")
             target.parent.mkdir(parents=True, exist_ok=True)
