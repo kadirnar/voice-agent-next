@@ -155,8 +155,10 @@ def load_audio(path: str | os.PathLike[str]) -> AudioFrame:
         except Exception:  # e.g. float WAV: fall back to soundfile
             pass
     sf = require("soundfile", extra="bench")
-    data, rate = sf.read(str(p), dtype="int16", always_2d=True)
-    mono = data.mean(axis=1).round().astype(np.int16) if data.shape[1] > 1 else data[:, 0]
+    # float32: libsndfile does not rescale float files when asked for integers (FLEURS
+    # ships 32-bit float WAVs), so read floats and convert once
+    data, rate = sf.read(str(p), dtype="float32", always_2d=True)
+    mono = data.mean(axis=1) if data.shape[1] > 1 else data[:, 0]
     return AudioFrame.from_numpy(np.ascontiguousarray(mono), int(rate))
 
 

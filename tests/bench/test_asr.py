@@ -490,3 +490,19 @@ def test_cli_asr_rejects_bad_input(tmp_path: Path) -> None:
     assert "does not stream" in ANSI.sub("", no_vad.output)
     missing = runner.invoke(app, ["bench", "asr", "--stt", "mock", "-d", "nope"])
     assert missing.exit_code == 2
+
+
+def test_load_audio_reads_float_and_flac_files(tmp_path: Path) -> None:
+    sf = pytest.importorskip("soundfile")
+    import numpy as np
+
+    from voice_agent_next.bench.asr_datasets import load_audio
+
+    t = np.arange(8000) / 16_000
+    wave = (0.25 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+    for name, subtype in (("f.wav", "FLOAT"), ("f.flac", "PCM_16")):
+        sf.write(str(tmp_path / name), wave, 16_000, subtype=subtype)
+        audio = load_audio(tmp_path / name)
+        assert audio.sample_rate == 16_000 and audio.channels == 1
+        assert audio.duration == pytest.approx(0.5)
+        assert audio.rms() == pytest.approx(0.25 / np.sqrt(2), rel=0.02)
