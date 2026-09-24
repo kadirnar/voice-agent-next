@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -518,6 +518,8 @@ class CascadeConnection(EngineConnection):
                         )
                     self._turn_interim = ""
                     self._final_event.set()
+                    if self._spec is not None and not self._stt_turns:
+                        self._speculate()  # a late final changed the transcript: start over
                 elif ev.type == STTEventType.START_OF_SPEECH and self._vad is None:
                     self._on_speech_started(None)
                 elif ev.type == STTEventType.END_OF_SPEECH and self._vad is None:
@@ -590,13 +592,15 @@ class CascadeConnection(EngineConnection):
         ):
             return
         self._spec_attempts += 1
-        pending = ChatMessage(role="user", content=[text], id=item_id)
+        # the LLM input a reply started at the commit would get: + user message + placeholder
+        user = ChatMessage(role="user", content=[text], id=item_id)
+        answer = ChatMessage(role="assistant", content=[""], id=new_id("item_"))
         tools = self.tools if engine.llm.capabilities.tool_calling else []
-        reply = _Prefetch(engine.llm.chat(self._llm_context(None, pending), tools=tools))
+        reply = _Prefetch(engine.llm.chat(self._llm_context(None, (user, answer)), tools=tools))
         output = _Output(self, held=True)
         rid = new_id("resp_")
         task = asyncio.create_task(
-            self._respond(rid, None, None, output, reply), name=f"cascade-{rid}"
+            self._respond(rid, None, None, output, reply, answer), name=f"cascade-{rid}"
         )
         self._spec = _Speculation(item_id, text, key, rid, reply, output, task)
         logger.debug("speculative reply %s started for %r", rid, text)
@@ -740,16 +744,14 @@ class CascadeConnection(EngineConnection):
 
     # ----------------------------------------------------------------- response
     def _llm_context(
-        self, extra_instructions: str | None, pending: ChatMessage | None = None
+        self, extra_instructions: str | None, pending: Sequence[ChatItem] = ()
     ) -> ChatContext:
-        """The LLM input: instructions + history (+ ``pending``, the not yet committed user
-        message a speculative reply answers), truncated to ``max_history_items``."""
+        """The LLM input: instructions + history (+ ``pending`` items, not in the history
+        yet: a speculative reply's user turn), truncated to ``max_history_items``."""
         ctx = ChatContext()
         if self.instructions:
             ctx.add_message("system", self.instructions)
-        items = ChatContext(self.chat_ctx.items)
-        if pending is not None:
-            items.append(pending)
+        items = ChatContext([*self.chat_ctx.items, *pending])
         if self._opts.max_history_items is not None:
             items.truncate(self._opts.max_history_items)
         ctx.items.extend(items.items)
@@ -782,18 +784,20 @@ class CascadeConnection(EngineConnection):
         verbatim: str | None,
         output: _Output,
         reply: _Prefetch | None = None,
+        message: ChatMessage | None = None,
     ) -> None:
-        """One response. A speculative one (``output`` held, ``reply`` already streaming)
-        runs the same way, except that it waits for the commit before the TTS (unless
-        ``preemptive_tts``) and before it touches the history or reports tool calls."""
+        """One response. A speculative one (``output`` held, ``reply`` already streaming
+        into ``message``) runs the same way, except that it waits for the commit before
+        the TTS (unless ``preemptive_tts``) and before it touches the history or reports
+        tool calls."""
         engine = self._e
         status: ResponseStatus = "completed"
         error: str | None = None
         stream: LLMStream | _Prefetch | None = None
-        item_id = new_id("item_")
+        msg = message or ChatMessage(role="assistant", content=[""], id=new_id("item_"))
+        item_id = msg.id
         output.emit(ResponseStarted(response_id=rid))
         try:
-            msg = ChatMessage(role="assistant", content=[""], id=item_id)
             output.on_release(lambda: self.chat_ctx.append(msg))
             if verbatim is not None:
                 msg.content = [verbatim]
