@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from _common import log_conversation, scratch_dir, simulated_caller
+from _common import log_conversation, simulated_caller
 
 from voice_agent_next import (
     Agent,
@@ -121,7 +121,8 @@ async def main(argv: list[str] | None = None) -> int:
         await session.wait_closed()
     elif args.wav:
         # hold: stay on the line until the agent has been quiet for 3 s (background results)
-        await session.run(agent, FileTransport(args.wav, scratch_dir() / "reply.wav", hold=3.0))
+        await session.run(agent, FileTransport(args.wav, "reply.wav", hold=3.0))
+        print("reply written to reply.wav")
     else:
         await session.run(agent, create_transport("local"))
     return 0
