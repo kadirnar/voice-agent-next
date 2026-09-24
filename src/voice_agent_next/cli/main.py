@@ -73,7 +73,7 @@ def providers(
             }
         )
     if as_json:
-        console.print_json(json.dumps(rows))
+        typer.echo(json.dumps(rows, indent=2))  # plain stdout: never colorized
         return
     table = Table(title=f"voice-agent-next providers ({len(rows)})")
     for col in ("kind", "name", "where", "default_model", "status", "description"):
