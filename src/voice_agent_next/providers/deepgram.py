@@ -273,29 +273,23 @@ async def _open_websocket(url: str, api_key: str, *, timeout: float, what: str) 
 class DeepgramSTT(STT):
     """Deepgram streaming speech-to-text (Nova-3 on ``/v1/listen``, Flux on ``/v2/listen``).
 
-    Nova-3 event mapping:
+    Nova-3 events (:class:`~voice_agent_next.stt.STTEventType`):
 
-    ==================================  =============================================
-    Deepgram                            :class:`~voice_agent_next.stt.STTEventType`
-    ==================================  =============================================
-    ``SpeechStarted`` (or first words)  ``START_OF_SPEECH``
-    ``Results`` ``is_final=false``      ``INTERIM_TRANSCRIPT``
-    ``Results`` ``is_final=true``       ``FINAL_TRANSCRIPT`` (empty when answering
-                                        ``Finalize`` with nothing left to transcribe)
-    ``speech_final=true``/``UtteranceEnd``  ``END_OF_SPEECH``
-    ==================================  =============================================
+    * ``SpeechStarted`` (or the first words) -> ``START_OF_SPEECH``
+    * ``Results`` with ``is_final=false`` -> ``INTERIM_TRANSCRIPT``
+    * ``Results`` with ``is_final=true`` -> ``FINAL_TRANSCRIPT`` (empty only when it
+      answers a ``Finalize`` with nothing left to transcribe)
+    * ``speech_final=true`` or ``UtteranceEnd`` -> ``END_OF_SPEECH``
 
-    Flux event mapping (``capabilities.end_of_turn=True``):
+    Flux events (``capabilities.end_of_turn=True``):
 
-    ======================  ===========================================================
-    ``StartOfTurn``         ``START_OF_SPEECH`` + ``INTERIM_TRANSCRIPT``
-    ``Update``              ``INTERIM_TRANSCRIPT`` (when the transcript changed)
-    ``EagerEndOfTurn``      ``EAGER_END_OF_TURN``
-    ``TurnResumed``         ``TURN_RESUMED``
-    ``EndOfTurn``           ``FINAL_TRANSCRIPT`` + ``END_OF_SPEECH`` + ``END_OF_TURN``
-                            (no ``END_OF_TURN`` for ``trigger="manual"``: that turn was
-                            ended by our own :meth:`~STTStream.flush`, i.e. ``ForceEndTurn``)
-    ======================  ===========================================================
+    * ``StartOfTurn`` -> ``START_OF_SPEECH`` + ``INTERIM_TRANSCRIPT``
+    * ``Update`` -> ``INTERIM_TRANSCRIPT`` (only when the transcript changed)
+    * ``EagerEndOfTurn`` -> ``EAGER_END_OF_TURN``; ``TurnResumed`` -> ``TURN_RESUMED``
+    * ``EndOfTurn`` -> ``FINAL_TRANSCRIPT`` + ``END_OF_SPEECH`` + ``END_OF_TURN``, except
+      that turns ended by our own :meth:`~voice_agent_next.stt.STTStream.flush`
+      (``ForceEndTurn``, ``trigger="manual"``) get no ``END_OF_TURN``: the caller that
+      flushed owns that decision.
 
     With Flux, run the cascade **without** a VAD: ``StartOfTurn`` drives barge-in and
     ``EndOfTurn`` commits the user turn immediately.
@@ -378,7 +372,7 @@ class DeepgramSTT(STT):
                 interim_results=True if flux else interim_results,
                 word_timestamps=True,
                 end_of_turn=flux,
-                language_detection=model == "flux-general-multi" or language == "multi",
+                language_detection=model == "flux-general-multi" if flux else language == "multi",
             ),
             sample_rate=sample_rate,
             language=language,
@@ -514,7 +508,7 @@ class _DeepgramStream(STTStream):
             except ChanClosed:
                 break
             if self.is_flush(item):
-                for chunk in self._chunker.flush():  # never send empty frames (closes the stream)
+                for chunk in self._chunker.flush():  # the partial chunk, so the flush covers it
                     await ws.send(chunk.data)
                 await self._send_flush(ws)
             else:

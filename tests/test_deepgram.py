@@ -30,6 +30,7 @@ from voice_agent_next.errors import (
     ConfigurationError,
     ProviderConnectionError,
     ProviderError,
+    ProviderTimeoutError,
     RateLimitError,
 )
 from voice_agent_next.metrics import STTMetrics, TTSMetrics, TurnMetrics
@@ -354,6 +355,19 @@ async def test_nova3_flush_after_speech_final_is_acknowledged_immediately() -> N
         E.FINAL_TRANSCRIPT,
     ]
     assert got[-1].text == ""
+
+
+async def test_nova3_batch_transcribe_joins_finals() -> None:
+    script = [
+        (0.6, results("Hello world.", start=0.0, duration=0.6, is_final=True)),
+        (0.8, results("how", start=0.6, duration=0.2, is_final=False)),
+    ]
+    finalize = [results("How are you?", start=0.6, duration=0.6, is_final=True, from_finalize=True)]
+    async with FakeDeepgram(nova_server(script, finalize)) as server:
+        stt = DeepgramSTT(api_key="k", base_url=server.url)
+        transcript = await stt.transcribe(synth_speech(1.2, 48_000))  # resampled to 16 kHz
+    assert transcript.text == "Hello world. How are you?"
+    assert sum(server.connections[0].audio_chunks()) == round(1.2 * 16_000) * 2
 
 
 async def test_nova3_sends_keepalive_while_idle() -> None:
@@ -685,9 +699,11 @@ async def test_stt_close_codes_are_mapped(
 async def test_stt_connection_refused_is_a_connection_error() -> None:
     async with FakeDeepgram(nova_server([])) as server:
         url = server.url
-    stream = DeepgramSTT(api_key="k", base_url=url, connect_timeout=2).stream()  # server gone
-    with pytest.raises(ProviderConnectionError):
+    stream = DeepgramSTT(api_key="k", base_url=url, connect_timeout=5).stream()  # server gone
+    # refused at once on Linux/macOS; Windows retries the SYN and may hit the timeout first
+    with pytest.raises((ProviderConnectionError, ProviderTimeoutError)) as info:
         await collect(stream)
+    assert info.value.retryable
     await stream.aclose()
 
 
