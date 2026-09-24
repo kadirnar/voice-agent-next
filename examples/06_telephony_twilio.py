@@ -95,7 +95,8 @@ def make_agent() -> Agent:
 # ----------------------------------------------------------------- mock phone call
 async def fake_twilio_call(http_url: str, ws_url: str) -> float:
     """Play Twilio's part of one call; return the seconds of agent audio received."""
-    twiml = await asyncio.to_thread(lambda: urllib.request.urlopen(http_url).read().decode())
+    no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # localhost
+    twiml = await asyncio.to_thread(lambda: no_proxy.open(http_url, timeout=5).read().decode())
     print(f"TwiML: {twiml}")
     stream_sid, received = "MZ00000000000000000000000000000000", bytearray()
     async with connect(ws_url) as ws:
