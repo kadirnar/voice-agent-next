@@ -11,7 +11,7 @@ no GPU and no API key, and works offline once the model files are cached.
 | Spec | `kokoro`, `kokoro/<model>` (for example `kokoro/v1.0-fp16`) |
 | Class | `voice_agent_next.providers.kokoro.KokoroTTS` |
 | Extra | `voice-agent-next[kokoro]` (`kokoro-onnx>=0.6.1`, which pulls in `onnxruntime`, `phonemizer` and a bundled espeak-ng) |
-| Python | 3.11 to 3.13 (see [Python 3.14](#python-314)) |
+| Python | 3.11 to 3.13 through the extra; 3.14 with a manual install (see [Python 3.14](#python-314)) |
 | Output | 24 kHz, mono, s16le, in 50 ms chunks |
 | Streaming | audio out: per sentence. Text in: none, so `stream()` uses the `SentenceStreamAdapter` |
 
@@ -34,11 +34,16 @@ To prepare an offline machine, run `await tts.warmup()` once while online. After
 
 ### Python 3.14
 
-kokoro-onnx declares `Requires-Python <3.14`, so the `kokoro` extra (and `local`) installs
-nothing on Python 3.14, and `van providers` reports the dependency as missing. Forcing the
-install (`uv pip install kokoro-onnx`, which ignores the upper bound) does not help yet. In
-our test on Linux, phonemizer 3.4 on Python 3.14 could not point espeak-ng at its data
-directory, and espeak-ng then exited the whole process. Use Python 3.11 to 3.13.
+Every kokoro-onnx release since 0.4.8 declares `Requires-Python <3.14`, so pip will not
+install it on Python 3.14. The `kokoro` extra (and `local`) therefore carries a
+`python_version < '3.14'` marker: it installs nothing on 3.14, so installs don't fail, and
+`van providers` reports the dependency as missing. The package itself runs on 3.14; the real
+model test passed on Python 3.14.7 on Linux. To use it there, install it explicitly:
+
+```bash
+uv pip install "kokoro-onnx>=0.6.1"      # uv ignores the Requires-Python upper bound
+pip install --ignore-requires-python "kokoro-onnx>=0.6.1"
+```
 
 ## Usage
 
@@ -147,6 +152,12 @@ Japanese and Chinese through espeak-ng sound poor; upstream uses
   so consecutive sentences, which are synthesized separately, don't run together.
 * **Cancellation.** Closing a stream stops it before the next sentence. A sentence that is
   already running finishes in the background and its audio is dropped.
+* **Long install paths.** The espeak-ng 1.52 library bundled by `espeakng-loader` stores its
+  data directory path in a 160-byte buffer (230 on Windows). With a longer path, as in a
+  deeply nested virtualenv, espeak-ng silently truncates it, fails to find its data and
+  calls `exit(1)`, which kills the whole Python process. The provider detects this and
+  copies the data (19 MB, once) to `<model cache>/espeak-ng-data-<version>`. If even that
+  path is too long, it raises `ProviderError`; set `VAN_CACHE_DIR` to a shorter directory.
 * **Errors.** A missing extra raises `MissingDependencyError`. An unknown model, voice,
   speed or local path raises `ConfigurationError`. Download failures raise `DownloadError`,
   and ONNX Runtime or phonemizer failures raise `ProviderError`. Text with nothing to

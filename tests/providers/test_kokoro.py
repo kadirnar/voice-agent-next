@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import types
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -86,15 +87,24 @@ class FakeKokoro:
         return tone.astype(np.float32), SR
 
 
-class FakeBackend:
-    """Fake ``onnxruntime`` + ``kokoro_onnx`` modules and what was done with them."""
+@dataclass
+class FakeEspeakConfig:
+    lib_path: str | None = None
+    data_path: str | None = None
 
-    def __init__(self) -> None:
+
+class FakeBackend:
+    """Fake ``onnxruntime``, ``kokoro_onnx`` and ``espeakng_loader`` modules and what was
+    done with them."""
+
+    def __init__(self, espeak_data: Path) -> None:
         self.available = [CPU]
         self.failing_providers: set[str] = set()
         self.voices = ("af_heart", "bf_emma", "ef_dora", "ff_siwis", "zf_001")
+        self.espeak_data = espeak_data
         self.sessions: list[Any] = []
         self.engines: list[FakeKokoro] = []
+        self.espeak_configs: list[FakeEspeakConfig | None] = []
         self.downloads: list[tuple[str, str, str | None]] = []
         self.error: Exception | None = None
         self.delay = 0.0
@@ -103,7 +113,7 @@ class FakeBackend:
     def engine(self) -> FakeKokoro:
         return self.engines[-1]
 
-    def modules(self) -> tuple[types.ModuleType, types.ModuleType]:
+    def modules(self) -> tuple[types.ModuleType, types.ModuleType, types.ModuleType]:
         backend = self
 
         class SessionOptions:
@@ -126,7 +136,14 @@ class FakeBackend:
 
         class Kokoro:
             @classmethod
-            def from_session(cls, session: Any, voices_path: str, **_: Any) -> FakeKokoro:
+            def from_session(
+                cls,
+                session: Any,
+                voices_path: str,
+                espeak_config: FakeEspeakConfig | None = None,
+                vocab_config: Any = None,
+            ) -> FakeKokoro:
+                backend.espeak_configs.append(espeak_config)
                 engine = FakeKokoro(backend, session, voices_path)
                 backend.engines.append(engine)
                 return engine
@@ -137,15 +154,34 @@ class FakeBackend:
         ort.get_available_providers = lambda: list(backend.available)  # type: ignore[attr-defined]
         kokoro_onnx = types.ModuleType("kokoro_onnx")
         kokoro_onnx.Kokoro = Kokoro  # type: ignore[attr-defined]
-        return ort, kokoro_onnx
+        kokoro_onnx.EspeakConfig = FakeEspeakConfig  # type: ignore[attr-defined]
+
+        def get_data_path() -> str:
+            if not backend.espeak_data.is_dir():
+                raise RuntimeError(f"data path not exists at {backend.espeak_data}")
+            return str(backend.espeak_data)
+
+        loader = types.ModuleType("espeakng_loader")
+        loader.get_data_path = get_data_path  # type: ignore[attr-defined]
+        return ort, kokoro_onnx, loader
+
+
+def fake_espeak_data(path: Path) -> Path:
+    path.mkdir(parents=True)
+    (path / "phontab").write_bytes(b"phonemes")
+    (path / "voices").mkdir()
+    (path / "voices" / "en").write_bytes(b"voice")
+    return path
 
 
 @pytest.fixture
 def backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeBackend:
-    fake = FakeBackend()
-    ort, kokoro_onnx = fake.modules()
+    fake = FakeBackend(fake_espeak_data(tmp_path / "espeak-ng-data"))
+    ort, kokoro_onnx, loader = fake.modules()
     monkeypatch.setitem(sys.modules, "onnxruntime", ort)
     monkeypatch.setitem(sys.modules, "kokoro_onnx", kokoro_onnx)
+    monkeypatch.setitem(sys.modules, "espeakng_loader", loader)
+    monkeypatch.setenv("VAN_CACHE_DIR", str(tmp_path / "cache"))
 
     def fake_download(url: str, *, subdir: str = "", sha256: str | None = None, **_: Any) -> Path:
         fake.downloads.append((url, subdir, sha256))
@@ -348,6 +384,44 @@ async def test_local_files_skip_downloads(backend: FakeBackend, tmp_path: Path) 
     missing = KokoroTTS(model_path=tmp_path / "missing.onnx", voices_path=voices_file)
     with pytest.raises(ConfigurationError, match="not found"):
         await synthesize(missing, "Hi there.")
+
+
+async def test_short_espeak_data_path_is_used_as_is(backend: FakeBackend) -> None:
+    await KokoroTTS().warmup()
+    assert backend.espeak_configs == [None]  # kokoro-onnx's default espeak-ng setup
+
+
+async def test_long_espeak_data_path_is_copied_to_the_cache(
+    backend: FakeBackend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # espeak-ng truncates longer data paths, cannot find its data and exits the process
+    backend.espeak_data = fake_espeak_data(tmp_path / ("site-packages-" * 3) / "espeak-ng-data")
+    cache = (tmp_path / "cache").resolve()
+    limit = len(str(cache)) + 30  # the cache copy fits, the original path does not
+    assert len(str(backend.espeak_data.resolve())) > limit
+    monkeypatch.setattr(kokoro_module, "_ESPEAK_MAX_PATH", limit)
+
+    await KokoroTTS().warmup()
+    await KokoroTTS().warmup()  # a second load reuses the copy
+    first, second = backend.espeak_configs
+    assert first is not None and first == second
+    copy = Path(str(first.data_path))
+    assert copy.parent == cache and copy.name.startswith("espeak-ng-data-")
+    assert (copy / "phontab").read_bytes() == b"phonemes"
+    assert (copy / "voices" / "en").is_file()
+    assert not list(cache.glob(".espeak-ng-data-*"))  # no temporary leftovers
+
+    monkeypatch.setattr(kokoro_module, "_ESPEAK_MAX_PATH", 10)  # even the cache is too deep
+    with pytest.raises(ProviderError, match="espeak-ng cannot open data paths"):
+        await KokoroTTS().warmup()
+
+
+async def test_custom_g2p_does_not_need_espeak(backend: FakeBackend, tmp_path: Path) -> None:
+    backend.espeak_data = tmp_path / "missing"
+    with pytest.raises(ProviderError, match="espeak-ng data not found"):
+        await KokoroTTS().warmup()
+    await KokoroTTS(g2p=lambda text, lang: text).warmup()
+    assert backend.espeak_configs == [None]
 
 
 async def test_session_prefers_accelerator_and_falls_back_to_cpu(backend: FakeBackend) -> None:

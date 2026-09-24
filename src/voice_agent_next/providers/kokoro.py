@@ -25,10 +25,13 @@ each sentence is emitted in ``chunk_duration`` chunks as soon as it is ready.
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import logging
 import os
 import re
+import shutil
 import sys
+import tempfile
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -44,7 +47,7 @@ from ..text.sentences import SentenceSegmenter
 from ..tts import TTS, ChunkedStream
 from ..utils.clock import now
 from ..utils.deps import is_installed, require
-from ..utils.download import download
+from ..utils.download import cache_dir, download
 from ..utils.log import logger
 
 __all__ = [
@@ -72,6 +75,8 @@ _RELEASE_URL = f"https://github.com/thewh1teagle/kokoro-onnx/releases/download/{
 _CPU = "CPUExecutionProvider"
 _ACCELERATED = ("CUDAExecutionProvider", "CoreMLExecutionProvider", "DmlExecutionProvider")
 """Preference order; the first one ONNX Runtime reports as available is used."""
+_ESPEAK_MAX_PATH = 229 if sys.platform == "win32" else 159
+"""Longest espeak-ng data path (bytes) that espeak-ng 1.52 can store; see ``_espeak_config``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +248,52 @@ def _check_installed() -> None:
             require(module, extra=_EXTRA, package=package)
 
 
+def _path_len(path: Path) -> int:
+    return len(str(path).encode("utf-8"))
+
+
+def _espeak_config(kokoro_onnx: Any) -> Any:
+    """An ``EspeakConfig`` with a data path espeak-ng can use (``None``: the default one).
+
+    espeak-ng 1.52, as bundled by espeakng-loader, keeps its data directory in a 160-byte
+    buffer (230 on Windows). A longer path, e.g. in a deeply nested virtualenv, is silently
+    truncated; espeak-ng then cannot find its data and calls ``exit(1)``, killing the whole
+    process. In that case the data (19 MB) is copied once into the model cache.
+    """
+    loader = require("espeakng_loader", extra=_EXTRA, package="espeakng-loader")
+    try:
+        source = Path(loader.get_data_path()).resolve()  # phonemizer resolves it too
+    except RuntimeError as exc:  # the data directory is missing: broken installation
+        raise ProviderError(f"espeak-ng data not found: {exc}", provider="kokoro") from exc
+    if _path_len(source) <= _ESPEAK_MAX_PATH:
+        return None
+    try:
+        version = importlib.metadata.version("espeakng-loader")
+    except importlib.metadata.PackageNotFoundError:
+        version = "0"
+    target = cache_dir().resolve() / f"espeak-ng-data-{version}"
+    if _path_len(target) > _ESPEAK_MAX_PATH:
+        raise ProviderError(
+            f"espeak-ng cannot open data paths longer than {_ESPEAK_MAX_PATH} bytes ({source}); "
+            "install into a shorter path or set VAN_CACHE_DIR to a short directory",
+            provider="kokoro",
+        )
+    if not (target / "phontab").is_file():
+        logger.info("kokoro: espeak-ng data path is too long, using a copy in %s", target)
+        tmp = Path(tempfile.mkdtemp(prefix=".espeak-ng-data-", dir=target.parent))
+        try:
+            shutil.copytree(source, tmp, dirs_exist_ok=True)
+            os.replace(tmp, target)  # atomic: concurrent loaders never see a partial copy
+        except OSError as exc:
+            if not (target / "phontab").is_file():  # else another process won the race
+                raise ProviderError(
+                    f"cannot copy espeak-ng data to {target}: {exc}", provider="kokoro"
+                ) from exc
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    return kokoro_onnx.EspeakConfig(data_path=str(target))
+
+
 def _local_file(override: Path | None, asset: KokoroAsset) -> Path:
     if override is None:
         return download(asset.url, subdir=f"kokoro/{_RELEASE}", sha256=asset.sha256)
@@ -411,21 +462,19 @@ class KokoroTTS(TTS):
         kokoro_onnx = require("kokoro_onnx", extra=_EXTRA, package="kokoro-onnx")
         ort = require("onnxruntime", extra=_EXTRA)
         _quiet_phonemizer()
-        if sys.version_info >= (3, 14) and self.g2p is None:
-            logger.warning(
-                "kokoro-onnx supports Python < 3.14; with phonemizer 3.4 on 3.14, espeak-ng "
-                "can fail to find its data and exit the process. Use Python 3.11-3.13 or g2p=."
-            )
         t0 = now()
         model_path = _local_file(self._model_path, self._variant.onnx)
         voices_path = _local_file(self._voices_path, self._variant.voices)
+        espeak_config = None if self.g2p is not None else _espeak_config(kokoro_onnx)
         options = ort.SessionOptions()
         options.log_severity_level = 3  # errors only: fp16 graphs log ~150 folding warnings
         if self.num_threads is not None:
             options.intra_op_num_threads = self.num_threads
         session = self._create_session(ort, model_path, options)
         try:
-            engine = kokoro_onnx.Kokoro.from_session(session, str(voices_path))
+            engine = kokoro_onnx.Kokoro.from_session(
+                session, str(voices_path), espeak_config=espeak_config
+            )
         except Exception as exc:
             raise ProviderError(
                 f"failed to initialize Kokoro with {voices_path}: {exc}", provider=self.provider
