@@ -55,6 +55,8 @@ jobs:
       - run: uv run pytest -q
       - name: providers import without optional dependencies
         run: uv run van providers --json > /dev/null
+      - name: echo cancellation with the native livekit wheel (extra `aec`)
+        run: uv run --extra aec pytest -q -m model tests/test_aec.py
 
   # Provider tests that need optional SDKs (anthropic, openai, onnxruntime, faster-whisper,
   # livekit, ...) are skipped by the jobs above; this job installs every extra.
@@ -96,3 +98,5 @@ jobs:
       - run: uv sync
       - run: uv run pytest -q
       - run: uv run van providers --json
+      - name: echo cancellation with the native livekit wheel (extra `aec`)
+        run: uv run --extra aec pytest -q -m model tests/test_aec.py
