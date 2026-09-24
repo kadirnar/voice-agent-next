@@ -98,7 +98,9 @@ async def test_caller_paces_chunks_waits_for_replies_and_records_one_clock() -> 
         assert not turn.missed and turn.reply_start is not None and turn.reply_end is not None
         # fake agent: 100 ms silence detection + 200 ms delay
         assert turn.reply_start - turn.speech_end == pytest.approx(0.3, abs=0.06)
-        assert turn.reply_end - turn.reply_start == pytest.approx(0.2, abs=0.03)
+        # the loopback's playout timer can wake early on coarse clocks (Windows), which
+        # shortens the reply by up to one tick per frame
+        assert turn.reply_end - turn.reply_start == pytest.approx(0.2, abs=0.07)
     assert second.start >= first.reply_end + 0.1 - 0.05
     assert second.speech_start == pytest.approx(second.start + 0.1)
 
