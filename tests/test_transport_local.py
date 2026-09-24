@@ -141,6 +141,10 @@ class FakeStream:
         backend.streams.append(self)
 
     def start(self) -> None:
+        if self.backend.fail_start == self.kind:
+            raise FakePortAudioError(
+                "Error starting stream: Device unavailable [PaErrorCode -9985]"
+            )
         self.active = True
         target = self._run_realtime if self.backend.realtime else self._run_jobs
         self._thread = threading.Thread(target=target, name=f"fake-{self.kind}", daemon=True)
@@ -251,6 +255,7 @@ class FakeSoundDevice:
         self.clock = clock
         self.echo = echo  # the microphone hears the speakers
         self.fail_open: str | None = None
+        self.fail_start: str | None = None
         self.mic = FakeMic()
         self.streams: list[FakeStream] = []
         self.played: list[np.ndarray] = []
@@ -594,6 +599,22 @@ async def test_open_failure_is_a_transport_error_and_releases_streams(
         await t.start()
     assert "default rate 16000 Hz" in str(info.value)
     assert fake_sd.output_stream.closed  # opened before the failure, then released
+
+
+async def test_start_failure_after_a_started_stream_is_not_a_device_failure(
+    fake_sd: FakeSoundDevice, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_sd.fail_start = "input"  # the output stream is already running at that point
+    t = LocalAudioTransport(echo_mode="headphones")
+    with pytest.raises(TransportError, match="cannot start the audio input stream"):
+        await t.start()
+    assert fake_sd.output_stream.closed and fake_sd.input_stream.closed
+    await asyncio.sleep(0.01)  # a finished_callback would be delivered by now
+    assert "stopped unexpectedly" not in caplog.text
+    fake_sd.fail_start = None
+    await t.start()  # a retry works
+    assert fake_sd.input_stream.active
+    await t.aclose()
 
 
 async def test_device_failure_ends_audio_input_with_an_error(fake_sd: FakeSoundDevice) -> None:

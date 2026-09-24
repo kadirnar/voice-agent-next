@@ -564,6 +564,7 @@ class LocalAudioTransport(Transport):
         self._render_span: tuple[float, float] = (-math.inf, -math.inf)
         self._started = False
         self._closing = False
+        self._closing_streams = False  # we stop the streams: their finish is expected
         self._failure: TransportError | None = None
         self.input_overflows = 0
         """Microphone blocks PortAudio reported as overflowed (audio lost)."""
@@ -611,6 +612,7 @@ class LocalAudioTransport(Transport):
         if self._started:
             return
         self._loop = asyncio.get_running_loop()
+        self._closing_streams = False
         if self._echo_canceller is not None and self._active_mode == "aec":
             self._echo_canceller.reset()
         try:
@@ -685,6 +687,7 @@ class LocalAudioTransport(Transport):
             ) from exc
 
     def _close_streams(self) -> None:
+        self._closing_streams = True
         for stream in (self._in_stream, self._out_stream):
             if stream is None:
                 continue
@@ -697,7 +700,7 @@ class LocalAudioTransport(Transport):
     def _stream_finished(self, kind: DeviceKind) -> None:
         """PortAudio ``finished_callback``: the stream stopped (called from its thread)."""
         loop = self._loop
-        if self._closing or loop is None:
+        if self._closing or self._closing_streams or loop is None:
             return
         device = self.input_device if kind == "input" else self.output_device
         error = TransportError(
@@ -707,7 +710,7 @@ class LocalAudioTransport(Transport):
             loop.call_soon_threadsafe(self._fail, error)
 
     def _fail(self, error: TransportError) -> None:
-        if self._closing or self._failure is not None:
+        if self._closing or self._closing_streams or self._failure is not None:
             return
         self._failure = error
         logger.error("%s", error)
