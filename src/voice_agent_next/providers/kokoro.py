@@ -28,6 +28,7 @@ import asyncio
 import importlib.metadata
 import logging
 import os
+import platform
 import re
 import shutil
 import sys
@@ -321,7 +322,8 @@ class KokoroTTS(TTS):
 
     Args:
         model: model id: ``"v1.0"`` (fp32, default), ``"v1.0-fp16"``, ``"v1.0-int8"``
-            (smallest download), ``"v1.1-zh"``, ``"v1.1-zh-fp16"`` or ``"v1.1-zh-int8"``.
+            (smallest download; NaN audio on ARM64 CPUs such as Apple Silicon, use fp16
+            there), ``"v1.1-zh"``, ``"v1.1-zh-fp16"`` or ``"v1.1-zh-int8"``.
             With ``model_path`` any label is accepted.
         voice: default voice, e.g. ``"af_heart"`` (the default for v1.0) or ``"bm_george"``.
             The first letter selects the language (see ``lang``).
@@ -406,6 +408,7 @@ class KokoroTTS(TTS):
         self._variant = variant
         self._model_path = Path(model_path).expanduser() if model_path is not None else None
         self._voices_path = Path(voices_path).expanduser() if voices_path is not None else None
+        self._int8_on_arm64 = False
         if isinstance(providers, str):
             providers = [providers]
         self._providers: list[ExecutionProvider] | None = (
@@ -473,7 +476,15 @@ class KokoroTTS(TTS):
         options.log_severity_level = 3  # errors only: fp16 graphs log ~150 folding warnings
         if self.num_threads is not None:
             options.intra_op_num_threads = self.num_threads
-        session = self._create_session(ort, model_path, options)
+        session = _CheckedSession(self._create_session(ort, model_path, options))
+        self._int8_on_arm64 = _is_int8(model_path.name) and _ARM64
+        if self._int8_on_arm64:
+            logger.warning(
+                "kokoro: %s may produce NaN audio on %s CPUs (%s); prefer v1.0-fp16",
+                model_path.name,
+                platform.machine(),
+                _INT8_ARM64_ISSUE,
+            )
         try:
             engine = kokoro_onnx.Kokoro.from_session(
                 session, str(voices_path), espeak_config=espeak_config
@@ -545,6 +556,15 @@ class KokoroTTS(TTS):
             else:
                 phonemes = self.g2p(text, lang)
                 samples, sample_rate = engine.create(phonemes, is_phonemes=True, **options)
+        except _NonFiniteAudio as exc:
+            hint = ""
+            if self._int8_on_arm64:
+                hint = f" ({_INT8_ARM64_ISSUE}); use model='v1.0-fp16' or 'v1.0'"
+            raise ProviderError(
+                f"Kokoro model {self.model!r} produced non-finite audio on "
+                f"{platform.machine()}{hint}",
+                provider=self.provider,
+            ) from exc
         except ValueError as exc:
             # kokoro-onnx raises ValueError when nothing in the text is pronounceable
             if "phoneme" not in str(exc):
@@ -563,6 +583,41 @@ class KokoroTTS(TTS):
         pcm = AudioFrame.from_numpy(np.asarray(samples, dtype=np.float32).reshape(-1), SAMPLE_RATE)
         pause = _pause_after(text, self.sentence_pause, self.clause_pause)
         return pcm.data + bytes(round(pause * SAMPLE_RATE) * SAMPLE_WIDTH)
+
+
+_ARM64 = platform.machine().lower() in ("arm64", "aarch64")
+_INT8_ARM64_ISSUE = (
+    "a known issue of the int8 export with ONNX Runtime's ARM64 kernels: a NaN in the "
+    "harmonic source phase makes DynamicQuantizeLinear's scale NaN"
+)
+
+
+def _is_int8(filename: str) -> bool:
+    return ".int8." in filename
+
+
+class _NonFiniteAudio(RuntimeError):
+    """The model's audio output contains NaN or infinity."""
+
+
+class _CheckedSession:
+    """An ``onnxruntime.InferenceSession`` whose ``run`` rejects non-finite audio.
+
+    kokoro-onnx would otherwise trim all-NaN audio to nothing and fail with an unrelated
+    numpy error while inserting pauses.
+    """
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    def run(self, output_names: Any, input_feed: Any, run_options: Any = None) -> Any:
+        outputs = self._session.run(output_names, input_feed, run_options)
+        if outputs and not np.isfinite(np.asarray(outputs[0])).all():
+            raise _NonFiniteAudio("non-finite audio")
+        return outputs
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
 
 
 class _KokoroChunkedStream(ChunkedStream):

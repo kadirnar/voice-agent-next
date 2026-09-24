@@ -55,5 +55,5 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          uv run --with onnx python scripts/ci_kokoro_diag.py || true
+          VAN_KOKORO_TEST_MODEL=v1.0-int8 uv run pytest -q -m model tests/providers/test_kokoro.py || true
       - run: uv run pytest -q -m model --durations=15
