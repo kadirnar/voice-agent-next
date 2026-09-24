@@ -20,7 +20,8 @@ For a policy:
 
 :func:`sweep_policies` evaluates the whole grid (eot-bench's defaults: thresholds 0..1 in
 0.01 steps, action delays 0.2..1.0 s in 0.1 s steps, timeouts 1.0..3.5 s in 0.5 s steps)
-plus the silence-only **VAD baseline** (answer after a fixed silence). The operating points
+plus the silence-only **VAD baseline** (answer after a fixed silence, 0.2-5 s in 10 ms
+steps). The operating points
 are the lowest false-cutoff rate within a latency budget (300 / 600 ms) and the lowest
 latency within a false-cutoff budget (5 / 10 %). This is a numpy port of
 ``eot_harness/metrics.py`` (Apache-2.0) in its score-point mode.
@@ -40,6 +41,7 @@ __all__ = [
     "DEFAULT_ACTION_DELAYS",
     "DEFAULT_THRESHOLDS",
     "DEFAULT_TIMEOUTS",
+    "DEFAULT_VAD_DELAYS",
     "PolicyPoint",
     "ScoredSpan",
     "classification_metrics",
@@ -55,6 +57,8 @@ __all__ = [
 DEFAULT_THRESHOLDS: tuple[float, ...] = tuple(round(0.01 * i, 2) for i in range(101))
 DEFAULT_ACTION_DELAYS: tuple[float, ...] = tuple(round(0.2 + 0.1 * i, 2) for i in range(9))
 DEFAULT_TIMEOUTS: tuple[float, ...] = tuple(round(1.0 + 0.5 * i, 2) for i in range(6))
+DEFAULT_VAD_DELAYS: tuple[float, ...] = tuple(round(0.2 + 0.01 * i, 2) for i in range(481))
+"""Silence-only baseline: 0.2-5.0 s in 10 ms steps (eot-bench's comparison tables)."""
 MIN_HOLD_SPAN = 0.2
 MAX_HOLD_SPAN = 5.0
 EPS = 1e-9
@@ -124,10 +128,12 @@ def sweep_policies(
     action_delays: Sequence[float] = DEFAULT_ACTION_DELAYS,
     timeouts: Sequence[float] = DEFAULT_TIMEOUTS,
     score_point: float = 0.2,
+    vad_delays: Sequence[float] | None = DEFAULT_VAD_DELAYS,
     include_model: bool = True,
     include_vad: bool = True,
 ) -> list[PolicyPoint]:
-    """Every (threshold, action delay, timeout) policy plus the VAD baseline."""
+    """Every (threshold, action delay, timeout) policy plus the VAD baseline (answer after
+    each of ``vad_delays`` seconds of silence; ``None``: the action delays and timeouts)."""
     hold_dur, hold_p, hold_st = _arrays(spans, "hold")
     eot_dur, eot_p, eot_st = _arrays(spans, "eot")
     if not len(hold_dur) or not len(eot_dur):
@@ -164,7 +170,8 @@ def sweep_policies(
                         )
                     )
     if include_vad:
-        for d in sorted(set(action_delays) | set(timeouts)):
+        delays = set(action_delays) | set(timeouts) if vad_delays is None else set(vad_delays)
+        for d in sorted(delays):
             fp = int((hold_dur > d + EPS).sum())
             points.append(
                 PolicyPoint(

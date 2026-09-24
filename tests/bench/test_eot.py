@@ -78,7 +78,7 @@ def test_policy_counts_cutoffs_and_latency_like_eot_bench() -> None:
 def test_vad_baseline_and_operating_points() -> None:
     s = filter_spans(spans())
     points = sweep_policies(s, thresholds=[0.0, 0.5, 0.95], action_delays=[0.2, 0.4],
-                            timeouts=[1.0, 2.0])  # fmt: skip
+                            timeouts=[1.0, 2.0], vad_delays=None)  # fmt: skip
     vad = [p for p in points if p.policy == "vad"]
     assert [p.action_delay for p in vad] == [0.2, 0.4, 1.0, 2.0]
     by_delay = {p.action_delay: p for p in vad}
@@ -88,6 +88,10 @@ def test_vad_baseline_and_operating_points() -> None:
     best = min_latency_under_cutoff(points, 0.0, "vad")
     assert best is not None and best.mean_latency == 2.0
     assert min_cutoff_under_latency(points, 0.1, "vad") is None  # no delay that short
+    # the default baseline grid is fine (10 ms): the shortest delay above the 1.5 s pause
+    fine = sweep_policies(s, thresholds=[0.5], action_delays=[0.2], timeouts=[1.0])
+    best = min_latency_under_cutoff(fine, 0.0, "vad")
+    assert best is not None and best.mean_latency == pytest.approx(1.5)
     model = min_cutoff_under_latency(points, 1.2)
     assert model is not None and model.mean_latency <= 1.2
     front = pareto_front(points)
