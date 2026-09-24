@@ -1390,7 +1390,7 @@ async def test_stt_flush_while_a_commit_is_in_flight(scribe: StartScribe) -> Non
     stream.flush()
     await wait_until(lambda: fake.commits())
     stream.flush()  # nothing new, a commit pending: its transcript answers both flushes
-    await asyncio.sleep(0.1)
+    await wait_until(lambda: stream._input.empty())  # the second flush was handled
     release.set()
     events = await collect_stt(stream, until=T.FINAL_TRANSCRIPT)
     assert [(e.type, e.text) for e in events] == [(T.FINAL_TRANSCRIPT, "Hi")]
@@ -1525,7 +1525,7 @@ async def test_stt_commit_throttled_is_not_fatal(scribe: StartScribe) -> None:
     push_speech(stream, 0.1)
     stream.flush()
     await wait_until(lambda: fake.commits())
-    await asyncio.sleep(0.1)
+    await wait_until(lambda: stream._pending_commits == 0)  # the throttle notice arrived
     stream.flush()  # no new audio, but the throttled audio still needs a commit
     events = await collect_stt(stream, until=T.FINAL_TRANSCRIPT)
     assert [e.text for e in events] == ["Throttled then committed"]

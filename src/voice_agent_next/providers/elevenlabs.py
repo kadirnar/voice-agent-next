@@ -1011,6 +1011,8 @@ class _Connection:
         from websockets.exceptions import ConnectionClosed
 
         if self.closed:
+            if self.error is None and not self._reader.done():
+                await asyncio.wait((self._reader,), timeout=0.5)  # let it read the reason
             # a ProviderConnectionError makes the stream reconnect; a rejection (1008
             # "invalid API key"...) is reported as such and not retried
             raise self.error or ProviderConnectionError(
