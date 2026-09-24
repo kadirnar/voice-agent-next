@@ -582,7 +582,12 @@ async def test_cascade_turn_with_tool_round_trip() -> None:
                      tool_fragment(0, call_id="call_1", name="get_weather", arguments='{"city":')]}),
                  chunk({"tool_calls": [tool_fragment(0, arguments=' "Paris"}')]}),
                  chunk({}, finish="tool_calls")]  # fmt: skip
-    server = FakeServer([SSEStream(tool_call), SSEStream(answer)])
+    preload = httpx.Response(200, json={
+        "id": "x", "object": "chat.completion", "created": 0, "model": "qwen3.5:4b",
+        "choices": [{"index": 0, "finish_reason": "length",
+                     "message": {"role": "assistant", "content": "Hi"}}],
+    })  # fmt: skip
+    server = FakeServer([preload, SSEStream(tool_call), SSEStream(answer)])
     llm = make_llm(server, cls=OllamaLLM)
     session = AgentSession(
         stt=MockSTT(transcripts=["what's the weather in paris"]),
@@ -599,7 +604,8 @@ async def test_cascade_turn_with_tool_round_trip() -> None:
     await wait_for(lambda: "Paris." in "".join(transcripts))
     await session.aclose()
 
-    first, second = server.chat_bodies
+    warm, first, second = server.chat_bodies  # the session pre-loads the model at start
+    assert warm["max_tokens"] == 1
     assert first["messages"] == [
         {"role": "system", "content": "You are a weather bot."},
         {"role": "user", "content": "what's the weather in paris"},

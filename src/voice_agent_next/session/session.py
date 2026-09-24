@@ -96,6 +96,9 @@ class SessionOptions:
     """Maximum consecutive tool-call rounds per user turn."""
     close_on_disconnect: bool = True
     """Close the session when the transport's audio input ends (user hung up)."""
+    warmup: bool = True
+    """Pre-warm the engine before the conversation starts (load models, open connections):
+    local model loads and cold connections otherwise land on the first turn."""
     min_interruption_duration: float = 0.5
     """Seconds of user speech needed to confirm a barge-in; until then the agent is only
     paused. ``0`` together with ``min_interruption_words=0`` interrupts at the first sign
@@ -318,6 +321,11 @@ class AgentSession(EventEmitter):
             raise RuntimeError("session already started")
         self._agent = agent
         self._transport = transport
+        if self.options.warmup:
+            try:  # before the transport opens, so no user audio queues up meanwhile
+                await self.engine.warmup()
+            except Exception as exc:
+                logger.warning("engine warmup failed (continuing without it): %s", exc)
         await transport.start()
         self._conn = await self.engine.connect(
             EngineOptions(
@@ -515,6 +523,13 @@ class AgentSession(EventEmitter):
             await self._on_barge_in_transcript(ev)
         elif isinstance(ev, InputCommitted):
             self._committed_items.append(ev.item_id)
+            if ev.item_id not in self._user_items:
+                # keep the user turn before the reply in the history even when the engine
+                # delivers its transcript after the response started (e.g. OpenAI Realtime)
+                placeholder = self.history.add_message(
+                    "user", "", id=ev.item_id, metadata={"transcript_pending": True}
+                )
+                self._user_items[ev.item_id] = placeholder
             await self._on_barge_in_committed()
             if self._turn is not None:
                 self._close_turn(self._turn)
@@ -575,6 +590,8 @@ class AgentSession(EventEmitter):
             self.emit("conversation_item", ConversationItemAdded(msg))
         else:
             msg.content = [ev.text]
+            if msg.metadata.pop("transcript_pending", False):
+                self.emit("conversation_item", ConversationItemAdded(msg))
         if self._agent is not None:
             self._tasks.spawn(self._agent.on_user_turn_completed(self, msg))
 
