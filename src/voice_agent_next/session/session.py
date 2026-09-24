@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import os
 import random
 from collections import deque
@@ -882,7 +883,7 @@ class AgentSession(EventEmitter):
         task = self._tasks.spawn(self._run_tool(call), name=f"tool-{call.name}")
         run = _ToolRun(call, tool, task)
         self._tool_runs[call.call_id] = run
-        task.add_done_callback(lambda _: self._forget_run(run))
+        task.add_done_callback(functools.partial(self._forget_run, run))
         if tool is not None and not tool.blocking:
             native = self.connection.capabilities.tool_mode != "blocking"
             self._tasks.spawn(self._deliver_later(run, native=native), name=f"tool-{call.name}")
@@ -901,8 +902,11 @@ class AgentSession(EventEmitter):
             self._pending_rounds.add(resp)
             if not run.ack:
                 self._start_watchdog(resp)
+        elif run.ack:  # no round to answer with: acknowledge on its own
+            output = run.task.result()
+            self._tasks.spawn(self.connection.send_tool_output(output, respond=False))
 
-    def _forget_run(self, run: _ToolRun) -> None:
+    def _forget_run(self, run: _ToolRun, _: object = None) -> None:
         if self._tool_runs.get(run.call.call_id) is run:
             del self._tool_runs[run.call.call_id]
 
@@ -1064,7 +1068,16 @@ class AgentSession(EventEmitter):
             self.user_state == UserState.SPEAKING
             or self._barge is not None
             or self._is_responding()
-            or any(r.aside and not r.done.is_set() for r in self._say_requests)
+            or any(self._aside_pending(r) for r in self._say_requests)
+        )
+
+    @staticmethod
+    def _aside_pending(request: _SayRequest) -> bool:
+        """A filler/progress utterance was requested but its response has not started."""
+        return (
+            request.aside
+            and not request.done.is_set()
+            and now() - request.created < _SAY_REQUEST_TTL
         )
 
     # ------------------------------------------------- non-blocking tools/delegation

@@ -59,7 +59,11 @@ class Recorder:
         return [ev for n, ev in self.events if n == name]
 
     def said(self) -> list[str]:
-        return [e.delta for e in self.of("agent_transcript")]
+        """What the agent said, one entry per response."""
+        texts: dict[str, str] = {}
+        for e in self.of("agent_transcript"):
+            texts[e.response_id] = texts.get(e.response_id, "") + e.delta
+        return [t.strip() for t in texts.values()]
 
     def turn_metrics(self) -> list[TurnMetrics]:
         return [m for m in self.of("metrics") if isinstance(m, TurnMetrics)]
@@ -82,6 +86,8 @@ async def wait_for(predicate: Callable[[], bool], timeout: float = 5.0) -> None:
 
 
 ENGINES = ["native", "cascade"]
+CPS = 45.0
+"""Mock speech rate (characters/s): 3x the default, to keep the tests short."""
 
 
 def make_session(
@@ -90,13 +96,13 @@ def make_session(
     options.setdefault("tool_filler_delay", 0.2)
     opts = SessionOptions(**options)
     if kind == "native":
-        engine = MockEngine(transcripts=["go"], responses=responses,
+        engine = MockEngine(transcripts=["go"], responses=responses, chars_per_second=CPS,
                             realtime_factor=realtime_factor)  # fmt: skip
         return AgentSession(engine, options=opts)
     return AgentSession(
         stt=MockSTT(transcripts=["go"]),
         llm=MockLLM(responses=responses),
-        tts=MockTTS(realtime_factor=realtime_factor),
+        tts=MockTTS(realtime_factor=realtime_factor, chars_per_second=CPS),
         vad=EnergyVAD(),
         cascade_options=CascadeOptions(min_endpointing_delay=0.0),
         options=opts,
@@ -251,7 +257,7 @@ async def test_fillers_do_not_repeat_across_rounds() -> None:
     @function_tool
     async def step() -> str:
         """Slow step."""
-        await asyncio.sleep(0.35)
+        await asyncio.sleep(0.8)  # > delay + the previous filler's audio
         return "next"
 
     fillers = ["One.", "Two.", "Three."]
@@ -550,7 +556,9 @@ async def test_app_cancels_a_non_blocking_call() -> None:
     assert not session.cancel_tool_call("unknown")
     await wait_for(lambda: bool(rec.of("tool_cancelled")))
     conn: MockEngineConnection = engine_conn(session)
-    await wait_for(lambda: any("was cancelled" in getattr(i, "text", "") for i in conn.chat_ctx.items))
+    await wait_for(
+        lambda: any("was cancelled" in getattr(i, "text", "") for i in conn.chat_ctx.items)
+    )
     await asyncio.sleep(0.2)
     await session.aclose()
     assert rec.said() == ["Started."]  # the note is silent
@@ -578,7 +586,7 @@ async def test_delegate_runs_in_the_background_and_reports_back() -> None:
               if isinstance(i, ChatMessage) and i.metadata.get("delegated")]  # fmt: skip
     assert msg.text == 'Result of the background task research: {"sources": 3}'
     with pytest.raises(ValueError):
-        session.delegate(research(), scheduling="later")  # type: ignore[arg-type]
+        session.delegate(research, scheduling="later")  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------- Gemini Live (native)
@@ -597,7 +605,7 @@ async def test_gemini_non_blocking_tool_scheduling() -> None:
     )
     await server.start()
     try:
-        engine = GeminiLiveEngine(api_key="k", base_url=server.url, rotate_after=None)
+        engine = GeminiLiveEngine(api_key="fake-gemini-key", base_url=server.url, rotate_after=None)
         session = AgentSession(engine, options=SessionOptions(tool_filler_delay=0.05))
         rec = Recorder(session)
         await session.start(Agent("x", tools=[remember]), LoopbackTransport())
