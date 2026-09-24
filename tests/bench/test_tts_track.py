@@ -21,13 +21,10 @@ from voice_agent_next.bench.mos import (
 )
 from voice_agent_next.bench.results import ITEMS_FILE, MANIFEST_FILE, REPORT_FILE, SUMMARY_FILE
 from voice_agent_next.bench.roundtrip import (
-    BasicEnglishNormalizer,
-    char_counts,
-    edit_distance,
     entity_matches,
-    get_normalizer,
+    resolve_normalizer,
+    score_round_trip,
     squash,
-    word_counts,
 )
 from voice_agent_next.bench.tracks.tts import (
     Capture,
@@ -49,62 +46,54 @@ from voice_agent_next.tts import TTS, ChunkedStream
 from .helpers import concat, silence, tone
 
 RATE = 24_000
-BASIC = BasicEnglishNormalizer()
 
-# --------------------------------------------------------------------------- normalizer
+# ---------------------------------------------------------------------- round-trip scoring
+
+_, ENGLISH = resolve_normalizer("en")
+
+
+def test_resolve_normalizer_reuses_the_asr_track() -> None:
+    assert resolve_normalizer("en")[0] == "whisper-english"
+    assert resolve_normalizer("de")[0] == "whisper-basic"
+    assert resolve_normalizer("en", "none")[0] == "none"
+    with pytest.raises(ValueError, match="unknown normalizer"):
+        resolve_normalizer("en", "nope")
+
+
+def test_squash() -> None:
+    assert squash("4:30 pm") == "430 pm"
+    assert squash("5 5 5 0 1 4 2") == "5550142"
+    assert squash("$42.50, ok") == "4250 ok"
 
 
 @pytest.mark.parametrize(
-    ("text", "expected"),
+    ("alternatives", "transcript", "found"),
     [
-        ("Your order is 58,213.", "your order is 58213"),
-        ("fifty-eight thousand two hundred and thirteen", "58213"),
-        ("five five five zero one four two", "5 5 5 0 1 4 2"),
-        ("twenty twenty-five", "20 25"),
-        ("two thousand twenty five", "2025"),
-        ("one hundred and five apples", "105 apples"),
-        ("nineteen hundred", "1900"),
-        ("one million two hundred thousand", "1200000"),
-        ("rock and roll", "rock and roll"),
-        ("Prices rose 12%!", "prices rose 12 percent"),
-        ("anna.lee@example.com", "anna lee at example com"),
-        ("It's 4:30 PM, drive 2.5 miles.", "its 4:30 pm drive 2.5 miles"),
-        ("Café’s  menu", "caf s menu"),
+        (["4:30"], "See you at four thirty.", True),
+        (["58213"], "fifty eight two thirteen", True),
+        (["58213"], "five eight two one three", True),
+        (["58213"], "fifty eight two fourteen", False),
+        (["$42.50"], "forty two dollars and fifty cents", True),
+        (["12%"], "twelve percent", True),
+        (["555-0142", "5550142"], "five five five zero one four two", True),
+        (["nyc", "new york city"], "Your flight to New York City", True),
+        (["Dr. Smith"], "Doctor Smith will see you", True),
+        (["12"], "one hundred twenty", False),  # whole words only
     ],
 )
-def test_basic_english_normalizer(text: str, expected: str) -> None:
-    assert BASIC(text) == expected
+def test_entity_matching(alternatives: list[str], transcript: str, found: bool) -> None:
+    assert entity_matches(alternatives, transcript, ENGLISH) is found
 
 
-def test_normalizer_registry() -> None:
-    assert get_normalizer("basic-english").name == "basic-english"
-    assert get_normalizer("none")("  a   b ") == "a b"
-    assert get_normalizer("auto").name in ("whisper-english", "basic-english")
-    with pytest.raises(ValueError, match="unknown normalizer"):
-        get_normalizer("nope")
-
-
-def test_edit_counts() -> None:
-    assert edit_distance("kitten", "sitting") == 3
-    assert edit_distance([], ["a"]) == 1 and edit_distance(["a"], []) == 1
-    w = word_counts("the cat sat", "the cat sat down")
-    assert (w.errors, w.ref_len, w.rate) == (1, 3, pytest.approx(1 / 3))
-    assert word_counts("", "x").rate is None
-    c = char_counts("abc", "abd")
-    assert (c.errors, c.ref_len) == (1, 3)
-    assert (w + c).ref_len == 6
-
-
-def test_entity_matching() -> None:
-    assert squash("4:30 pm") == "430 pm"
-    assert squash("5 5 5 0 1 4 2") == "5550142"
-    assert entity_matches(["4:30"], "See you at four thirty.", BASIC)
-    assert entity_matches(["58213"], "fifty eight two thirteen", BASIC)
-    assert entity_matches(["58213"], "five eight two one three", BASIC)
-    assert entity_matches(["nyc", "new york city"], "Your flight to New York City", BASIC)
-    assert not entity_matches(["58213"], "fifty eight two fourteen", BASIC)
-    # whole words only: "12" must not match inside "120"
-    assert not entity_matches(["12"], "one hundred twenty", BASIC)
+def test_score_round_trip() -> None:
+    score = score_round_trip(
+        "Your total is $42.50.", "your total is forty two dollars and fifty cents",
+        language="en", normalize=ENGLISH, entities=[["$42.50"], ["ok"]],
+    )  # fmt: skip
+    assert score.words.errors == 0 and score.words.ref_len == 4 and score.headline == "wer"
+    assert score.entities_missed == ("ok",)
+    zh = score_round_trip("你好世界", "你好", language="zh", normalize=lambda t: t)
+    assert zh.headline == "cer" and zh.chars.errors == 2 and zh.chars.ref_len == 4
 
 
 # ------------------------------------------------------------------------- metrics math
@@ -156,7 +145,7 @@ def test_measure_capture_counts_leading_silence_in_ttfa() -> None:
 # ---------------------------------------------------------------------------- text sets
 
 
-SMOKE_SHA256 = "ce778d2485c49e2bb0a54d3d84e44cc4bc5cba7c83d3dbed7a4db7b5c6da17c0"
+SMOKE_SHA256 = "4dc845a9a76a61d6ab262f149bcc7a25f2e39d7b59b78b5f02cb6225fceb6f1d"
 
 
 def test_smoke_text_set_is_pinned() -> None:
@@ -283,19 +272,26 @@ class _HangingStream(ChunkedStream):
 TEXTS = TextSet(
     name="tiny",
     texts=(
-        TTSText("a", "Your code is 4 2 7.", "numbers", (("427",),)),
+        TTSText("a", "Your code is 427.", "numbers", (("427",),)),
         TTSText("b", "Is that right?", "question"),
     ),
 )
 
 
 async def test_track_run_writes_schema_and_scores_round_trip(tmp_path: Path) -> None:
-    heard = iter(["your code is four two seven", "is that light", "your code is 4 2 1", "is that right"])
+    heard = iter(
+        [
+            "your code is four hundred twenty seven",
+            "is that light",
+            "your code is 421",
+            "is that right",
+        ]
+    )
     stt = MockSTT(transcripts=lambda _audio: next(heard))
     results = await run_tts_benchmark(
         _PaddedTTS(lead=0.2),
         TEXTS,
-        TTSOptions(words_per_second=0, normalizer="basic-english", warmup_requests=1),
+        TTSOptions(words_per_second=0, warmup_requests=1),
         stt=stt,
         out_dir=tmp_path,
         run_id="run1",
@@ -315,12 +311,12 @@ async def test_track_run_writes_schema_and_scores_round_trip(tmp_path: Path) -> 
     # streaming goes through SentenceStreamAdapter, which trims leading silence
     lead = s.metrics["streaming.leading_silence_ms"].p50
     assert lead is not None and lead < 50
-    # batch: 1 error in 3 + 3 words ("light"); streaming: 1 error in 6 ("1" vs "7")
+    # batch: 1 error in 4 + 3 words ("light"); streaming: 1 ("421" vs "427")
     assert s.rates["batch.rt_wer"] == pytest.approx(1 / 7)
     assert s.rates["streaming.rt_wer"] == pytest.approx(1 / 7)
     assert s.rates["batch.hardtext_acc"] == 1.0 and s.rates["streaming.hardtext_acc"] == 0.0
     assert s.rates["batch.perfect_rate"] == 0.5
-    assert s.extra["normalizer"] == "basic-english" and s.extra["stt"] == "mock/mock-stt"
+    assert s.extra["normalizer"] == "whisper-english" and s.extra["stt"] == "mock/mock-stt"
     assert set(s.extra["cold_start"]) == {"batch", "streaming"}
 
     run_dir = tmp_path / "run1"
@@ -331,7 +327,7 @@ async def test_track_run_writes_schema_and_scores_round_trip(tmp_path: Path) -> 
     assert loaded.manifest.scenario["sha256"] == TEXTS.sha256()
     assert loaded.manifest.system["tts"]["provider"] == "padded"
     assert loaded.manifest.system["stt"]["provider"] == "mock"
-    assert loaded.manifest.options["normalizer_resolved"] == "basic-english"
+    assert loaded.manifest.options["normalizer_resolved"] == "whisper-english"
     items = {it["id"]: it for it in loaded.items}
     assert set(items) == {"batch/a", "batch/b", "streaming/a", "streaming/b"}
     assert items["streaming/a"]["entities_missed"] == ["427"]

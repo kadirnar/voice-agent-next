@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -51,6 +52,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...audio.frame import AudioFrame
 from ...audio.wav import write_wav
+from ...config import ComponentSpec
 from ...registry import create
 from ...stt import STT
 from ...tts import TTS
@@ -71,15 +73,9 @@ from ..results import (
     utc_timestamp,
     write_run,
 )
-from ..roundtrip import (
-    EditCounts,
-    TextNormalizer,
-    char_counts,
-    entity_matches,
-    get_normalizer,
-    word_counts,
-)
+from ..roundtrip import resolve_normalizer, score_round_trip
 from ..system import redact
+from ..text_norm import NORMALIZERS
 from .latency import _reserve_directory
 
 __all__ = [
@@ -265,7 +261,10 @@ class TTSOptions:
             raise ValueError("words_per_second must be >= 0")
         if self.timeout <= 0:
             raise ValueError("timeout must be > 0")
-        get_normalizer(self.normalizer)  # validate
+        if self.normalizer not in NORMALIZERS:
+            raise ValueError(
+                f"unknown normalizer {self.normalizer!r}; use one of {', '.join(NORMALIZERS)}"
+            )
 
 
 # ------------------------------------------------------------------------- metrics math
@@ -338,7 +337,7 @@ def simulate_playout(
 
 def chunk_gaps(arrivals: Sequence[tuple[float, float]]) -> list[float]:
     """Inter-arrival times of consecutive chunks (s)."""
-    return [b[0] - a[0] for a, b in zip(arrivals, arrivals[1:], strict=False)]
+    return [b[0] - a[0] for a, b in itertools.pairwise(arrivals)]
 
 
 def silence_bounds(
@@ -497,6 +496,8 @@ class TTSItem(BaseModel):
     ref_chars: int | None = None
     rt_wer: float | None = None
     rt_cer: float | None = None
+    rt_metric: str | None = None
+    """Headline round-trip metric: ``wer``, or ``cer`` for languages without spaces."""
     entities_total: int = 0
     entities_ok: int | None = None
     entities_missed: list[str] = Field(default_factory=list)
@@ -505,19 +506,21 @@ class TTSItem(BaseModel):
     error: str | None = None
 
 
-def score_transcript(item: TTSItem, text: TTSText, normalizer: TextNormalizer) -> None:
+def score_transcript(
+    item: TTSItem, text: TTSText, *, language: str | None, normalize: Callable[[str], str]
+) -> None:
     """Fill the round-trip fields of ``item`` from ``item.transcript``."""
-    hyp = item.transcript or ""
-    ref_n, hyp_n = normalizer(text.text), normalizer(hyp)
-    words, chars = word_counts(ref_n, hyp_n), char_counts(ref_n, hyp_n)
-    item.reference_norm, item.transcript_norm = ref_n, hyp_n
-    item.word_errors, item.ref_words = words.errors, words.ref_len
-    item.char_errors, item.ref_chars = chars.errors, chars.ref_len
-    item.rt_wer, item.rt_cer = words.rate, chars.rate
+    score = score_round_trip(
+        text.text, item.transcript or "", language=language, normalize=normalize,
+        entities=text.entities,
+    )  # fmt: skip
+    item.reference_norm, item.transcript_norm = score.reference_norm, score.transcript_norm
+    item.word_errors, item.ref_words = score.words.errors, score.words.ref_len
+    item.char_errors, item.ref_chars = score.chars.errors, score.chars.ref_len
+    item.rt_wer, item.rt_cer, item.rt_metric = score.words.rate, score.chars.rate, score.headline
     if text.entities:
-        missed = [e[0] for e in text.entities if not entity_matches(e, hyp, normalizer)]
-        item.entities_ok = len(text.entities) - len(missed)
-        item.entities_missed = missed
+        item.entities_ok = len(text.entities) - len(score.entities_missed)
+        item.entities_missed = list(score.entities_missed)
 
 
 # ------------------------------------------------------------------------------- summary
@@ -534,11 +537,13 @@ _TIME_METRICS = (
 _RATIO_METRICS = ("rtf",)
 
 
-def _corpus(counts: Iterable[EditCounts]) -> float | None:
-    total = EditCounts()
-    for c in counts:
-        total = total + c
-    return total.rate
+def _corpus(pairs: Iterable[tuple[int | None, int | None]]) -> float | None:
+    """Σ errors / Σ reference length over items (the corpus rate of :mod:`..wer`)."""
+    errors = ref = 0
+    for e, n in pairs:
+        errors += e or 0
+        ref += n or 0
+    return errors / ref if ref else None
 
 
 def summarize_tts(
@@ -562,8 +567,8 @@ def summarize_tts(
         for key in mos_keys:
             metrics[f"{mode}.{key}"] = dist(it.mos.get(key) for it in ok)
         scored = [it for it in ok if it.word_errors is not None]
-        wer = _corpus(EditCounts(it.word_errors or 0, it.ref_words or 0) for it in scored)
-        cer = _corpus(EditCounts(it.char_errors or 0, it.ref_chars or 0) for it in scored)
+        wer = _corpus((it.word_errors, it.ref_words) for it in scored)
+        cer = _corpus((it.char_errors, it.ref_chars) for it in scored)
         ent_total = sum(it.entities_total for it in scored)
         ent_ok = sum(it.entities_ok or 0 for it in scored)
         audio_s = sum((it.audio_ms or 0.0) for it in ok) / 1000.0
@@ -589,9 +594,7 @@ def summarize_tts(
             cat_items = [it for it in scored if it.category == cat]
             by_category[cat or "-"] = {
                 "n": len(cat_items),
-                "rt_wer": _corpus(
-                    EditCounts(it.word_errors or 0, it.ref_words or 0) for it in cat_items
-                ),
+                "rt_wer": _corpus((it.word_errors, it.ref_words) for it in cat_items),
             }
         per_mode[mode] = {
             "audio_s": round(audio_s, 3),
@@ -754,11 +757,11 @@ def _component_info(component: TTS | STT, spec: Any) -> dict[str, Any]:
 
 
 async def run_tts_benchmark(
-    tts: TTS | str | Mapping[str, Any],
+    tts: TTS | ComponentSpec,
     texts: TextSet | str | None = None,
     options: TTSOptions | None = None,
     *,
-    stt: STT | str | Mapping[str, Any] | None = None,
+    stt: STT | ComponentSpec | None = None,
     mos: MOSPredictor | str | None = None,
     out_dir: str | os.PathLike[str] | None = None,
     run_id: str | None = None,
@@ -835,8 +838,8 @@ async def _run_tts(
     created = utc_timestamp()
     t_start = now()
     notes: list[str] = []
-    normalizer = get_normalizer(options.normalizer)
     language = options.language or text_set.language
+    norm_name, normalize = resolve_normalizer(language, options.normalizer)
 
     # load everything up front: a broken STT should fail before minutes of synthesis
     t0 = now()
@@ -904,7 +907,9 @@ async def _run_tts(
             try:
                 transcript = await stt.transcribe(clip, language=language)
                 item.transcript = transcript.text.strip()
-                score_transcript(item, texts_by_id[item.text_id], normalizer)
+                score_transcript(
+                    item, texts_by_id[item.text_id], language=language, normalize=normalize
+                )
             except Exception as exc:
                 item.error = item.error or f"stt: {exc!r}"
         if mos is not None:
@@ -915,12 +920,6 @@ async def _run_tts(
 
     if stt is None:
         notes.append("No --stt given: round-trip WER/CER and hard-text accuracy were skipped.")
-    if normalizer.name == "basic-english" and stt is not None:
-        notes.append(
-            "Round-trip WER used the built-in basic-english normalizer (the Whisper English "
-            "normalizer of the ASR track is not installed): numbers and amounts spelled "
-            "differently count as errors, so rates are higher than Seed-TTS-eval numbers."
-        )
     no_speech = sum(1 for it in items if it.no_speech)
     if no_speech:
         notes.append(
@@ -937,7 +936,7 @@ async def _run_tts(
     extra.update(
         tts_warmup_ms=round(warmup_ms, 3),
         cold_start=cold,
-        normalizer=normalizer.name,
+        normalizer=norm_name,
         stt=None if stt is None else f"{stt.provider}/{stt.model}",
         mos=None if mos is None else mos.name,
     )
@@ -953,7 +952,7 @@ async def _run_tts(
         transport={"type": "none", "note": "in-process component calls"},
         options={
             **asdict(options),
-            "normalizer_resolved": normalizer.name,
+            "normalizer_resolved": norm_name,
             "stt_language": language,
             "mos": mos_info,
         },
@@ -991,4 +990,3 @@ def _write_audio(directory: Path, items: Sequence[TTSItem], audio: Sequence[Audi
         (directory / rel).parent.mkdir(parents=True, exist_ok=True)
         write_wav(directory / rel, clip)
         item.audio_file = rel.as_posix()
-
