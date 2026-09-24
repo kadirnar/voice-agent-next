@@ -24,9 +24,36 @@ Provider extras (`[openai]`, `[google]`, `[silero]`, `[faster-whisper]`, `[kokor
 
 ## Quick start
 
+Pick a [preset](docs/presets.md), a tested stack, and talk to it:
+
+```bash
+van presets                      # which presets run on this machine, and what the others need
+van run --preset local-cpu       # fully offline: sherpa-onnx streaming STT + Ollama + Kokoro
+van run --preset openai-realtime # or cloud-fast, cloud-quality, gemini-live, local-gpu, apple, hybrid
+van run                          # no preset: the best one that is ready here (it says which)
+```
+
+`van run --preset` checks the preset first. When something is missing, it prints the exact
+fixes (`pip install 'voice-agent-next[sherpa-onnx,kokoro,...]'`, `ollama pull ...`,
+`export DEEPGRAM_API_KEY=...`). Presets are starting points. Override any component with a
+flag (`--llm ollama/qwen3.5:4b`), or with a config file:
+
+```yaml
+# agent.yaml  ->  van run -c agent.yaml
+extends: local-cpu
+llm: ollama/qwen3.5:4b
+agent:
+  instructions: You are a friendly assistant.
+  greeting: Hi!
+```
+
+In Python:
+
 ```python
 import asyncio
-from voice_agent_next import Agent, AgentSession, function_tool
+from voice_agent_next import Agent, function_tool
+from voice_agent_next.app import build_session
+from voice_agent_next.presets import load_preset
 from voice_agent_next.transports import create_transport
 
 
@@ -39,14 +66,11 @@ async def get_weather(city: str) -> str:
 async def main() -> None:
     agent = Agent("You are a friendly assistant.", tools=[get_weather], greeting="Hi!")
 
-    # Native speech-to-speech model...
-    session = AgentSession("openai/gpt-realtime")
-    # ...or a cascade (any mix of local and cloud components):
+    # Checks the preset (raises with the fixes if it cannot run here), then builds it.
+    session = build_session(load_preset("local-cpu"))  # or "cloud-fast", "openai-realtime"...
+    # Without presets, name any mix of components:
     # session = AgentSession(stt="deepgram/nova-3", llm="anthropic/claude-haiku-4-5",
     #                        tts="cartesia", vad="silero", turn_detector="smart_turn")
-    # ...or fully offline:
-    # session = AgentSession(stt="faster-whisper/base", llm="ollama/qwen3.5:4b",
-    #                        tts="kokoro", vad="silero", turn_detector="smart_turn")
 
     await session.run(agent, create_transport("local"))  # microphone + speakers
 
