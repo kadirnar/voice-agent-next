@@ -588,3 +588,11 @@ async def test_real_model_synthesizes_a_sentence() -> None:
         f"\nkokoro {tts.model}: TTFB {ttfb * 1000:.0f} ms, RTF {elapsed / audio.duration:.3f} "
         f"({audio.duration:.2f} s of audio in {elapsed:.2f} s)"
     )
+
+
+def test_normalization_language_follows_the_voice(backend: FakeBackend) -> None:
+    tts = KokoroTTS()
+    assert tts.normalize_by_default and tts.text_language("af_heart") == "en-us"
+    assert tts.text_language("ef_dora") == "es"
+    assert tts.normalizer_for("bf_emma") is not None
+    assert KokoroTTS(normalize=False).normalizer_for() is None

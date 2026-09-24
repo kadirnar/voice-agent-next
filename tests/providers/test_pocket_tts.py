@@ -560,3 +560,20 @@ async def test_real_model_streams_a_sentence() -> None:
         f"\npocket-tts: TTFB {ttfb * 1000:.0f} ms, RTF {elapsed / audio.duration:.3f} "
         f"({audio.duration:.2f} s of audio in {elapsed:.2f} s)"
     )
+
+
+async def test_numbers_are_spoken_and_word_timings_point_to_the_original(
+    backend: FakeBackend,
+) -> None:
+    tts = PocketTTS()
+    items = await collect(tts, "Your order 58213 costs $42.50.")
+    assert backend.model.calls[0]["text"] == (
+        "Your order five eight two one three costs forty-two dollars and fifty cents."
+    )
+    assert items[0].text == "Your order 58213 costs $42.50."
+    assert [w.word for w in words_of(items)] == ["Your", "order", "58213", "costs", "$42.50."]
+    raw = await collect(PocketTTS(normalize=False), "It is 5.")
+    assert backend.model.calls[-1]["text"] == "It is 5."
+    assert [w.word for w in words_of(raw)] == ["It", "is", "5."]
+    assert PocketTTS(language="french").text_language(None) == "french"
+    await tts.aclose()
