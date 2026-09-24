@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import ClassVar
 
 from .audio.frame import SAMPLE_WIDTH, AudioFrame
+from .audio.silence import SilenceTrimmer
 from .metrics import TTSMetrics
 from .stt import WordTiming
 from .text.filters import tts_clean
@@ -84,6 +85,7 @@ class TTS(ABC, EventEmitter):
         capabilities: TTSCapabilities | None = None,
         voice: str | None = None,
         clean_text: bool = True,
+        trim_silence: bool = True,
     ) -> None:
         EventEmitter.__init__(self)
         self.model = model
@@ -92,6 +94,9 @@ class TTS(ABC, EventEmitter):
         self.capabilities = capabilities or TTSCapabilities()
         self.voice = voice
         self.clean_text = clean_text
+        self.trim_silence = trim_silence
+        """Trim per-sentence leading/trailing silence when streaming via
+        :class:`SentenceStreamAdapter` (many models pad every utterance)."""
 
     def synthesize(self, text: str, *, voice: str | None = None) -> ChunkedStream:
         """Synthesize a complete text. Iterate the result for streamed audio chunks."""
@@ -345,6 +350,38 @@ class SentenceStreamAdapter(SynthesizeStream):
     def _start(self, sentence: str) -> ChunkedStream | None:
         return self._tts.synthesize(sentence, voice=self.voice) if sentence else None
 
+    async def _play_sentence(self, stream: ChunkedStream, on_chunk: Callable[[], None]) -> None:
+        """Forward one sentence's audio (silence-trimmed) and words onto this stream."""
+        tts = self._tts
+        trimmer = SilenceTrimmer(tts.sample_rate, tts.channels) if tts.trim_silence else None
+        base = self._audio_duration  # where this sentence starts on the stream
+        pending: list[WordTiming] = []
+
+        def emit(frame: AudioFrame, *, final: bool = False) -> None:
+            nonlocal pending
+            words = None
+            # words wait until the trimmer knows how much leading silence it dropped
+            if pending and (trimmer is None or trimmer.started or final):
+                dropped = trimmer.dropped_leading if trimmer is not None else 0.0
+                words, pending = _shift_words(pending, base - dropped), []
+            if frame:
+                self._push_audio(frame, words=words)
+            elif words:
+                self._send(SynthesizedAudio(frame, self._request_id, self._segment_id, words=words))
+
+        async for chunk in stream:
+            if chunk.words:
+                pending.extend(chunk.words)
+            frame = chunk.frame
+            if trimmer is not None and frame:
+                frame = trimmer.push(frame)
+            emit(frame)
+            on_chunk()
+        emit(
+            trimmer.flush() if trimmer is not None else AudioFrame.empty(tts.sample_rate),
+            final=True,
+        )
+
     async def _run(self) -> None:
         jobs: Chan[tuple[str, bool]] = Chan()  # (sentence, ends_segment)
 
@@ -371,19 +408,7 @@ class SentenceStreamAdapter(SynthesizeStream):
                     if stream is not None:
                         self._segment_text = sentence
                         try:
-                            base = self._audio_duration  # sentence start on this stream
-                            async for chunk in stream:
-                                words = _shift_words(chunk.words, base)
-                                if chunk.frame:
-                                    self._push_audio(chunk.frame, words=words)
-                                elif words:
-                                    self._send(
-                                        SynthesizedAudio(
-                                            chunk.frame, self._request_id, self._segment_id,
-                                            words=words,
-                                        )
-                                    )  # fmt: skip
-                                prefetch()
+                            await self._play_sentence(stream, prefetch)
                         finally:
                             await stream.aclose()
                     if ends:

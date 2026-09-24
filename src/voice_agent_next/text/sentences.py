@@ -51,6 +51,9 @@ class SentenceSegmenter:
             the last clause boundary (or whitespace).
         first_segment_min_chars: optional smaller minimum for the very first segment,
             to start speaking sooner.
+        first_segment_max_chars: if the first sentence is longer than this, release its
+            first clause (up to the first comma/semicolon/colon/dash) on its own, so a
+            sentence-at-a-time TTS can start speaking sooner.
     """
 
     def __init__(
@@ -59,12 +62,14 @@ class SentenceSegmenter:
         min_chars: int = 10,
         max_chars: int = 220,
         first_segment_min_chars: int | None = None,
+        first_segment_max_chars: int | None = None,
     ) -> None:
         if max_chars <= min_chars:
             raise ValueError("max_chars must be greater than min_chars")
         self.min_chars = min_chars
         self.max_chars = max_chars
         self.first_segment_min_chars = first_segment_min_chars
+        self.first_segment_max_chars = first_segment_max_chars
         self._buf = ""
         self._emitted = 0
 
@@ -118,9 +123,35 @@ class SentenceSegmenter:
         cuts.extend(m.start() for m in _PARAGRAPH.finditer(buf) if m.start() > 0)
         return sorted(set(cuts))
 
+    def _first_clause(self, min_len: int) -> str | None:
+        """Cut a long *first* sentence at its first clause boundary (faster first audio)."""
+        limit = self.first_segment_max_chars
+        if limit is None or self._emitted:
+            return None
+        buf = self._buf
+        sentence_end = next(
+            (c for c in self._boundaries() if len(buf[:c].strip()) >= min_len), None
+        )
+        span = buf[:sentence_end] if sentence_end is not None else buf
+        if len(span.strip()) <= limit:
+            return None
+        cut = next((m.end() for m in _CLAUSE.finditer(span) if m.end() >= min_len), None)
+        if cut is None and len(span) > 2 * limit:  # no clause in sight: word boundary
+            space = span.rfind(" ", 0, 2 * limit)
+            cut = space if space >= min_len else None
+        if cut is None or (sentence_end is not None and cut >= sentence_end):
+            return None
+        seg = buf[:cut].strip()
+        self._buf = buf[cut:].lstrip()
+        self._emitted += 1
+        return seg
+
     def _next_segment(self) -> str | None:
         buf = self._buf
         min_len = self._min()
+        first = self._first_clause(min_len)
+        if first:
+            return first
         for cut in self._boundaries():
             seg = buf[:cut].strip()
             if len(seg) >= min_len:

@@ -96,3 +96,32 @@ def test_strip_markdown() -> None:
 
 def test_tts_clean_removes_emoji_and_normalizes_space() -> None:
     assert tts_clean("Great   job! 🎉👍  **Really**") == "Great job! Really"
+
+
+def test_first_long_sentence_is_split_at_its_first_clause() -> None:
+    seg = SentenceSegmenter(min_chars=10, first_segment_min_chars=4, first_segment_max_chars=40)
+    text = "Sure, the store opens at nine tomorrow and closes at six in the evening. Anything else?"
+    parts = seg.push(text) + seg.flush()
+    assert parts == [
+        "Sure,",
+        "the store opens at nine tomorrow and closes at six in the evening.",
+        "Anything else?",
+    ]
+
+
+def test_first_clause_split_only_applies_to_long_first_sentences() -> None:
+    seg = SentenceSegmenter(min_chars=10, first_segment_min_chars=4, first_segment_max_chars=40)
+    assert seg.push("Yes, we are open. ") == ["Yes, we are open."]  # short: kept whole
+    later = "Later sentences, even long ones with commas, are never split early. "
+    assert seg.push(later) == [later.strip()]
+
+
+def test_first_clause_split_while_streaming_and_word_fallback() -> None:
+    seg = SentenceSegmenter(min_chars=10, first_segment_min_chars=4, first_segment_max_chars=20)
+    out: list[str] = []
+    for word in ["Well,", "I", "think", "the", "answer", "depends", "on"]:
+        out += seg.push(word + " ")
+    assert out == ["Well,"]  # released before the sentence is complete
+    seg2 = SentenceSegmenter(min_chars=5, first_segment_min_chars=4, first_segment_max_chars=10)
+    parts = seg2.push("averyveryvery longrunonsentence withoutanyclause boundaries at all here ")
+    assert parts and len(parts[0]) <= 20

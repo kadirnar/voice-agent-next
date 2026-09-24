@@ -76,6 +76,9 @@ class CascadeOptions:
     """Applied to each sentence before TTS (markdown/emoji removal by default)."""
     first_sentence_min_chars: int = 4
     """Minimum length of the first spoken chunk (smaller = faster first audio)."""
+    first_sentence_max_chars: int | None = 40
+    """Split a longer first sentence at its first clause boundary: TTS engines that render
+    a whole sentence before emitting audio (Kokoro, most local models) start sooner."""
     max_history_items: int | None = None
     """Truncate the LLM context to this many items (system prompt always kept)."""
     turn_audio_prefix: float = 0.5
@@ -523,7 +526,9 @@ class CascadeConnection(EngineConnection):
         tts_stream = engine.tts.stream(voice=self.options.voice)
         aligned = not engine.tts.capabilities.streaming  # sentence adapter reports segment text
         segmenter = SentenceSegmenter(
-            min_chars=10, first_segment_min_chars=self._opts.first_sentence_min_chars
+            min_chars=10,
+            first_segment_min_chars=self._opts.first_sentence_min_chars,
+            first_segment_max_chars=self._opts.first_sentence_max_chars,
         )
         spoken = self._spoken[item_id] = _Spoken()
         text_filter = self._opts.text_filter
@@ -536,6 +541,10 @@ class CascadeConnection(EngineConnection):
             if not aligned:
                 self._emit(ResponseText(response_id=rid, item_id=item_id, delta=cleaned + " "))
             tts_stream.push_text(cleaned + " ")
+            if aligned:
+                # sentence-at-a-time TTS: synthesize exactly this segment now (the adapter's
+                # own segmenter would otherwise hold a first *clause* until the sentence ends)
+                tts_stream.flush()
 
         async def feed() -> None:
             try:
