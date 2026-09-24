@@ -71,7 +71,13 @@ smart-turn = ["onnxruntime>=1.19"]
 # --- local STT / TTS / LLM ------------------------------------------------------
 faster-whisper = ["faster-whisper>=1.1"]
 kokoro = ["kokoro-onnx>=0.6.1; python_version < '3.14'"]  # upstream caps Requires-Python <3.14
-sherpa-onnx = ["sherpa-onnx>=1.10"]
+# sherpa-onnx wheels (except Linux armv7l, which bundles it) depend on sherpa-onnx-core of the
+# same version, which uv's universal lock misses: it reads the armv7l metadata. Upgrade both.
+# 1.13.3 (2026-06) postdates every model in the catalog (Nemotron 3.5 streaming, 2026-06-11).
+sherpa-onnx = [
+  "sherpa-onnx>=1.13.3",
+  "sherpa-onnx-core>=1.13.3; platform_machine != 'armv7l'",
+]
 # --- cloud providers (Deepgram, Cartesia, AssemblyAI, ElevenLabs... use raw WS/HTTP) --
 anthropic = ["anthropic>=0.60"]
 google = ["google-genai>=2.25"]

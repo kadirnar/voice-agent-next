@@ -1,0 +1,24 @@
+# T1 latency for a fully local cascade on sherpa-onnx: the same six questions as
+# `latency-local`, voiced by Kokoro (am_adam) running inside sherpa-onnx, so the stimuli
+# need only the `sherpa-onnx` extra (Kokoro v1.0 int8, 132 MB, downloaded once).
+# Use it with a streaming sherpa-onnx recognizer to measure the end-of-turn gain over a
+# batch recognizer (see docs/providers/sherpa-onnx.md for the configuration).
+name: latency-local-sherpa
+version: 1
+description: >-
+  Short customer-service questions spoken by Kokoro (am_adam) through sherpa-onnx, for
+  benchmarking streaming local STT fully offline.
+sample_rate: 16000
+loudness_dbfs: -20.0
+lead_in: 0.5
+stimuli: tts
+tts: {provider: sherpa-onnx/kokoro-multi-lang-v1_0-int8, voice: am_adam}
+reply_timeout: 15.0
+gap_after_reply: 0.5
+turns:
+  - {id: "time", text: "What time does the store open tomorrow?"}
+  - {id: "table", text: "Can you book a table for two people tonight?"}
+  - {id: "order", text: "Where is my order? I placed it last week."}
+  - {id: "sunday", text: "Are you open on Sunday afternoon?"}
+  - {id: "flight", text: "Please change my flight to Friday morning."}
+  - {id: "refund", text: "How long does a refund usually take?"}
