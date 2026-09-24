@@ -28,6 +28,7 @@ class LMStudioLLM(OpenAICompatibleLLM):
     :meth:`warmup` to load the model before the first turn."""
 
     provider = "lmstudio"
+    SYSTEM_MESSAGE_POLICY = "merge"  # Jinja chat templates: one leading system message
     DEFAULT_MODEL = None
     DEFAULT_BASE_URL = "http://127.0.0.1:1234/v1"
     BASE_URL_ENV = ("LMSTUDIO_BASE_URL",)

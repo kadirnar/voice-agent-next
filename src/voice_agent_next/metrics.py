@@ -64,6 +64,9 @@ class LLMMetrics:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_tokens: int = 0
+    """Prompt tokens read from the prompt cache (included in ``prompt_tokens``)."""
+    cache_creation_tokens: int = 0
+    """Prompt tokens written to the prompt cache (included in ``prompt_tokens``)."""
     tokens_per_second: float = 0.0
     cancelled: bool = False
     error: str | None = None
@@ -199,6 +202,7 @@ class UsageSummary:
     llm_prompt_tokens: int = 0
     llm_completion_tokens: int = 0
     llm_cached_tokens: int = 0
+    llm_cache_creation_tokens: int = 0
     tts_characters: int = 0
     tts_audio_seconds: float = 0.0
     engine_input_audio_tokens: int = 0
@@ -213,6 +217,7 @@ class UsageSummary:
             self.llm_prompt_tokens += m.prompt_tokens
             self.llm_completion_tokens += m.completion_tokens
             self.llm_cached_tokens += m.cached_tokens
+            self.llm_cache_creation_tokens += m.cache_creation_tokens
         elif isinstance(m, TTSMetrics):
             self.tts_characters += m.characters
             self.tts_audio_seconds += m.audio_duration

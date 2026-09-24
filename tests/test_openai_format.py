@@ -332,3 +332,62 @@ def test_function_call_output_type_is_preserved_for_errors() -> None:
     ctx.append(FunctionCall(name="book", arguments="{}", call_id="c1"))
     ctx.append(FunctionCallOutput(call_id="c1", output="Tool book failed: timeout", is_error=True))
     assert to_chat_messages(ctx)[-1] == tool_msg("c1", "Tool book failed: timeout")
+
+
+def strict_ctx() -> ChatContext:
+    ctx = ChatContext()
+    ctx.add_message("system", "You are terse.")
+    ctx.add_message("user", "Hi")
+    ctx.add_message("assistant", "Hello!")
+    ctx.add_message("user", "Bye")
+    ctx.add_message("system", "Say goodbye politely.")  # per-response instructions
+    return ctx
+
+
+def test_system_messages_kept_in_place_by_default() -> None:
+    assert [m["role"] for m in to_chat_messages(strict_ctx())] == [
+        "system", "user", "assistant", "user", "system"]  # fmt: skip
+
+
+def test_system_messages_merged_into_one_leading_message() -> None:
+    assert to_chat_messages(strict_ctx(), system_messages="merge") == [
+        {"role": "system", "content": "You are terse.\n\nSay goodbye politely."},
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"},
+        {"role": "user", "content": "Bye"},
+    ]
+    only_late = ChatContext()
+    only_late.add_message("user", "Hi")
+    only_late.add_message("developer", "Answer in French.")
+    assert to_chat_messages(only_late, developer_role="system", system_messages="merge") == [
+        {"role": "system", "content": "Answer in French."},
+        {"role": "user", "content": "Hi"},
+    ]
+
+
+def test_late_system_messages_as_user_keep_roles_alternating() -> None:
+    assert to_chat_messages(strict_ctx(), system_messages="as_user") == [
+        {"role": "system", "content": "You are terse."},
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"},
+        {"role": "user", "content": "Bye\n\nSay goodbye politely."},
+    ]
+    ctx = ChatContext()
+    ctx.add_message("user", ["Look: ", ImageContent("data:image/png;base64,AAAA")])
+    ctx.add_message("system", "Describe it briefly.")
+    (msg,) = to_chat_messages(ctx, system_messages="as_user")
+    assert msg["role"] == "user" and msg["content"][-1] == {
+        "type": "text", "text": "Describe it briefly."}  # fmt: skip
+
+
+def test_hosts_with_strict_templates_merge_system_messages() -> None:
+    from voice_agent_next.providers.llamacpp import LlamaCppLLM
+    from voice_agent_next.providers.ollama import OllamaLLM
+    from voice_agent_next.providers.openai.llm import OpenAILLM
+
+    pytest.importorskip("openai")
+    assert LlamaCppLLM().system_message_policy == "merge"
+    assert OllamaLLM().system_message_policy == "keep"
+    llm = OpenAILLM(api_key="sk-test", system_message_policy="as_user")
+    request = llm.build_request(strict_ctx())
+    assert [m["role"] for m in request["messages"]] == ["system", "user", "assistant", "user"]
