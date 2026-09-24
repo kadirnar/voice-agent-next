@@ -292,15 +292,17 @@ class ServeState:
 
     def health(self) -> dict[str, Any]:
         """The ``GET /health`` document (liveness)."""
-        return {
+        doc: dict[str, Any] = {
             "status": "draining" if self.draining else "ok",
             "protocol": self.protocol,
-            "worker": self.worker,
             "pid": os.getpid(),
             "sessions": self.active,
             "max_sessions": self.max_sessions,
             "uptime": round(now() - self.started_at, 3),
         }
+        if self.worker is not None:
+            doc["worker"] = self.worker
+        return doc
 
     def readiness(self) -> dict[str, Any]:
         """The ``GET /ready`` document."""
