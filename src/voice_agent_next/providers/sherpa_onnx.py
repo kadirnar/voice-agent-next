@@ -1362,8 +1362,12 @@ class _SherpaOnlineStream(STTStream):
             )
 
     def _finish(self, snap: _Snapshot) -> None:
-        """Final transcript (even an empty one: the cascade waits for it after a flush)."""
+        """Final transcript (even an empty one: the cascade waits for it after a flush),
+        framed by START/END_OF_SPEECH when the segment had any text."""
         segment = self._segment_id
+        if snap.text and not self._speaking:  # no interim result before the final one
+            self._speaking = True
+            self._emit(STTEvent(STTEventType.START_OF_SPEECH, segment_id=segment))
         transcript = self._transcript(snap)
         self._emit(STTEvent(STTEventType.FINAL_TRANSCRIPT, transcript, segment))
         if self._speaking:
