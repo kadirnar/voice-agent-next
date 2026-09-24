@@ -1311,6 +1311,28 @@ wheels = [
 ]
 
 [[package]]
+name = "moonshine-voice"
+version = "0.1.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "filelock" },
+    { name = "google-crc32c" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "platformdirs" },
+    { name = "requests" },
+    { name = "sounddevice" },
+    { name = "tqdm" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/86/2a/9eca2f000e4990315d18aa360c6eb679417b29252e6307c273bcbef38461/moonshine_voice-0.1.5-py3-none-macosx_15_0_arm64.whl", hash = "sha256:9866b1956d12fff11923ad42f1140bcb314bf05bf8d8576fb7b3aa819ec40e51", size = 18589534, upload-time = "2026-08-24T20:50:28.184Z" },
+    { url = "https://files.pythonhosted.org/packages/23/1c/cb821747b2a7b40216dd576a62d1ebc77d04fab97064efc97fa460f137ed/moonshine_voice-0.1.5-py3-none-manylinux_2_31_aarch64.whl", hash = "sha256:605300afe33eb7920301e73f11e0ea7493770eb655f389ba65be4aa1db8dedd6", size = 18505651, upload-time = "2026-08-24T21:22:03.754Z" },
+    { url = "https://files.pythonhosted.org/packages/56/b3/ca8c6f3eb47498208e92094d68e3dc2a0ce50213fdf980e212f293872455/moonshine_voice-0.1.5-py3-none-manylinux_2_34_aarch64.whl", hash = "sha256:fd9fa38ab58c6a8e64eb43b81b0f491138159c7ce45584bb0736ed7efa539766", size = 18634500, upload-time = "2026-08-24T21:15:04.032Z" },
+    { url = "https://files.pythonhosted.org/packages/a9/9d/228f738b48e0e7cc1de97c3f842b5470c6a3c5f7a0bffbf13c3d00eefb87/moonshine_voice-0.1.5-py3-none-manylinux_2_34_x86_64.whl", hash = "sha256:1ed9e0ccf94be4845d69e7fa862dcf4c8b5801a758796966494c694f48184496", size = 19897307, upload-time = "2026-08-24T21:06:47.113Z" },
+    { url = "https://files.pythonhosted.org/packages/ea/05/ad3457baa56170a13829c98327598a4d99d6cd4bdff8ae59df4c47ebdd11/moonshine_voice-0.1.5-py3-none-win_amd64.whl", hash = "sha256:7fc9a84e827360ddb85c2735f44a1502c5575c27dcb476a2555646cd20a70e9d", size = 16542073, upload-time = "2026-08-24T23:17:38.555Z" },
+]
+
+[[package]]
 name = "mypy"
 version = "2.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2490,6 +2512,9 @@ local = [
     { name = "sounddevice" },
     { name = "soxr" },
 ]
+moonshine = [
+    { name = "moonshine-voice", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
+]
 onnx = [
     { name = "onnxruntime" },
 ]
@@ -2534,6 +2559,7 @@ requires-dist = [
     { name = "jiwer", marker = "extra == 'bench'", specifier = ">=3.0" },
     { name = "kokoro-onnx", marker = "python_full_version < '3.14' and extra == 'kokoro'", specifier = ">=0.6.1" },
     { name = "livekit", marker = "extra == 'aec'", specifier = ">=1.0" },
+    { name = "moonshine-voice", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'moonshine') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'moonshine') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'moonshine') or (platform_machine == 'AMD64' and sys_platform == 'win32' and extra == 'moonshine')", specifier = ">=0.1.5" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "onnxruntime", marker = "extra == 'onnx'", specifier = ">=1.19" },
     { name = "onnxruntime", marker = "extra == 'silero'", specifier = ">=1.19" },
@@ -2552,7 +2578,7 @@ requires-dist = [
     { name = "voice-agent-next", extras = ["openai", "anthropic", "google"], marker = "extra == 'cloud'" },
     { name = "websockets", specifier = ">=13.0" },
 ]
-provides-extras = ["resample", "audio", "aec", "onnx", "silero", "smart-turn", "faster-whisper", "kokoro", "sherpa-onnx", "anthropic", "google", "openai", "webrtc", "bench", "local", "cloud"]
+provides-extras = ["resample", "audio", "aec", "onnx", "silero", "smart-turn", "faster-whisper", "kokoro", "moonshine", "sherpa-onnx", "anthropic", "google", "openai", "webrtc", "bench", "local", "cloud"]
 
 [package.metadata.requires-dev]
 dev = [
