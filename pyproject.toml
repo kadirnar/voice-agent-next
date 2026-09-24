@@ -87,6 +87,9 @@ sherpa-onnx = [
   "sherpa-onnx>=1.13.3",
   "sherpa-onnx-core>=1.13.3; platform_machine != 'armv7l'",
 ]
+# --- local speech-to-speech servers ------------------------------------------------
+# Kyutai's Ogg/Opus codec (Rust, bundled libopus): byte-compatible with moshi-server
+moshi = ["sphn>=0.2,<0.3"]
 # --- cloud providers (Deepgram, Cartesia, AssemblyAI, ElevenLabs... use raw WS/HTTP) --
 anthropic = ["anthropic>=0.60"]
 google = ["google-genai>=2.25"]
@@ -120,6 +123,7 @@ dev = [
   "mypy>=1.11",
   "types-PyYAML>=6.0",
   "soxr>=0.5",
+  "sphn>=0.2,<0.3",  # Ogg/Opus for the Moshi fake-server tests (extra `moshi`)
   "opentelemetry-api>=1.27",  # tracing tests (in-memory span exporter)
   "opentelemetry-sdk>=1.27",
 ]
