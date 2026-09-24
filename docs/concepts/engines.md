@@ -1,7 +1,7 @@
 # Engines and events
 
 Every way of building a voice agent is a **speech-to-speech engine**. A native audio model
-(OpenAI Realtime, Gemini Live, an OpenAI-Realtime-compatible local server) and a streaming
+(OpenAI Realtime, Gemini Live, Moshi, an OpenAI-Realtime-compatible local server) and a streaming
 cascade (VAD → STT → turn detector → LLM → TTS) implement the same interface and emit the
 same events. The session runtime, the transports, the metrics and the benchmarks are
 written once against that interface.
@@ -72,6 +72,7 @@ where the engine can.
 |---|---|
 | OpenAI Realtime, Azure OpenAI, xAI Grok Voice, Qwen-Omni Realtime, vLLM-Omni, Speaches, LocalAI | [OpenAI Realtime (+ compatible)](../providers/openai-realtime.md) |
 | Gemini Live | [Gemini Live](../providers/gemini-live.md) |
+| Moshi, PersonaPlex (local, full-duplex) | [Moshi and PersonaPlex](../providers/moshi.md) |
 | `mock` | a deterministic engine for tests, `van demo` and benchmarks |
 
 Native engines detect turns on the server by default (`EngineOptions.turn_detection`);

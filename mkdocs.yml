@@ -127,6 +127,7 @@ nav:
       - Speech-to-speech engines:
           - OpenAI Realtime (+ compatible): providers/openai-realtime.md
           - Gemini Live: providers/gemini-live.md
+          - Moshi and PersonaPlex: providers/moshi.md
       - Cloud:
           - OpenAI: providers/openai.md
           - Anthropic: providers/anthropic.md

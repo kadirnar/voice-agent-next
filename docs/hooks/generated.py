@@ -48,6 +48,7 @@ PAGE_OVERRIDES: dict[tuple[str, str], str] = {
     ("engine", "speaches"): _REALTIME,
     ("engine", "localai"): _REALTIME,
     ("engine", "google"): "gemini-live.md",
+    ("engine", "personaplex"): "moshi.md",
     ("llm", "azure_openai"): "openai.md#azure-openai-and-custom-clients",
     ("stt", "azure_openai"): "openai.md",
     ("tts", "azure_openai"): "openai.md",
