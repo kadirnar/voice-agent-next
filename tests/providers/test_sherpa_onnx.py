@@ -548,11 +548,16 @@ def test_wrong_task_unknown_model_and_kind(backend: FakeBackend) -> None:
         ),
         (
             "sherpa-onnx-moonshine-tiny-en-int8",
-            ("preprocess.onnx", "encode.int8.onnx", "uncached_decode.int8.onnx",
-             "cached_decode.int8.onnx", "tokens.txt"),
+            (
+                "preprocess.onnx",
+                "encode.int8.onnx",
+                "uncached_decode.int8.onnx",
+                "cached_decode.int8.onnx",
+                "tokens.txt",
+            ),
             (),
             "offline-moonshine",
-        ),  # fmt: skip
+        ),
         ("sherpa-onnx-sense-voice-2024", ("model.onnx", "tokens.txt"), (), "offline-sense-voice"),
         (
             "sherpa-onnx-whisper-tiny.en",
@@ -670,7 +675,7 @@ async def test_streaming_emits_interim_and_final_transcripts(
     finals = [e for e in events if e.type == STTEventType.FINAL_TRANSCRIPT]
     assert [e.text for e in finals] == ["hello world how are you today", ""]
     assert kinds(events)[-3:] == ["final_transcript", "end_of_speech", "final_transcript"]
-    segment = {e.segment_id for e in events[: -1]}
+    segment = {e.segment_id for e in events[:-1]}
     assert len(segment) == 1  # START ... END share the utterance's segment id
     final = finals[0].transcript
     assert final is not None and final.words is not None
@@ -801,7 +806,9 @@ async def test_cascade_uses_the_streaming_recognizer_directly(
 ) -> None:
     engine = CascadeEngine(stt="sherpa-onnx", vad="energy", llm="mock", tts="mock")
     assert isinstance(engine.stt, SherpaOnnxSTT)
-    offline = CascadeEngine(stt="sherpa-onnx/moonshine-tiny-en", vad="energy", llm="mock", tts="mock")
+    offline = CascadeEngine(
+        stt="sherpa-onnx/moonshine-tiny-en", vad="energy", llm="mock", tts="mock"
+    )
     assert isinstance(offline.stt, StreamAdapter)
     assert isinstance(offline.stt.wrapped, SherpaOnnxSTT)
 
@@ -860,7 +867,7 @@ def test_split_long_audio() -> None:
     x = np.ones(10 * SR, dtype=np.float32)
     x[7 * SR : 7 * SR + 800] = 0.0  # a 50 ms pause
     pieces = split_long_audio(x, 8 * SR, SR)
-    assert [len(p) for p in pieces][0] == pytest.approx(7 * SR + 400, abs=400)
+    assert len(pieces[0]) == pytest.approx(7 * SR + 400, abs=400)
     assert sum(len(p) for p in pieces) == len(x)
     assert split_long_audio(x, 0, SR)[0] is x and len(split_long_audio(x, 20 * SR, SR)) == 1
 
@@ -958,7 +965,7 @@ async def test_speaker_id_out_of_range_and_invalid_config(
         await broken.warmup()
     with pytest.raises(ConfigurationError, match="speed"):
         SherpaOnnxTTS(speed=10)
-    with pytest.raises(ConfigurationError, match="named voice|unknown sherpa-onnx voice"):
+    with pytest.raises(ConfigurationError, match=r"named voice|unknown sherpa-onnx voice"):
         SherpaOnnxTTS(voice="alice")  # piper voices are numbered
     await tts.aclose()
 
