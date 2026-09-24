@@ -35,6 +35,7 @@ jobs:
         run: |
           echo "VAN_CACHE_DIR=${RUNNER_TEMP}/van" >> "$GITHUB_ENV"
           echo "HF_HOME=${RUNNER_TEMP}/hf" >> "$GITHUB_ENV"
+          echo "MOONSHINE_VOICE_CACHE=${RUNNER_TEMP}/moonshine" >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -45,7 +46,8 @@ jobs:
           path: |
             ${{ runner.temp }}/van
             ${{ runner.temp }}/hf
+            ${{ runner.temp }}/moonshine
           key: models-${{ runner.os }}-${{ hashFiles('src/voice_agent_next/providers/**/*.py', 'tests/providers/**/*.py', 'tests/test_aec.py') }}
           restore-keys: models-${{ runner.os }}-
-      - run: uv sync --extra silero --extra smart-turn --extra faster-whisper --extra kokoro --extra aec
+      - run: uv sync --extra silero --extra smart-turn --extra faster-whisper --extra kokoro --extra aec --extra moonshine
       - run: uv run pytest -q -m model --durations=15
