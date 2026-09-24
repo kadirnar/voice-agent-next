@@ -71,6 +71,8 @@ google = ["google-genai>=1.30"]
 openai = ["openai>=2.0"]
 # --- transports -------------------------------------------------------------------
 webrtc = ["aiortc>=1.9"]
+# --- observability -----------------------------------------------------------------
+otel = ["opentelemetry-api>=1.27"]  # tracing API only: pick your own SDK and exporter
 # --- benchmark ----------------------------------------------------------------------
 bench = ["jiwer>=3.0"]
 # --- bundles ------------------------------------------------------------------------
@@ -96,6 +98,8 @@ dev = [
   "mypy>=1.11",
   "types-PyYAML>=6.0",
   "soxr>=0.5",
+  "opentelemetry-api>=1.27",  # tracing tests (in-memory span exporter)
+  "opentelemetry-sdk>=1.27",
 ]
 
 [tool.hatch.build.targets.wheel]
