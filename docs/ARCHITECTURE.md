@@ -23,6 +23,7 @@ voice-agent-next is organized around one idea: **every way of building a voice a
 |---|---|---|
 | Audio primitives | `audio/` | `AudioFrame` (s16le + sample rate + channels + capture timestamp), buffers, fixed-size chunking, streaming resampling (soxr or numpy polyphase), bit-exact G.711, WAV I/O, `AudioProcessor` hooks |
 | Components | `stt.py`, `tts.py`, `llm.py`, `vad.py`, `turn.py` | provider-neutral interfaces + streaming base classes that handle resampling, error propagation and metrics |
+| Failover | `fallback.py` | `FallbackSTT` / `FallbackLLM` / `FallbackTTS` provider chains with health, cooldown and replay (see `docs/concepts/failover.md`) |
 | Engine | `engine.py`, `events.py` | `S2SEngine` factory, `EngineConnection` live session, `EngineCapabilities`, the event protocol |
 | Engines | `engines/cascade.py`, `providers/*` | the cascade; native engines live with their provider |
 | Session | `session/` | `Agent` (instructions, tools, hooks), `AgentSession` runtime |
