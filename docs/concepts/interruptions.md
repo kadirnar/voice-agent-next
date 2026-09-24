@@ -16,10 +16,11 @@ session drives it and handles pausing, truncation and events.
 | From | When | To | What the session does |
 |---|---|---|---|
 | agent speaking | the user starts speaking | overlap | pause playback |
-| overlap | speech ≥ `min_interruption_duration` and ≥ `min_interruption_words` non-backchannel words | interrupted | stop, cancel the response, truncate it to what was heard |
+| overlap | a speech segment ≥ `min_interruption_duration` and ≥ `min_interruption_words` non-backchannel words | interrupted | stop, cancel the response if it is still being generated, truncate it to what was heard |
+| overlap | still no words after `false_interruption_timeout` (noise, a TV) | overlap | stop holding the agent (it talks again); keep watching |
 | overlap | the user goes quiet | paused | start the `false_interruption_timeout` timer |
-| paused | the user speaks again | overlap | the timer stops; speech time keeps adding up |
-| paused | the transcript has only backchannels | agent speaking | resume at once; emit `agent_false_interruption(resumed=True)` |
+| paused | the user speaks again | overlap | the timer stops; words keep adding up |
+| paused | the final transcript has only backchannels | agent speaking | resume at once; emit `agent_false_interruption(resumed=True)` |
 | paused | quiet for `false_interruption_timeout`, no meaningful words | agent speaking | resume; emit `agent_false_interruption(resumed=True)` |
 | paused | quiet for `false_interruption_timeout`, meaningful words | interrupted | stop, cancel, truncate |
 | overlap / paused | the engine commits the user's turn or cancels the response itself | interrupted | truncate to what was heard (no cancel: the engine has moved on) |
@@ -31,14 +32,15 @@ is over". A false interruption therefore leaves no trace in the state.
 1. **Overlap.** The engine reports `InputSpeechStarted` while a response is generating or
    playing. The session pauses playback. Queued audio is kept, and so is the
    played position.
-2. **Confirm.** The interruption is real once the user has spoken for
-   `min_interruption_duration` seconds *and* said `min_interruption_words` non-backchannel
-   words (interim transcripts count). The session then clears the transport, cancels the
-   response and trims the history to what the user heard, as before (`interrupted` event,
+2. **Confirm.** The interruption is real once one speech segment has lasted
+   `min_interruption_duration` seconds *and* the user has said `min_interruption_words`
+   non-backchannel words (interim transcripts count). The session then clears the
+   transport, cancels the response if the engine is still generating it, and trims the
+   history to what the user heard, as before (`interrupted` event,
    `ChatMessage.interrupted`, `TurnMetrics.interrupted`).
 3. **Resume.** The user goes quiet, and one of these holds:
-   * the transcript of what they said has only backchannels ("uh-huh", "okay"): the agent
-     resumes at once;
+   * the *final* transcript of what they said has only backchannels ("uh-huh", "okay"):
+     the agent resumes at once;
    * they stay quiet for `false_interruption_timeout` seconds without meaningful words (a
      cough, noise): the agent resumes then.
 
@@ -96,11 +98,14 @@ async def on_false_interruption(ev):
   Sounds shorter than `min_interruption_duration` never interrupt. Longer ones do, even
   if they are only "mmm-hmmm". A short but meaningful "stop!" still interrupts: when the
   engine commits it as a turn, or at the timeout.
-* **Duration is measured from where the user's speech started.** While the engine still
-  reports speech, the count includes the VAD's trailing-silence hangover, as in LiveKit.
-  A cough of `c` seconds is filtered when
-  `c + VAD min_silence_duration < min_interruption_duration`. With the default VAD
+* **Duration is per speech segment**, measured from where the user's speech started, so
+  short sounds do not add up. While the engine still reports speech, the count includes
+  the VAD's trailing-silence hangover, as in LiveKit. A cough of `c` seconds is filtered
+  when `c + VAD min_silence_duration < min_interruption_duration`. With the default VAD
   (0.25 s) and 0.5 s, that means coughs up to about 0.25 s.
+* **Wordless sound** (a fan, a TV) with `min_interruption_words` ≥ 1 holds the agent at
+  most `false_interruption_timeout` seconds. After that the agent talks again while the
+  session keeps watching: words that turn up later still interrupt.
 
 ## Backchannels
 
@@ -148,10 +153,17 @@ backchannels. Pass your own list to change this:
 ## Engines
 
 * **Cascade** (`CascadeEngine`): VAD speech events drive the policy. Interim and final STT
-  results provide the words. The cascade commits a user turn, and answers it, after
-  endpointing. That would cancel the paused response, so when the whole utterance turns out
-  not to be meaningful the session calls `clear_input()` first. The backchannel is dropped
-  instead of being answered.
+  results provide the words; the STT finals are marked `InputTranscript.segment_final`.
+  The cascade commits a user turn, and answers it, after endpointing. That would cancel
+  the paused response. So when the final transcript of the utterance turns out not to be
+  meaningful, the session calls `clear_input()` first. The backchannel is dropped instead
+  of being answered. Only finals are conclusive: a late interim could still grow into
+  "okay, stop".
+* **Ordering.** The session decides only after it has handled every event the engine
+  already queued. A queued `InputCommitted` means the engine took the turn. On a
+  confirmed interruption it cancels only a response that is still being generated; a
+  complete one is only truncated. That way a verdict never cancels the response the
+  engine just started for the user's turn, even when the engine's events arrive late.
 * **Native engines** follow the same rules when they report speech. Engines with
   server-side VAD often cancel the response themselves as soon as speech starts (for
   example OpenAI Realtime with `interrupt_response`). The session then receives
@@ -167,7 +179,10 @@ await session.say("This call may be recorded.", allow_interruptions=False)
 
 While uninterruptible speech plays, the user cannot barge in. With
 `discard_audio_if_uninterruptible` (the default), the engine receives silence instead of
-the user's audio, so it cannot queue a turn either. The same applies to every response
+the user's audio, so it cannot queue a turn either. If the user was mid-sentence when the
+speech started, the unfinished input is cleared rather than answered. Otherwise the
+silence would end it as a turn and the engine would cancel the uninterruptible speech to
+answer it. The same applies to every response
 when `allow_interruptions=False`. The flag applies to the next response the engine
 starts after `say()`.
 
@@ -182,3 +197,8 @@ starts after `say()`.
   backchannel window at the start or end of an agent turn (research note 04 §8.2).
 * **Tool calls:** a tool round that finishes while the agent is paused starts its follow-up
   response. That response supersedes the paused one, which is then truncated.
+* **Late events.** `EngineConnection.cancel_response()` has no response id. Suppose the
+  interrupted response is still being generated and the engine's events arrive late,
+  while it has already committed the user's turn. The cancel can then hit its new
+  response. Engines that cancel on speech start themselves (e.g. OpenAI Realtime's
+  `interrupt_response`) avoid this.
