@@ -769,6 +769,9 @@ class WebSocketAgentServer:
             routes, authentication).
     """
 
+    protocol: str = PROTOCOL
+    """Protocol served (for logs)."""
+
     def __init__(
         self,
         session_factory: SessionFactory,
@@ -819,7 +822,7 @@ class WebSocketAgentServer:
         options: dict[str, Any] = {"compression": None, **self.serve_options}
         self._server = await serve(self._handle, self.host, self.port, **options)
         self.port = _bound_port(self._server, self.port)
-        logger.info("serving voice agents on %s (%s)", self.url, PROTOCOL)
+        logger.info("serving voice agents on %s (%s)", self.url, self.protocol)
 
     async def serve_forever(self) -> None:
         """Serve until :meth:`aclose` is called or this coroutine is cancelled."""
@@ -854,8 +857,12 @@ class WebSocketAgentServer:
         finally:
             self._active -= 1
 
+    def _create_transport(self, websocket: ServerConnection) -> WebSocketServerTransport:
+        """The transport of an accepted connection (subclasses serve other dialects)."""
+        return WebSocketServerTransport(websocket, **self._transport_options)
+
     async def _run(self, websocket: ServerConnection) -> None:
-        transport = WebSocketServerTransport(websocket, **self._transport_options)
+        transport = self._create_transport(websocket)
         try:
             await transport.start()
         except TransportError as exc:
