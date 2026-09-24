@@ -792,10 +792,10 @@ class RotatingConnection(EngineConnection):
         self._pending = self._deadline = None
         failed = self._fail_inflight("session rotated") if forced else 0
         replayed = await self._deliver(standby)
-        self._end_switch()
-        await self._close_link(old)
         self._finish_switch(reason, planned=True, started=started, attempts=1,
                             replayed=replayed, link=standby, failed=failed)  # fmt: skip
+        self._end_switch()
+        await self._close_link(old)
 
     def _begin_switch(self) -> None:
         self._switching = True
@@ -900,9 +900,9 @@ class RotatingConnection(EngineConnection):
             self._link = link
             self._pending = self._deadline = None
             replayed = await self._deliver(link)
-            self._end_switch()
             self._finish_switch(reason, planned=False, started=started, attempts=attempt,
                                 replayed=replayed, link=link, failed=failed)  # fmt: skip
+            self._end_switch()
             return
         error = last or ProviderConnectionError(f"engine connection {reason}")
         self._emit(EngineErrorEvent(error=error, recoverable=False))
@@ -913,6 +913,8 @@ class RotatingConnection(EngineConnection):
         start = self.input_audio_time - frame.duration
         self._replay.record(start, frame)
         link = self._link
+        if link is not None and link.conn.closed and not self._switching:
+            self._start_reconnect(link, "connection closed")  # before its pump noticed
         if self._switching or link is None:
             self._buffer.push(start, frame)
             return
