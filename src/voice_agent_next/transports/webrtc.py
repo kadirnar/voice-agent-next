@@ -37,6 +37,7 @@ import fractions
 import inspect
 import json
 import math
+import re
 import ssl as ssl_module
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -46,7 +47,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 
 from ..audio.frame import AudioFormat, AudioFrame
-from ..audio.resample import StreamResampler
+from ..audio.resample import StreamResampler, resample
 from ..errors import TransportError
 from ..utils.aio import BackgroundTasks, Chan, cancel_and_wait, wait_first
 from ..utils.clock import now
@@ -64,8 +65,12 @@ __all__ = [
     "DATA_CHANNEL_ID",
     "DATA_CHANNEL_LABEL",
     "PROTOCOL",
+    "AudioPlayout",
     "WebRTCAgentServer",
     "WebRTCTransport",
+    "av_frame_to_audio",
+    "normalize_ice_servers",
+    "paced_audio_track",
     "serve_webrtc",
 ]
 
@@ -82,6 +87,8 @@ _MAX_PENDING_MESSAGES = 256
 _MAX_PLAYOUT_DELAY = 2.0
 _MAX_BODY = 256 * 1024
 _MAX_HEADER = 16 * 1024
+
+_END_OF_CANDIDATES = re.compile(r"^a=end-of-candidates\r?\n?", re.MULTILINE)
 
 IceTransportPolicy = Literal["all", "relay"]
 SessionFactory = Callable[..., "AgentSession | Awaitable[AgentSession]"]
@@ -155,8 +162,8 @@ def av_frame_to_audio(frame: Any) -> AudioFrame:
     return AudioFrame(pcm, int(frame.sample_rate), 1)
 
 
-class _Playout:
-    """Agent audio (48 kHz mono s16le) queued for the outbound track, and its sent timeline.
+class AudioPlayout:
+    """Audio (48 kHz mono s16le) queued for an outbound track, and its sent timeline.
 
     The outbound track pulls one 20 ms frame at a time, in real time; :meth:`pull` pads
     with silence when the queue runs dry (or while paused), so the RTP clock never stalls.
@@ -174,7 +181,12 @@ class _Playout:
     def queued(self) -> float:
         return len(self.queue) / 2 / OPUS_RATE
 
-    def push(self, pcm: bytes) -> None:
+    def push(self, pcm: bytes | AudioFrame) -> None:
+        """Queue 48 kHz mono s16le bytes (or any frame: it is converted)."""
+        if isinstance(pcm, AudioFrame):
+            if pcm.sample_rate != OPUS_RATE or pcm.channels != 1:
+                pcm = resample(pcm.to_mono(), OPUS_RATE)
+            pcm = pcm.data
         self.queue += pcm
 
     def clear(self) -> int:
@@ -203,11 +215,17 @@ class _Playout:
 _TRACK_CLASS: Any = None
 
 
-def _outbound_track_class() -> Any:
-    """``AgentAudioTrack(playout)``: an aiortc audio track paced in real time.
+def paced_audio_track(playout: AudioPlayout) -> Any:
+    """An ``aiortc`` audio track that sends ``playout``'s audio in real time (20 ms frames).
 
-    Defined lazily because it subclasses ``aiortc.MediaStreamTrack`` (an optional dependency).
+    Silence is sent while the queue is empty or paused. The server uses one for the agent's
+    voice; Python clients can use one as a "microphone" (see ``examples/webrtc``).
     """
+    return _outbound_track_class()(playout)
+
+
+def _outbound_track_class() -> Any:
+    # defined lazily: it subclasses ``aiortc.MediaStreamTrack`` (an optional dependency)
     global _TRACK_CLASS
     if _TRACK_CLASS is not None:
         return _TRACK_CLASS
@@ -222,7 +240,7 @@ def _outbound_track_class() -> Any:
     class AgentAudioTrack(base):
         kind = "audio"
 
-        def __init__(self, playout: _Playout) -> None:
+        def __init__(self, playout: AudioPlayout) -> None:
             super().__init__()
             self._playout = playout
             self._start: float | None = None
@@ -327,7 +345,7 @@ class WebRTCTransport(Transport):
         """The ``aiortc.RTCPeerConnection`` (``None`` until an offer was accepted)."""
         self._channel: Any = None
         self._track: Any = None
-        self._playout = _Playout()
+        self._playout = AudioPlayout()
         self._pending_messages: list[str] = []
         self._offer_lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
@@ -387,8 +405,9 @@ class WebRTCTransport(Transport):
             pc.on("connectionstatechange", self._on_connection_state)
             pc.on("track", self._on_track)
             try:
-                await pc.setRemoteDescription(aiortc.RTCSessionDescription(sdp=sdp, type="offer"))
-                self._track = _outbound_track_class()(self._playout)
+                offer = aiortc.RTCSessionDescription(sdp=_open_candidates(sdp), type="offer")
+                await pc.setRemoteDescription(offer)
+                self._track = paced_audio_track(self._playout)
                 pc.addTrack(self._track)
                 if "m=application" in sdp:
                     self._attach_channel(
@@ -670,6 +689,18 @@ class WebRTCTransport(Transport):
         if pc is not None:
             with contextlib.suppress(Exception):
                 await pc.close()
+
+
+def _open_candidates(sdp: str) -> str:
+    """Drop ``a=end-of-candidates`` so ICE also accepts peer-reflexive candidates.
+
+    Browsers hide host addresses behind mDNS names (``<uuid>.local``), which a server often
+    cannot resolve (containers, no multicast). With end-of-candidates and no usable remote
+    candidate, aioice prunes the component and gathers nothing, so the answer has no
+    candidates and the call fails. Without it, the browser's connectivity checks reach our
+    candidates and ICE learns the browser's address from them (RFC 8445 §7.3.1.3).
+    """
+    return _END_OF_CANDIDATES.sub("", sdp)
 
 
 def _force_relay(pc: Any) -> None:

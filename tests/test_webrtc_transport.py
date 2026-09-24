@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
@@ -25,13 +26,13 @@ from voice_agent_next.transports.webrtc import (  # noqa: E402
     DATA_CHANNEL_LABEL,
     OPUS_RATE,
     PROTOCOL,
+    AudioPlayout,
     WebRTCAgentServer,
     WebRTCTransport,
     _force_relay,
-    _outbound_track_class,
-    _Playout,
     av_frame_to_audio,
     normalize_ice_servers,
+    paced_audio_track,
 )
 
 
@@ -57,8 +58,8 @@ class Peer:
 
     def __init__(self, *, data_channel: bool = True) -> None:
         self.pc = aiortc.RTCPeerConnection(aiortc.RTCConfiguration(iceServers=[]))
-        self.mic = _Playout()
-        self.pc.addTrack(_outbound_track_class()(self.mic))
+        self.mic = AudioPlayout()
+        self.pc.addTrack(paced_audio_track(self.mic))
         self.messages: list[dict[str, Any]] = []
         self.audio: list[tuple[float, AudioFrame]] = []  # (arrival time, 48 kHz mono)
         self.channel: Any = None
@@ -335,6 +336,25 @@ async def test_session_close_hangs_up(peers: list[Peer]) -> None:
         await server.sessions[0].aclose()
         await wait_for(lambda: peer.pc.connectionState == "closed")
         await wait_for(lambda: not server.transports)
+
+
+async def test_browser_style_mdns_candidates_connect_peer_reflexive(peers: list[Peer]) -> None:
+    """Browsers hide host IPs behind ``<uuid>.local`` names the server may not resolve."""
+    server = mock_server(greeting="Hello.")
+    async with server:
+        peer = Peer()
+        peers.append(peer)
+        offer = await peer.offer()
+        assert "a=end-of-candidates" in offer["sdp"]
+        hidden = re.sub(
+            r" 127\.0\.0\.1 ", " 2b1d6ab8-6b4e-4d4b-9d6c-3c1e1d7c0f5e.local ", offer["sdp"]
+        )
+        assert ".local" in hidden and " 127.0.0.1 " not in hidden
+        answer = await server.handle_offer({**offer, "sdp": hidden})
+        assert "a=candidate:" in answer["sdp"]  # the server still offers its own candidates
+        await peer.answer(answer)
+        await wait_for(lambda: peer.transcripts("assistant", final=True))
+        await wait_for(lambda: peer.voiced() > 0.2)
 
 
 async def test_peer_that_never_connects_times_out() -> None:
