@@ -29,6 +29,10 @@ Fully offline agent with local audio, VAD/turn detection, STT, LLM and TTS on al
 - [ ] #8 Presets and `van run` UX (local-cpu, local-gpu, apple, cloud-fast, openai-realtime, gemini-live) `P1`
 - [ ] #9 sherpa-onnx providers: streaming STT (Zipformer / Parakeet / Moonshine), TTS and VAD `P1` — 🚧 wave 2
 - [ ] #10 Apple Silicon providers via MLX (parakeet-mlx / mlx-whisper STT, mlx-audio TTS, mlx-lm) `P2`
+- [ ] #76 Kyutai Pocket TTS: audio-streaming local TTS on CPU with voice cloning `P1`
+- [ ] #77 Moonshine Streaming STT (moonshine-voice): low-latency local STT for CPUs and edge devices `P1`
+- [ ] #78 NeMo-Speech.cpp server: Nemotron cache-aware streaming STT, Parakeet, Magpie TTS `P1`
+- [ ] #79 Local GPU TTS: Chatterbox (Turbo/Nano/Multilingual), Qwen3-TTS, CosyVoice 3 `P2`
 
 ## M2 · Native speech-to-speech engines
 
