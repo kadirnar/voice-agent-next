@@ -86,6 +86,8 @@ van providers      # what's available, what's missing
 van doctor         # environment check (audio devices, GPUs, API keys)
 ```
 
+More runnable scenarios (local agent, OpenAI Realtime, Gemini Live, telephony, tools, benchmarks, each with an offline `--mock` mode): [examples/README.md](examples/README.md).
+
 ## Providers
 
 Every component is addressed by a `provider/model` spec and installed through an extra; `van providers` shows what is ready on your machine.
