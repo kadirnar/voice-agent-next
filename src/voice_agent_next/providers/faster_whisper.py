@@ -204,7 +204,7 @@ class FasterWhisperSTT(STT):
                     logger.warning(
                         "faster-whisper: CUDA is not usable (%s); falling back to CPU. "
                         "See docs/providers/faster_whisper.md to enable the GPU.",
-                        exc,
+                        exc.__cause__ or exc,
                     )
             return self._load_on(fw, ct2, path, "cpu", t0)
         return self._load_on(fw, ct2, path, self.device, t0)
