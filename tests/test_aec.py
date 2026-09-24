@@ -8,6 +8,7 @@ WebRTC APM from the ``livekit`` wheel (``uv sync --extra aec``) on synthetic ech
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 import threading
@@ -309,13 +310,13 @@ def test_queued_reference_is_released_in_step_with_the_capture(fake_rtc: FakeRtc
     chunks = [render[i : i + 160].tobytes() for i in range(0, len(render), 160)]
     for f in _split(render, 16_000, [800, 800, 800]):  # a 150 ms burst, ahead of playback
         proc.process_render(f)
-    lead = []
+    lead = []  # reference frames fed minus capture frames processed, after each capture
     for f in _split(_noise(4000), 16_000, [160]):
         proc.process_capture(f)
         log = fake_rtc.apm.log
         lead.append(sum(e[0] == "render" for e in log) - sum(e[0] == "capture" for e in log))
-    assert max(lead) <= 3 - 1  # never more than 3 frames ahead of the capture (after it ran)
-    assert min(lead) >= 0
+    assert max(lead) == 2  # released at most 3 frames ahead, i.e. 2 once that capture ran
+    assert min(lead) == 0
     assert fake_rtc.apm.real_render() == chunks  # all of it, in order
 
 
@@ -343,12 +344,15 @@ def test_reference_ignored_without_echo_cancellation(fake_rtc: FakeRtc) -> None:
 
 def test_process_render_from_another_thread(fake_rtc: FakeRtc) -> None:
     proc = WebRTCAudioProcessor()
-    render = [synth_speech(0.01, 48_000, offset=480 * i) for i in range(400)]
-    ahead = threading.Semaphore(20)  # the playback thread runs at most ~200 ms ahead
+    render = [AudioFrame((i + 1).to_bytes(2, "little") * 480, 48_000) for i in range(400)]
+    cond = threading.Condition()
+    queued = [0]  # frames handed over since the microphone last drained them
 
-    def playback() -> None:
+    def playback() -> None:  # like a playback callback: at most ~200 ms ahead of the mic
         for f in render:
-            ahead.acquire()
+            with cond:
+                assert cond.wait_for(lambda: queued[0] < 20, timeout=10)
+                queued[0] += 1
             proc.process_render(f)
 
     mic = AudioFrame.from_numpy(_noise(480), 48_000)
@@ -358,12 +362,44 @@ def test_process_render_from_another_thread(fake_rtc: FakeRtc) -> None:
         if not t.is_alive():
             break
         assert len(proc.process_capture(mic).data) == len(mic.data)
-        ahead.release()
+        with cond:
+            queued[0] = 0
+            cond.notify_all()
         time.sleep(0)  # let the playback thread run
     t.join(timeout=10)
     assert not t.is_alive()
     proc.process_capture(mic)  # drain the rest
-    assert fake_rtc.apm.real_render() == [f.data for f in render]  # every frame, in order
+    fed = [int.from_bytes(d[:2], "little") - 1 for d in fake_rtc.apm.real_render()]
+    assert fed == list(range(400))  # every frame, once, in order
+
+
+async def test_agent_session_runs_audio_through_the_processor(fake_rtc: FakeRtc) -> None:
+    from voice_agent_next import Agent, AgentSession, AgentState
+    from voice_agent_next.providers.mock import MockEngine
+    from voice_agent_next.transports import LoopbackTransport
+
+    proc = WebRTCAudioProcessor(reference="queued")  # the playout loop feeds queued audio
+    session = AgentSession(
+        MockEngine(transcripts=["hello agent"], responses=["Hi there."]), processors=[proc]
+    )
+    transcripts: list[str] = []
+    session.on("user_transcript", lambda ev: ev.is_final and transcripts.append(ev.text))
+    transport = LoopbackTransport()  # 16 kHz microphone, 24 kHz speaker
+    await session.start(Agent("be brief", greeting="Welcome."), transport)
+    await transport.play_user_audio(synth_speech(0.8, 16_000), realtime=False)
+    await transport.play_user_audio(AudioFrame.silence(0.6, 16_000), realtime=False)
+    for _ in range(500):
+        if transcripts and session.agent_state == AgentState.LISTENING:
+            break
+        await asyncio.sleep(0.01)
+    apm = fake_rtc.apm
+    await session.aclose()
+
+    assert transcripts == ["hello agent"]  # the engine heard the processed microphone audio
+    assert all(e[1:] == (16_000, 1) for e in apm.entries("capture"))
+    assert apm.real_render()  # the greeting and the answer were fed as the echo reference
+    assert all(e[1:3] == (16_000, 1) for e in apm.entries("render"))
+    assert apm._ffi_handle.disposed  # closing the session closed the processor
 
 
 # ----------------------------------------------------------------------- delay hint
@@ -724,8 +760,9 @@ def test_webrtc_queued_reference_with_session_lookahead(livekit_rtc: Any) -> Non
     sr, frame = 16_000, 320
     turns = [(0.0, 3.0), (5.0, 8.0)]
     dur = 10.0
-    render = sum(_speechlike(dur, sr, 180.0, 10 + i, a, b) for i, (a, b) in enumerate(turns))
-    assert isinstance(render, np.ndarray)
+    render = np.sum(
+        [_speechlike(dur, sr, 180.0, 10 + i, a, b) for i, (a, b) in enumerate(turns)], 0
+    )
     capture = _echo(render, sr, 60)
     r16 = AudioFrame.from_numpy(render.astype(np.float32), sr).to_numpy()
     c16 = AudioFrame.from_numpy(capture.astype(np.float32), sr).to_numpy()

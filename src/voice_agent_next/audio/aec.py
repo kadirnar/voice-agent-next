@@ -24,7 +24,7 @@ import math
 import threading
 from collections import deque
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from ..utils.clock import now
 from ..utils.deps import require
@@ -491,7 +491,7 @@ class HalfDuplexGate(AudioProcessor):
             self._audible_end = -math.inf
 
 
-_MODES = ("auto", "aec", "webrtc", "half_duplex", "headphones", "none")
+_MODES: tuple[str, ...] = get_args(EchoMode)
 
 
 def create_echo_canceller(
