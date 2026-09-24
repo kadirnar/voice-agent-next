@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "suite": "van-bench",
+  "track": "overhead",
+  "description": "Regression baseline of `van bench overhead --tier smoke` (T7), one entry per CI runner OS. Refresh with `van bench overhead --update-baseline` on the runner kind in question, or from a CI artifact with `--from-run <dir> --update-baseline` (see benchmarks/README.md).",
+  "rules": {
+    "latency": {
+      "max_increase_pct": 10.0,
+      "max_increase_abs": 30.0,
+      "require_ci_separation": true
+    },
+    "micro": {
+      "max_increase_pct": 200.0,
+      "max_increase_abs": 5.0,
+      "require_ci_separation": false
+    }
+  },
+  "entries": {}
+}
