@@ -208,6 +208,24 @@ directly: construct the LLM with `capabilities=LLMCapabilities(audio_input=True)
 `AudioContent` is sent as WAV `input_audio` parts. Half-cascades built on this are tracked
 in issue #14.
 
+### Audio output (`gpt-audio`)
+
+Audio-output models (`gpt-audio*`, `gpt-4o-audio*`) speak for themselves. The LLM then
+requests `modalities: ["text", "audio"]` and `audio: {"voice": ..., "format": "pcm16"}`
+(`voice=` on the LLM, default `alloy`), and declares
+`LLMCapabilities(audio_input=True, audio_output=True)`. The streamed `delta.audio.data`
+(pcm16, 24 kHz) arrives as `ChatChunk.audio`, and `delta.audio.transcript` as the text.
+Without a TTS, the cascade plays that voice directly: no STT and no TTS
+(see [omni models](../concepts/omni-models.md)).
+
+```python
+session = AgentSession(llm={"provider": "openai", "model": "gpt-audio", "voice": "marin"},
+                       vad="silero", turn_detector="smart_turn")
+```
+
+Any OpenAI-compatible server that streams audio the same way (for example vLLM-Omni
+serving Qwen-Omni) works with `extra={"modalities": ["text", "audio"]}`.
+
 ## Speech-to-text
 
 `stt="openai/gpt-live-transcribe"` streams the user's audio into a Realtime
