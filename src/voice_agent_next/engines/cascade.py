@@ -213,7 +213,7 @@ class CascadeConnection(EngineConnection):
             and self._recent_duration - self._recent[0].duration > self._opts.turn_audio_prefix
         ):
             self._recent_duration -= self._recent.popleft().duration
-        if self._user_speaking:
+        if self._turn_has_speech:  # keep pauses and resumed onsets: audio detectors need them
             self._turn_audio.append(frame)
         if self._vad is None:
             return
@@ -266,20 +266,36 @@ class CascadeConnection(EngineConnection):
 
     async def _endpoint(self) -> None:
         t_end = self._speech_end_wall if self._speech_end_wall is not None else now()
-        await self._wait_final_transcript()
-        delay = self._min_delay()
         detector = self._e.turn_detector
-        if detector is not None and (self._turn_text() or self._turn_audio):
-            ctx = self._llm_context(None)
-            ctx.add_message("user", self._turn_text())
-            prob = await detector.predict_end_of_turn(
-                audio=self._turn_audio.to_frame() if self._turn_audio else None, chat_ctx=ctx
+        early: asyncio.Future[float] | None = None
+        if detector is not None and detector.modality == "audio" and self._turn_audio:
+            # audio-only detectors don't need the transcript: overlap them with the STT flush
+            early = asyncio.ensure_future(
+                detector.predict_end_of_turn(audio=self._turn_audio.to_frame())
             )
-            if prob < detector.threshold:
-                delay = self._opts.max_endpointing_delay
-        remaining = delay - (now() - t_end)
-        if remaining > 0:
-            await asyncio.sleep(remaining)
+        try:
+            await self._wait_final_transcript()
+            delay = self._min_delay()
+            if detector is not None:
+                if early is not None:
+                    prob = await early
+                elif self._turn_text() or self._turn_audio:
+                    ctx = self._llm_context(None)
+                    ctx.add_message("user", self._turn_text())
+                    prob = await detector.predict_end_of_turn(
+                        audio=self._turn_audio.to_frame() if self._turn_audio else None,
+                        chat_ctx=ctx,
+                    )
+                else:
+                    prob = 1.0
+                if prob < detector.threshold:
+                    delay = self._opts.max_endpointing_delay
+            remaining = delay - (now() - t_end)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+        finally:
+            if early is not None and not early.done():
+                early.cancel()
         await self._commit_turn()
 
     async def _stt_loop(self) -> None:

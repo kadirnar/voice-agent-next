@@ -70,4 +70,4 @@ def test_hf_file_url_fallback(monkeypatch) -> None:  # type: ignore[no-untyped-d
     hf_file("org/repo", "sub/file.onnx", revision="v1")
     assert seen["url"] == "https://huggingface.co/org/repo/resolve/v1/sub/file.onnx"
     assert seen["filename"] == "file.onnx"
-    assert seen["subdir"] == "hf/org/repo"
+    assert seen["subdir"] == "hf/org/repo/v1"  # revisions never share cache entries

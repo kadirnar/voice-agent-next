@@ -386,3 +386,44 @@ async def test_voice_to_voice_latency_matches_external_measurement(kind: str) ->
     assert m.voice_to_voice == pytest.approx(expected, abs=0.15)
     assert m.voice_to_voice == pytest.approx(heard, abs=0.08)
     assert m.end_of_turn_delay is not None and m.end_of_turn_delay == pytest.approx(0.4, abs=0.1)
+
+
+async def test_cascade_turn_audio_keeps_pauses_and_audio_detector_runs_before_final() -> None:
+    """Audio turn detectors see the whole turn (incl. pauses) and don't wait for the STT."""
+    from voice_agent_next.turn import TurnDetector
+    from voice_agent_next.utils import now
+
+    class AudioDetector(TurnDetector):
+        provider = "test"
+        modality = "audio"
+
+        def __init__(self) -> None:
+            super().__init__(threshold=0.5)
+            self.durations: list[float] = []
+            self.started: list[float] = []
+
+        async def _predict(self, *, audio, chat_ctx):  # type: ignore[no-untyped-def]
+            self.started.append(now())
+            self.durations.append(audio.duration if audio is not None else 0.0)
+            return 0.1 if len(self.durations) == 1 else 0.9  # first pause: "not done"
+
+    detector = AudioDetector()
+    stt = MockSTT(transcripts=["I would like to", "book a table"], latency=0.2)
+    session = mock_cascade(
+        stt=stt,
+        turn_detector=detector,
+        cascade_options=CascadeOptions(min_endpointing_delay=0.0, max_endpointing_delay=1.5),
+    )
+    finals: list[float] = []  # when the STT delivered each final transcript
+    stt.on("metrics", lambda m: finals.append(now()))
+    transport = LoopbackTransport()
+    await session.start(Agent("x"), transport)
+    await speak(transport, 0.6, 0.55)
+    await wait_for(lambda: bool(finals), 3)  # detector said "not done": the turn stays open
+    # the audio detector started before the (slow, 0.2 s) STT delivered the first final
+    assert detector.started[0] < finals[0] - 0.1
+    await speak(transport, 0.6, 0.55)  # the user resumes the same turn
+    await wait_for(lambda: len(detector.durations) >= 2, 3)
+    await session.aclose()
+    # the second prediction covers speech + pause + resumed speech (>= 0.6 + 0.55 + 0.6 s)
+    assert detector.durations[1] >= 1.7
