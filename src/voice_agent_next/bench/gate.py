@@ -43,6 +43,7 @@ __all__ = [
     "DEFAULT_BASELINE_PATH",
     "DEFAULT_RULES",
     "GATE_SPEC",
+    "ROW_HEADERS",
     "Baseline",
     "BaselineEntry",
     "GateReport",
@@ -327,17 +328,14 @@ def compare_metric(
     out.current, out.current_ci = current.value, current.ci95
     delta = current.value - base.value
     scale = abs(base.value)
-
-    def beyond(change: float) -> bool:
-        return change > rule.max_increase_abs and change > scale * rule.max_increase_pct / 100
-
-    if beyond(delta):
+    ratio = 1.0 + rule.max_increase_pct / 100.0
+    if delta > rule.max_increase_abs and delta > scale * (ratio - 1.0):
         separated = True
         if rule.require_ci_separation and base.ci95 is not None and current.ci95 is not None:
             separated = current.ci95[0] > base.ci95[1]
         out.status = "regressed" if separated else "ok"
-    elif beyond(-delta):
-        out.status = "improved"
+    elif -delta > rule.max_increase_abs and -delta > scale * (1.0 - 1.0 / ratio):
+        out.status = "improved"  # the mirror image (x3 worse <-> /3 better): refresh baseline
     return out
 
 
@@ -404,15 +402,21 @@ class GateReport:
             }
         )
 
+    @property
+    def verdict(self) -> str:
+        if not self.gated:
+            return "REPORT ONLY (no baseline for this runner)"
+        if self.passed:
+            return "PASS"
+        return f"FAIL — {len(self.failures)} regression(s)"
+
+    def rows(self) -> list[tuple[MetricComparison, list[str]]]:
+        """Comparisons (failures first) with their table cells, see :data:`ROW_HEADERS`."""
+        return [(c, _comparison_row(c)) for c in _ordered(self.comparisons)]
+
     def to_markdown(self, *, heading: str = "###") -> str:
         """Markdown for a CI job summary."""
-        if not self.gated:
-            verdict = "REPORT ONLY (no baseline for this runner)"
-        elif self.passed:
-            verdict = "PASS"
-        else:
-            verdict = f"FAIL — {len(self.failures)} regression(s)"
-        lines = [f"{heading} Regression gate ({self.platform}): **{verdict}**", ""]
+        lines = [f"{heading} Regression gate ({self.platform}): **{self.verdict}**", ""]
         if self.entry is not None:
             sha = f" · git `{self.entry.git_sha[:10]}`" if self.entry.git_sha else ""
             lines += [
@@ -420,12 +424,14 @@ class GateReport:
                 f"`{self.entry.run_id}` ({self.entry.created}{sha}; {self.entry.machine}).",
                 "",
             ]
-        rows = [_comparison_row(c) for c in _ordered(self.comparisons)]
+        rows = [cells for _, cells in self.rows()]
         if rows:
-            headers = ["metric", "stat", "baseline", "run", "change", "fails above", "status"]
-            lines += [markdown_table(headers, rows, ["l", "l", "r", "r", "r", "l", "l"]), ""]
+            lines += [markdown_table(ROW_HEADERS, rows, ["l", "l", "r", "r", "r", "l", "l"]), ""]
         lines += [f"> {note}" for note in self.notes]
         return "\n".join(lines).rstrip() + "\n"
+
+
+ROW_HEADERS = ("metric", "stat", "baseline", "run", "change", "fails above", "status")
 
 
 def _ordered(comparisons: Iterable[MetricComparison]) -> list[MetricComparison]:

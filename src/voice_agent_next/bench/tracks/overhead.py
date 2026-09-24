@@ -68,6 +68,7 @@ from ..results import (
     RunManifest,
     RunResults,
     RunSummary,
+    json_safe,
     new_run_id,
     utc_timestamp,
     write_run,
@@ -1493,7 +1494,7 @@ async def _run_overhead(
         run_id=run_id,
         track=TRACK,
         created=created,
-        system={"conditions": ctx.systems},
+        system=json_safe({"conditions": ctx.systems}),
         scenario={
             "name": scenario.name,
             "version": scenario.version,
@@ -1508,12 +1509,14 @@ async def _run_overhead(
             "chunk_ms": round(scenario.chunk * 1000, 3),
             "delivery": "each chunk when its interval has elapsed (capture-device model)",
         },
-        options={
-            **asdict(options),
-            "config_sha256": config_hash,
-            "chunk_ms": round(scenario.chunk * 1000, 3),
-            "onset": ctx.detector.describe(),
-        },
+        options=json_safe(
+            {
+                **asdict(options),
+                "config_sha256": config_hash,
+                "chunk_ms": round(scenario.chunk * 1000, 3),
+                "onset": ctx.detector.describe(),
+            }
+        ),
         environment=await asyncio.to_thread(collect_environment),
         notes=merged.notes,
     )
@@ -1528,10 +1531,10 @@ async def _run_overhead(
         metrics=merged.metrics,
         rates=merged.rates,
         counts=merged.counts,
-        extra=merged.extra,
+        extra=json_safe(merged.extra),
         duration_s=round(now() - t_start, 3),
     )
-    results = RunResults(manifest, merged.items, summary)
+    results = RunResults(manifest, json_safe(merged.items), summary)
     results.report = render_overhead_report(results)
     if directory is not None:
         write_run(directory, results)
