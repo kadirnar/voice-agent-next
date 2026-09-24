@@ -88,6 +88,7 @@ the `model` query parameter (omitted when empty, e.g. a single-model vLLM server
 | `connect_timeout` | 10 s | handshake + `session.updated` |
 | `max_reconnect_attempts`, `reconnect_backoff` | 3, 0.5 s | see *Reconnects* |
 | `expiry_warning` | 60 s | `EngineStatus("expiring")` before the session limit |
+| `rotation` | `RotationPolicy()` | session rotation and history carry-over, see *Sessions* and `docs/concepts/session-rotation.md` |
 | `refine_speech_end` | `True` | see *Speech end* |
 
 ## Compatibility profiles
@@ -189,14 +190,22 @@ the capture time, so `TurnMetrics.voice_to_voice` is comparable with other engin
 * WebSocket pings every 20 s keep the connection alive; `aclose()` closes it cleanly (1000).
 * `session.created.expires_at` (or the profile's `max_session_duration`) schedules
   `EngineStatus("expiring", time_left=...)` `expiry_warning` seconds before the limit.
+* **Rotation.** `rotation.lead` seconds before the limit (default 5 min before OpenAI's 60 min)
+  the next session is opened, configured and seeded with the carried-over conversation in the
+  background; it takes over at a quiet moment (nobody speaking, the answer played out, no tool
+  running) and at the latest `rotation.force_margin` seconds before the limit. `rotate()` asks
+  for a rotation at any time. See `docs/concepts/session-rotation.md`.
 * After a transient failure (network drop, server close, `session_expired`) the connection emits
   `EngineStatus("reconnecting")`, fails the response in flight with
   `ResponseDone(status="failed")`, reconnects with exponential backoff, re-sends the session
-  configuration and emits `EngineStatus("reconnected")`. The new provider session starts with an
-  **empty conversation** (context re-seeding is issue #17); the server's audio clock restarts and
-  is re-based onto the input stream. Authentication failures are fatal; a server that keeps
-  dropping the connection (more than `max_reconnect_attempts` reconnects per minute) ends the
-  connection with a non-recoverable `EngineErrorEvent`.
+  configuration, **re-seeds the conversation** (user and agent text as heard, tool calls and
+  results, fitted by `rotation.carry_over`) and emits `EngineStatus("reconnected")`. User audio
+  is buffered during the outage and delivered afterwards, together with the recent audio of the
+  not-yet-committed turn; a response request swallowed by the outage is sent once reconnected.
+  The server's audio clock restarts and is re-based onto the input stream. Every switch emits
+  `RotationMetrics`. Authentication failures are fatal; a server that keeps dropping the
+  connection (more than `max_reconnect_attempts` reconnects per minute) ends the connection with
+  a non-recoverable `EngineErrorEvent`.
 * Connection errors (from `connect()` and in `EngineErrorEvent`): HTTP 401/403 →
   `AuthenticationError`, 429 → `RateLimitError`, refused or failed connections and 5xx →
   `ProviderConnectionError`. A connection that cannot be opened within `connect_timeout` raises
@@ -206,7 +215,8 @@ the capture time, so `TurnMetrics.voice_to_voice` is comparable with other engin
 
 ## Latency notes
 
-* Audio is sent as it arrives (20 ms frames are fine); the engine never buffers user audio.
+* Audio is sent as it arrives (20 ms frames are fine); the engine only buffers user audio
+  while it switches sessions.
 * Semantic VAD waits longer on trailing-off speech (up to 8 s at `eagerness: low`); use
   `server_vad` with a short `silence_duration_ms` for the snappiest turns.
 * Input transcription runs asynchronously; final user transcripts can arrive after the agent
@@ -223,7 +233,9 @@ the capture time, so `TurnMetrics.voice_to_voice` is comparable with other engin
 ## Limitations
 
 * WebSocket only (WebRTC/SIP transports, where the server truncates by itself, are not wired).
-* No context carry-over across reconnects or session rotation yet (#17).
+* A carried-over conversation is re-seeded as *text*: the new session has no audio of earlier
+  turns (and an answer played before a rotation can no longer be truncated server-side; the
+  carried history still holds only what was heard).
 * xAI reports usage totals only, so `EngineUsage` token details stay 0 for xAI.
 * Qwen-Omni accepts no user text items: `send_text()` raises `EngineError` and an initial
   `chat_ctx` cannot be seeded. Without per-response instructions, `say()` and
