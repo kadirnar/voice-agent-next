@@ -219,6 +219,7 @@ class ChatterboxTTS(LocalTorchTTS):
             path = self.model_path or self._download(self.model)
             tts = cls.from_local(path, device, nano=True) if nano else cls.from_local(path, device)
         _quiet_progress_bars()
+        _float32_loudness(tts)
         self._default_conds = tts.conds
         self._voices.clear()
         return tts
@@ -302,6 +303,20 @@ class ChatterboxTTS(LocalTorchTTS):
         if hasattr(wav, "detach"):
             wav = wav.detach().cpu().numpy()
         yield np.asarray(wav, dtype=np.float32).reshape(-1)
+
+
+def _float32_loudness(tts: Any) -> None:
+    """Turbo's reference loudness normalization multiplies float32 audio by a NumPy float64
+    gain: float64 under NumPy 2 (NEP 50), which the speech tokenizer rejects. Keep it
+    float32, as it was under the NumPy 1 that chatterbox-tts pins."""
+    normalize = getattr(tts, "norm_loudness", None)
+    if not callable(normalize):
+        return
+
+    def norm_loudness(wav: Any, sr: int, *args: Any, **kwargs: Any) -> Any:
+        return np.asarray(normalize(wav, sr, *args, **kwargs), dtype=np.float32)
+
+    tts.norm_loudness = norm_loudness
 
 
 def _quiet(*args: Any, **kwargs: Any) -> None:
