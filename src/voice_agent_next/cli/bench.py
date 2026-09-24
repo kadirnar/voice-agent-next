@@ -173,7 +173,8 @@ def latency(
     )
     err.print(
         f"[bold]van bench latency[/bold] · {system.label} · scenario {scn.name} · "
-        f"{turns} turn(s) x {sessions} session(s)"
+        f"{turns} turn(s) x {sessions} session(s)",
+        highlight=False,
     )
 
     def on_turn(session: int, turn: TurnTiming) -> None:
@@ -183,7 +184,8 @@ def latency(
             heard = "[red]no reply[/red]" if turn.stimulus.expect_reply else "-"
         err.print(
             f"  session {session + 1} turn {turn.index + 1:>3}/{turns} "
-            f"{turn.stimulus.id:<12} {heard}"
+            f"{turn.stimulus.id:<12} {heard}",
+            highlight=False,
         )
 
     try:

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
@@ -36,6 +37,24 @@ from .recording import DuplexRecording
 from .stimuli import Stimulus
 
 __all__ = ["CallResult", "CallerEmulator", "TurnTiming"]
+
+
+async def _sleep_until(deadline: float) -> None:
+    """Sleep until ``now() >= deadline`` (never earlier).
+
+    The event loop's clock is coarse on some platforms (``time.monotonic()`` ticks every
+    ~15.6 ms on Windows) and asyncio runs timers up to one clock tick early, so a plain
+    ``asyncio.sleep`` can return before the deadline. The rest is slept in a worker thread
+    with the (high-resolution) ``time.sleep``.
+    """
+    delay = deadline - now()
+    if delay <= 0:
+        await asyncio.sleep(0)
+        return
+    await asyncio.sleep(delay)
+    remaining = deadline - now()
+    if remaining > 0:
+        await asyncio.to_thread(time.sleep, remaining)
 
 
 @dataclass(slots=True)
@@ -201,8 +220,7 @@ class CallerEmulator:
             pcm = pcm + bytes(self._chunk_samples * 2 - len(pcm))
         capture_start = self._t_stream + self._sent * self._chunk_dur
         due = capture_start + self._chunk_dur
-        delay = due - now()
-        await asyncio.sleep(delay if delay > 0 else 0)
+        await _sleep_until(due)
         self._lags.append(max(0.0, now() - due))
         self.transport.push_user_audio(AudioFrame(pcm, self._rate, 1, capture_start))
         self._user.append(pcm)

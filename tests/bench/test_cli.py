@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -11,6 +12,12 @@ from voice_agent_next.bench.results import ITEMS_FILE, MANIFEST_FILE, REPORT_FIL
 from voice_agent_next.cli.main import app
 
 runner = CliRunner()
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def plain(text: str) -> str:
+    """Output without ANSI styling (CI sets FORCE_COLOR)."""
+    return ANSI.sub("", text)
 
 
 def tiny_scenario(tmp_path: Path) -> Path:
@@ -26,7 +33,7 @@ def tiny_scenario(tmp_path: Path) -> Path:
 def test_bench_group_is_registered() -> None:
     result = runner.invoke(app, ["bench", "--help"])
     assert result.exit_code == 0, result.output
-    assert "latency" in result.output and "report" in result.output
+    assert "latency" in plain(result.output) and "report" in plain(result.output)
 
 
 def test_latency_command_writes_results_and_report_can_be_rerendered(tmp_path: Path) -> None:
@@ -50,14 +57,14 @@ def test_latency_command_writes_results_and_report_can_be_rerendered(tmp_path: P
     for name in (MANIFEST_FILE, ITEMS_FILE, SUMMARY_FILE, REPORT_FILE):
         assert (run_dir / name).is_file()
     assert (run_dir / "artifacts" / "session-000" / "stereo.wav").is_file()
-    assert "turn   1/1" in result.stderr  # live progress goes to stderr
+    assert "turn   1/1" in plain(result.stderr)  # live progress goes to stderr
 
     (run_dir / REPORT_FILE).unlink()
     rendered = runner.invoke(app, ["bench", "report", str(run_dir)])
     assert rendered.exit_code == 0, rendered.output
-    assert rendered.stdout.startswith("# Latency (T1) · mock")
+    assert plain(rendered.stdout).startswith("# Latency (T1) · mock")
     written = (run_dir / REPORT_FILE).read_text(encoding="utf-8")
-    assert written.rstrip("\n") == rendered.stdout.rstrip("\n")
+    assert written.rstrip("\n") == plain(rendered.stdout).rstrip("\n")
 
 
 def test_latency_command_human_output(tmp_path: Path) -> None:
@@ -70,7 +77,8 @@ def test_latency_command_human_output(tmp_path: Path) -> None:
         ],
     )  # fmt: skip
     assert result.exit_code == 0, result.output
-    assert "voice-to-voice" in result.stdout and "cascade:mock+mock+mock" in result.stdout
+    out = plain(result.stdout)
+    assert "voice-to-voice" in out and "cascade:mock+mock+mock" in out
     (run_dir,) = [p for p in tmp_path.iterdir() if p.is_dir()]
     assert not (run_dir / "artifacts").exists()
 
@@ -78,11 +86,11 @@ def test_latency_command_human_output(tmp_path: Path) -> None:
 def test_latency_command_rejects_bad_input(tmp_path: Path) -> None:
     base = ["bench", "latency", "--out", str(tmp_path)]
     both = runner.invoke(app, [*base, "--engine", "mock", "--stt", "mock"])
-    assert both.exit_code == 2 and "not both" in both.stderr
+    assert both.exit_code == 2 and "not both" in plain(both.stderr)
     scenario = runner.invoke(app, [*base, "--scenario", "no-such-scenario"])
-    assert scenario.exit_code == 2 and "scenario not found" in scenario.stderr
+    assert scenario.exit_code == 2 and "scenario not found" in plain(scenario.stderr)
     inline = runner.invoke(app, [*base, "--engine", "{provider: mock"])
-    assert inline.exit_code == 2 and "invalid inline component spec" in inline.stderr
+    assert inline.exit_code == 2 and "invalid inline component spec" in plain(inline.stderr)
     missing = runner.invoke(app, ["bench", "report", str(tmp_path / "nope")])
     assert missing.exit_code == 2
     assert list(tmp_path.iterdir()) == []  # nothing was written
