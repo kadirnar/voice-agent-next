@@ -206,3 +206,11 @@ class MyHostLLM(OpenAICompatibleLLM):
 * With `system_message_policy="keep"` on a strict chat template, per-response instructions
   fail the request; the local hosts that render model templates default to `"merge"`.
 * One completion per request: `n` greater than 1 (via `extra`) is not supported.
+
+## Speech servers
+
+Speaches, LocalAI, Azure OpenAI and Kokoro-FastAPI also serve OpenAI's speech endpoints
+(`/v1/audio/transcriptions`, `/v1/audio/speech`): `stt="speaches"`, `tts="speaches"`,
+`stt="localai"`, `tts="localai"`, `stt="azure_openai/<deployment>"`,
+`tts="azure_openai/<deployment>"`, `tts="kokoro_fastapi"`. See
+[OpenAI: compatible speech servers](openai.md#compatible-speech-servers).
