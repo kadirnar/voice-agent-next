@@ -741,7 +741,7 @@ def probe_endpoint(host: str, port: int = 443, timeout: float = 5.0) -> ProbeRes
 def network_checks(
     endpoints: Sequence[Endpoint],
     *,
-    probe: Callable[[str, int, float], ProbeResult] = probe_endpoint,
+    probe: Callable[[str, int, float], ProbeResult] | None = None,
     timeout: float = 5.0,
     slow_ms: float = 150.0,
 ) -> list[Check]:
@@ -758,7 +758,8 @@ def network_checks(
             )
         ]
     with ThreadPoolExecutor(max_workers=min(16, len(endpoints))) as pool:
-        results = list(pool.map(lambda e: probe(e.host, e.port, timeout), endpoints))
+        run = probe or probe_endpoint
+        results = list(pool.map(lambda e: run(e.host, e.port, timeout), endpoints))
     checks = []
     for ep, r in zip(endpoints, results, strict=True):
         data = asdict(r)
