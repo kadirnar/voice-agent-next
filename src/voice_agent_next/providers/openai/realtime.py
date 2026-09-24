@@ -95,6 +95,7 @@ __all__ = [
     "PROFILES",
     "OpenAIRealtimeConnection",
     "OpenAIRealtimeEngine",
+    "RealtimeConnectTimeoutError",
     "RealtimeProfile",
     "TurnDetection",
     "get_profile",
@@ -378,6 +379,17 @@ def _parse_usage(raw: Any) -> EngineUsage | None:
     )
 
 
+class RealtimeConnectTimeoutError(ProviderTimeoutError, ProviderConnectionError):
+    """Opening the realtime connection (TCP, TLS or WebSocket handshake) timed out.
+
+    Both a :class:`~voice_agent_next.errors.ProviderTimeoutError` and a retryable
+    :class:`~voice_agent_next.errors.ProviderConnectionError`: whether a connection attempt
+    is refused at once or runs into ``connect_timeout`` depends on the network and the OS —
+    Windows only reports a refused connection after retrying the SYN for about two seconds —
+    so both outcomes must be handled as the same connection failure.
+    """
+
+
 def _handshake_error(exc: BaseException, provider: str, url: str) -> Exception:
     if isinstance(exc, InvalidStatus):
         status = exc.response.status_code
@@ -397,7 +409,9 @@ def _handshake_error(exc: BaseException, provider: str, url: str) -> Exception:
     if isinstance(exc, InvalidURI):
         return ConfigurationError(f"{provider}: invalid realtime URL {url!r}: {exc}")
     if isinstance(exc, TimeoutError):
-        return ProviderTimeoutError(f"{provider}: timed out connecting to {url}", provider=provider)
+        return RealtimeConnectTimeoutError(
+            f"{provider}: timed out connecting to {url}", provider=provider
+        )
     return ProviderConnectionError(
         f"{provider}: cannot connect to {url}: {type(exc).__name__}: {exc}", provider=provider
     )

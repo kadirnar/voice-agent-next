@@ -31,6 +31,7 @@ from voice_agent_next.errors import (
     EngineError,
     ProviderConnectionError,
     ProviderError,
+    ProviderTimeoutError,
     RateLimitError,
 )
 from voice_agent_next.events import (
@@ -55,6 +56,7 @@ from voice_agent_next.providers.openai.realtime import (
     VERBATIM_INSTRUCTIONS,
     OpenAIRealtimeConnection,
     OpenAIRealtimeEngine,
+    RealtimeConnectTimeoutError,
     _AudioItem,
     _LevelTracker,
     realtime_url,
@@ -351,6 +353,8 @@ async def test_handshake_and_ga_session_update() -> None:
                 "tracing": "auto",
             }
             assert conn.session_id is not None and conn.session_id.startswith("sess_")
+            # the history follows session.update; session.updated may arrive before it lands
+            await wait_for(lambda: len(server.events("conversation.item.create")) == 5)
             assert [e["item"] for e in server.events("conversation.item.create")] == [
                 {"type": "message", "role": "system",
                  "content": [{"type": "input_text", "text": "Be kind."}]},
@@ -650,10 +654,41 @@ async def test_handshake_and_startup_errors() -> None:
     with socket.socket() as sock:  # a port nobody listens on
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
+    # refused at once on Linux/macOS; Windows retries the SYN for ~2 s first, so the attempt
+    # runs into connect_timeout there: both are the same (retryable) connection failure
     engine = OpenAIRealtimeEngine(base_url=f"ws://127.0.0.1:{port}/v1", api_key=KEY,
-                                  connect_timeout=2)  # fmt: skip
-    with pytest.raises(ProviderConnectionError):
+                                  connect_timeout=0.5)  # fmt: skip
+    with pytest.raises(ProviderConnectionError) as refused:
         await engine.connect(EngineOptions())
+    assert refused.value.retryable and not engine._connections
+
+
+async def test_connect_timeout_is_a_retryable_connection_failure() -> None:
+    """A server that accepts the TCP connection but never answers the WebSocket handshake."""
+    writers: list[asyncio.StreamWriter] = []
+
+    async def accept(_: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writers.append(writer)  # keep the connection open, never reply
+
+    silent = await asyncio.start_server(accept, "127.0.0.1", 0)
+    port = silent.sockets[0].getsockname()[1]
+    try:
+        engine = OpenAIRealtimeEngine(base_url=f"ws://127.0.0.1:{port}/v1", api_key=KEY,
+                                      connect_timeout=0.3)  # fmt: skip
+        t0 = now()
+        with pytest.raises(RealtimeConnectTimeoutError, match="timed out connecting") as info:
+            await engine.connect(EngineOptions())
+        assert now() - t0 < 5.0
+        error = info.value
+        assert isinstance(error, ProviderConnectionError) and isinstance(
+            error, ProviderTimeoutError
+        )
+        assert error.retryable and error.provider == "openai" and not engine._connections
+    finally:
+        for writer in writers:
+            writer.close()
+        silent.close()
+        await silent.wait_closed()
 
 
 async def test_reconnects_after_a_dropped_connection() -> None:
@@ -671,8 +706,9 @@ async def test_reconnects_after_a_dropped_connection() -> None:
             failed = rec.of(ResponseDone)[0]
             assert failed.status == "failed" and "connection lost" in (failed.error or "")
             assert len(server.handshakes) == 2
-            updates = server.events("session.update")
-            assert len(updates) == 2 and updates[1]["session"]["instructions"] == "hi"
+            # "reconnected" = configuration sent; it reaches the server a moment later
+            await wait_for(lambda: len(server.events("session.update")) == 2)
+            assert server.events("session.update")[1]["session"]["instructions"] == "hi"
             await server.connections[-1].ws.send("not json")  # ignored
             # the new provider session works and its audio clock is mapped onto ours
             await user_turn(conn, speech=1.0, silence=0.8)
@@ -686,11 +722,12 @@ async def test_reconnects_after_a_dropped_connection() -> None:
 async def test_gives_up_when_the_server_is_gone() -> None:
     server = await FakeRealtimeServer().start()
     engine = OpenAIRealtimeEngine(base_url=server.url, api_key=KEY, max_reconnect_attempts=2,
-                                  reconnect_backoff=0.01, connect_timeout=1)  # fmt: skip
+                                  reconnect_backoff=0.01, connect_timeout=0.5)  # fmt: skip
     conn = await engine.connect(EngineOptions())
     rec = Collector(conn)
     await server.aclose()  # closes the session and stops listening
-    await asyncio.wait_for(rec.task, 5)  # events() ends once the connection gives up
+    # each attempt is refused at once (Linux/macOS) or times out after 0.5 s (Windows)
+    await asyncio.wait_for(rec.task, 10)  # events() ends once the connection gives up
     assert [s.status for s in rec.of(EngineStatus)] == ["reconnecting"]
     error = rec.of(EngineErrorEvent)[-1]
     assert isinstance(error.error, ProviderConnectionError) and not error.recoverable
@@ -749,7 +786,9 @@ async def test_qwen_profile_speaks_the_beta_dialect() -> None:
             await user_turn(conn, speech=1.0, silence=0.8)
             await rec.wait(lambda: rec.of(ResponseDone))
             assert server.connections[0].input_rate() == 16_000
-            assert server.connections[0].position == pytest.approx(2.1, abs=0.01)  # 16 kHz PCM
+            # all 2.1 s of audio arrive as 16 kHz PCM (the tail may land after the response)
+            await wait_for(lambda: server.connections[0].position >= 2.1 - 0.01)
+            assert server.connections[0].position == pytest.approx(2.1, abs=0.01)
             partials = [t.text for t in rec.of(InputTranscript) if not t.is_final]
             assert partials == ["how ", "how is ", "how is the ", "how is the weather"]
             assert [t.text for t in rec.of(InputTranscript) if t.is_final] == ["how is the weather"]
@@ -930,6 +969,9 @@ async def test_agent_session_end_to_end() -> None:
         await transport.play_user_audio(synth_speech(0.4, 16_000), realtime=False)
         await wait_for(lambda: events.get("interrupted"))
         await wait_for(lambda: server.truncations)
+        await wait_for(  # the cancelled response's response.done is still on its way
+            lambda: any(isinstance(m, EngineMetrics) and m.cancelled for m in events["metrics"])
+        )
         await session.aclose()
 
     greeting = server.responses[0]
