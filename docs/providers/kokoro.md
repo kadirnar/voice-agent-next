@@ -77,11 +77,11 @@ a float `speed`, and embed their vocabulary.
 | Model id | File | Download | Voice pack | Notes |
 |---|---|---|---|---|
 | `v1.0` (default) | `kokoro-v1.0.onnx` | 326 MB | `voices-v1.0.bin` (28 MB, 54 voices) | fp32, reference quality |
-| `v1.0-fp16` | `kokoro-v1.0.fp16.onnx` | 164 MB | same | spectral correlation 0.999 vs fp32; same CPU speed as fp32 in our test; the better choice for GPUs |
-| `v1.0-int8` | `kokoro-v1.0.int8.onnx` | 114 MB | same | smallest download; correlation 0.916; **slower than real time on x86 CPUs** (see [Performance](#performance)) |
+| `v1.0-fp16` | `kokoro-v1.0.fp16.onnx` | 164 MB | same | spectral correlation 0.999 vs fp32; half the download, same CPU speed as fp32 in our test |
+| `v1.0-int8` | `kokoro-v1.0.int8.onnx` | 114 MB | same | smallest download; correlation 0.916; **slower than real time on our x86 CPU** (see [Performance](#performance)) |
 | `v1.1-zh` | `kokoro-v1.1-zh.onnx` | 326 MB | `voices-v1.1-zh.bin` (54 MB, 103 voices) | Chinese + English |
-| `v1.1-zh-fp16` | `kokoro-v1.1-zh.fp16.onnx` | 164 MB | same | |
-| `v1.1-zh-int8` | `kokoro-v1.1-zh.int8.onnx` | 114 MB | same | |
+| `v1.1-zh-fp16` | `kokoro-v1.1-zh.fp16.onnx` | 164 MB | same | correlation 0.994 |
+| `v1.1-zh-int8` | `kokoro-v1.1-zh.int8.onnx` | 114 MB | same | correlation 0.874 |
 
 Aliases are accepted: `int8`, `fp16` and `fp32` mean the v1.0 variants, and file names
 such as `kokoro-v1.0.int8.onnx` resolve to their ids. To use your own export or a
@@ -111,9 +111,11 @@ quality and quantity of each voice's training data; the best voices are in bold.
 The v1.1-zh pack has 100 Chinese voices (`zf_001`..., `zm_009`...; the default is `zf_001`)
 plus `af_maple`, `af_sol` and `bf_vale`.
 
-Phonemization uses espeak-ng. It works well for English and the European languages, but
-Japanese and Chinese through espeak-ng sound poor; upstream uses
-[misaki](https://github.com/hexgrad/misaki) for those. To use a better G2P, pass
+Phonemization (G2P) uses espeak-ng. Upstream Kokoro also uses espeak-ng for Spanish,
+French, Hindi, Italian and Portuguese. For English it uses
+[misaki](https://github.com/hexgrad/misaki) with espeak-ng as the fallback, and for Japanese
+and Chinese it uses misaki only. espeak-ng handles those two poorly; for example, it
+phonemizes kanji as the English words "Chinese letter". To use a better G2P, pass
 `g2p=lambda text, lang: phonemes`, and kokoro-onnx will receive phonemes instead of text.
 
 ## Options
@@ -172,8 +174,8 @@ retries on CPU. Providers passed explicitly (`providers=`) are used as given. Th
 `onnxruntime` wheel is CPU-only on Linux and Windows (plus `AzureExecutionProvider`, which is
 ignored) and includes CoreML on macOS.
 
-The int8 models are dynamically quantized (`ConvInteger`), so on GPUs they gain little. Use
-fp32 or fp16 there.
+The int8 models are built on `ConvInteger`, which the CUDA execution provider does not
+implement, so ONNX Runtime runs those nodes on the CPU. With CUDA, use fp32 or fp16.
 
 ## Performance
 
@@ -198,9 +200,10 @@ synthesis time divided by audio duration; below 1 is faster than real time.
   "Sure!" as its own segment. All 9.5 s of speech were ready after 1.7 to 2.0 s.
 * **Cold start.** Downloading the 326 MB `v1.0` model, loading it and warming up took
   9.1 s. Loading from the cache, the first request took 1.9 s. Call `warmup()` at startup.
-* **Why int8 is slow.** Profiling shows 92% of its time in `ConvInteger`, which has no
-  optimized x86 kernel in ONNX Runtime. Use int8 only when download size matters more than
-  latency.
+* **Why int8 is slow.** Profiling shows 92% of its time in `ConvInteger`. The older 88 MB
+  int8 export from `model-files-v1.0` behaves the same way (89%). On this CPU, ONNX Runtime
+  runs these quantized convolutions far slower than the fp32 ones they replace. Use int8 only
+  when download size matters more than latency.
 * TTFB grows with the length of the first sentence, since Kokoro synthesizes a whole
   sentence per pass. Upstream notes that voices sound best at 100 to 200 phonemes and
   weaker on very short inputs, so the provider merges fragments under 20 characters.
