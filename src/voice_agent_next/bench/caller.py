@@ -13,7 +13,9 @@
   the harness annotations share one clock;
 * after each utterance the caller keeps streaming silence until the agent has replied and
   gone quiet (``gap_after_reply``), or until ``reply_timeout`` passes without any agent
-  audio (a *missed* turn), then speaks the next utterance;
+  audio (a *missed* turn), then speaks the next utterance. A stimulus with ``barge_in``
+  is spoken that many seconds after the agent's reply to the previous turn started, over
+  the agent (interruptions, backchannels, coughs);
 * agent audio is taken from the transport's playout log (``played_log``), i.e. placed at
   the time it started playing, and truncated at playback clears (barge-in).
 
@@ -197,7 +199,9 @@ class CallerEmulator:
             for k in range(0, len(audio.data), step):
                 if not await self._send(audio.data[k : k + step]):
                     break
-            await self._after_turn(turn, reply_timeout, gap_after_reply, max_reply)
+            nxt = stimuli[i + 1] if i + 1 < len(stimuli) else None
+            barge_in = nxt.barge_in if nxt is not None else None
+            await self._after_turn(turn, reply_timeout, gap_after_reply, max_reply, barge_in)
             if self.on_turn is not None:
                 self.on_turn(turn)
         if not self._aborted:
@@ -267,14 +271,27 @@ class CallerEmulator:
                 return
 
     async def _after_turn(
-        self, turn: TurnTiming, reply_timeout: float, gap: float, max_reply: float
+        self,
+        turn: TurnTiming,
+        reply_timeout: float,
+        gap: float,
+        max_reply: float,
+        barge_in: float | None = None,
     ) -> None:
+        """Stream silence until the caller may speak again: the agent replied and went
+        quiet, or (``barge_in``) its reply has been playing for ``barge_in`` seconds."""
         silence = bytes(self._chunk_samples * 2)
         earliest = turn.end + turn.stimulus.pause
         while True:
             self._scan_agent(turn)
             t = now()
             if t >= earliest:
+                if (
+                    barge_in is not None
+                    and turn.reply_start is not None
+                    and t >= turn.reply_start + barge_in
+                ):
+                    return  # talk over the agent
                 if turn.reply_start is None:
                     if not turn.stimulus.expect_reply and self._quiet(gap):
                         return

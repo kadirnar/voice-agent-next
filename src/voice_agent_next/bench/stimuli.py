@@ -24,7 +24,19 @@ what ``t_uoff`` (annotated end of user speech) refers to:
 * ``synthetic`` — :func:`~voice_agent_next.providers.mock.synth_speech` (a speech-like
   tone); the speech span is the whole clip. Offline and deterministic: the smoke tier.
 * ``tts`` — synthesized from ``text`` with any registered TTS (``tts:`` spec);
-* ``wav`` — a WAV file (path relative to the scenario file).
+* ``wav`` — a WAV file (path relative to the scenario file);
+* ``noise`` — a deterministic noise burst (a cough, a knock: ``duration`` s, ``seed``).
+
+Turn-taking scenarios (T4) add three things:
+
+* ``parts`` — a turn spoken in pieces with **mid-turn pauses**
+  (``parts: [{text: Where is my order?, pause: 0.6}, {text: I placed it last week.}]``);
+  every part is rendered on its own (synthetic or TTS), trimmed to its speech and joined
+  with exactly ``pause`` seconds of silence; the pauses are annotated on the stimulus;
+* ``barge_in: 1.0`` — the caller speaks this turn 1.0 s after the agent's reply to the
+  previous turn started, i.e. **over** the agent (an interruption, a backchannel, a cough);
+* ``category`` — a free label used by the reports (``question``, ``pause``,
+  ``interruption``, ``backchannel``, ``noise``...), and ``loudness_dbfs`` per turn.
 
 For ``tts``/``wav`` stimuli the span is ``speech: [start, end]`` when given, otherwise
 annotated automatically (10 ms frames within 35 dB of the clip's loudest frame).
@@ -56,18 +68,37 @@ __all__ = [
     "Scenario",
     "Stimulus",
     "StimulusSource",
+    "TurnPart",
     "TurnSpec",
     "annotate_speech",
     "builtin_scenario",
     "load_scenario",
+    "noise_burst",
     "normalize_loudness",
     "render_stimuli",
 ]
 
-StimulusSource = Literal["synthetic", "tts", "wav"]
+StimulusSource = Literal["synthetic", "tts", "wav", "noise"]
 
 _CHARS_PER_SECOND = 14.0  # default speaking rate for synthetic stimuli without a duration
 _AUTO_ANNOTATION_RANGE_DB = 35.0
+
+
+class TurnPart(BaseModel):
+    """One piece of a turn spoken with mid-turn pauses (see ``TurnSpec.parts``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str | None = None
+    duration: float | None = Field(default=None, gt=0)
+    """Synthetic speech duration (s). Default: from the text length."""
+    pause: float = Field(default=0.0, ge=0)
+    """Silence after this part (s); ignored for the last part."""
+
+
+_NEW_TURN_FIELDS = ("parts", "barge_in", "category", "loudness_dbfs", "seed")
+"""TurnSpec fields added after scenario hashes were first published: left out of
+:meth:`Scenario.definition_sha256` while unset, so existing hashes do not change."""
 
 
 class TurnSpec(BaseModel):
@@ -92,6 +123,17 @@ class TurnSpec(BaseModel):
     """The agent is expected to answer this turn."""
     pause: float = Field(default=0.0, ge=0)
     """Minimum silence after the utterance before the caller may speak again (s)."""
+    parts: list[TurnPart] | None = Field(default=None, min_length=1)
+    """Speak the turn in pieces separated by mid-turn pauses (synthetic / TTS only)."""
+    barge_in: float | None = Field(default=None, ge=0)
+    """Speak this turn this many seconds after the agent's reply to the previous turn
+    started (over the agent). ``None``: wait until the agent is quiet (the default)."""
+    category: str | None = None
+    """Label for reports (``question``, ``pause``, ``interruption``, ``backchannel``...)."""
+    loudness_dbfs: float | None = None
+    """Speech RMS of this stimulus; overrides the scenario's ``loudness_dbfs``."""
+    seed: int = 0
+    """Random seed of ``noise`` stimuli."""
 
     @field_validator("speech")
     @classmethod
@@ -143,8 +185,18 @@ class Scenario(BaseModel):
                 raise ValueError(f"turn {i}: 'tts' stimuli need `text:`")
             if source == "tts" and self.tts is None:
                 raise ValueError(f"turn {i}: 'tts' stimuli need a scenario-level `tts:` spec")
-            if source == "synthetic" and turn.duration is None and not turn.text:
+            if source == "synthetic" and turn.duration is None and not (turn.text or turn.parts):
                 raise ValueError(f"turn {i}: synthetic stimuli need `duration:` or `text:`")
+            if source == "noise" and turn.duration is None:
+                raise ValueError(f"turn {i}: noise stimuli need `duration:`")
+            if turn.parts is not None:
+                if source not in ("synthetic", "tts"):
+                    raise ValueError(f"turn {i}: `parts` needs synthetic or tts stimuli")
+                for part in turn.parts:
+                    if source == "tts" and not part.text:
+                        raise ValueError(f"turn {i}: every tts part needs `text:`")
+                    if source == "synthetic" and part.duration is None and not part.text:
+                        raise ValueError(f"turn {i}: synthetic parts need `duration:` or `text:`")
         return self
 
     @property
@@ -162,7 +214,13 @@ class Scenario(BaseModel):
 
     def definition_sha256(self) -> str:
         """Hash of the scenario definition (canonical JSON)."""
-        data = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        dump = self.model_dump(mode="json")
+        defaults = TurnSpec.model_fields
+        for turn in dump["turns"]:
+            for key in _NEW_TURN_FIELDS:  # unset new fields: keep the published hashes
+                if turn.get(key) == defaults[key].default:
+                    turn.pop(key, None)
+        data = json.dumps(dump, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
@@ -183,6 +241,11 @@ class Stimulus:
     expect_reply: bool = True
     pause: float = 0.0
     gain_db: float = 0.0
+    pauses: tuple[tuple[float, float], ...] = ()
+    """Mid-turn pauses ``(start, end)`` in seconds from the start of the clip."""
+    barge_in: float | None = None
+    """Spoken this long after the agent's previous reply started (see ``TurnSpec``)."""
+    category: str | None = None
 
     @property
     def duration(self) -> float:
@@ -208,7 +271,11 @@ class Stimulus:
             "pause_s": self.pause,
             "gain_db": round(self.gain_db, 3),
             "sha256": self.sha256,
-        }
+            **({"pauses_s": [[round(a, 6), round(b, 6)] for a, b in self.pauses]}
+               if self.pauses else {}),
+            **({"barge_in_s": self.barge_in} if self.barge_in is not None else {}),
+            **({"category": self.category} if self.category else {}),
+        }  # fmt: skip
 
 
 # ------------------------------------------------------------------------ loading
@@ -336,6 +403,56 @@ async def _render_tts(spec: str | dict[str, Any], texts: Sequence[str]) -> list[
         await tts.aclose()
 
 
+def noise_burst(duration: float, sample_rate: int, *, seed: int = 0) -> AudioFrame:
+    """A deterministic cough-like burst: band-limited noise with a sharp attack and an
+    exponential decay (two bursts when longer than 0.4 s). Not speech, but loud and broadband
+    enough to trigger energy-based voice activity detection."""
+    n = max(1, round(duration * sample_rate))
+    rng = np.random.default_rng(seed)
+    x = rng.standard_normal(n)
+    # crude band-pass (~200 Hz - 3 kHz): difference of two one-pole low-passes
+    def lowpass(sig: np.ndarray, fc: float) -> np.ndarray:
+        a = math.exp(-2.0 * math.pi * fc / sample_rate)
+        out = np.empty_like(sig)
+        acc = 0.0
+        for k, v in enumerate(sig):
+            acc = (1.0 - a) * v + a * acc
+            out[k] = acc
+        return out
+
+    x = lowpass(x, 3000.0) - lowpass(x, 200.0)
+    t = np.arange(n) / sample_rate
+    bursts = [0.0] if duration <= 0.4 else [0.0, duration * 0.45]
+    env = np.zeros(n)
+    for b in bursts:
+        rel = t - b
+        env = np.maximum(env, np.where(rel >= 0, np.minimum(1.0, rel / 0.01), 0.0)
+                         * np.exp(-np.clip(rel, 0, None) / 0.08))  # fmt: skip
+    y = x * env
+    peak = float(np.max(np.abs(y))) or 1.0
+    return AudioFrame.from_numpy((0.5 * y / peak).astype(np.float32), sample_rate)
+
+
+def _join_parts(
+    parts: Sequence[AudioFrame], pauses: Sequence[float], rate: int
+) -> tuple[AudioFrame, tuple[tuple[float, float], ...]]:
+    """Trim each part to its speech, join them with exact pauses; return the pause spans."""
+    pieces: list[AudioFrame] = []
+    spans: list[tuple[float, float]] = []
+    t = 0.0
+    for k, audio in enumerate(parts):
+        start, end = annotate_speech(audio)
+        clip = audio.slice(start, end)
+        pieces.append(clip)
+        t += clip.duration
+        if k + 1 < len(parts) and pauses[k] > 0:
+            gap = AudioFrame.silence(pauses[k], rate)
+            spans.append((t, t + gap.duration))
+            pieces.append(gap)
+            t += gap.duration
+    return AudioFrame.concat(pieces), tuple(spans)
+
+
 async def render_stimuli(scenario: Scenario, *, turns: int | None = None) -> list[Stimulus]:
     """Render ``turns`` stimuli (default: one per scenario turn, cycling when more).
 
@@ -349,24 +466,55 @@ async def render_stimuli(scenario: Scenario, *, turns: int | None = None) -> lis
     rate = scenario.sample_rate
     used = sorted({i % len(scenario.turns) for i in range(count)})
     sources = {i: scenario.turns[i].source or scenario.stimuli for i in used}
-    tts_idx = [i for i in used if sources[i] == "tts"]
-    tts_audio: dict[int, AudioFrame] = {}
-    if tts_idx:
+    # every text to synthesize: (turn, part index or None)
+    tts_keys: list[tuple[int, int | None]] = []
+    for i in used:
+        if sources[i] != "tts":
+            continue
+        spec_parts = scenario.turns[i].parts
+        if spec_parts:
+            tts_keys += [(i, k) for k in range(len(spec_parts))]
+        else:
+            tts_keys.append((i, None))
+    tts_audio: dict[tuple[int, int | None], AudioFrame] = {}
+    if tts_keys:
         assert scenario.tts is not None  # checked by the model validator
-        rendered = await _render_tts(scenario.tts, [scenario.turns[i].text or "" for i in tts_idx])
-        tts_audio = dict(zip(tts_idx, rendered, strict=True))
+        texts = [
+            (scenario.turns[i].parts or [])[k].text if k is not None else scenario.turns[i].text
+            for i, k in tts_keys
+        ]
+        rendered = await _render_tts(scenario.tts, [t or "" for t in texts])
+        tts_audio = {key: resample(a, rate) for key, a in zip(tts_keys, rendered, strict=True)}
 
     cache: dict[int, Stimulus] = {}
     for i in used:
         spec = scenario.turns[i]
         source = sources[i]
         span = spec.speech
-        if source == "synthetic":
+        pauses: tuple[tuple[float, float], ...] = ()
+        if spec.parts:
+            pieces: list[AudioFrame] = []
+            for k, part in enumerate(spec.parts):
+                if source == "tts":
+                    pieces.append(tts_audio[(i, k)])
+                else:
+                    duration = part.duration or max(0.3, len(part.text or "") / _CHARS_PER_SECOND)
+                    pieces.append(synth_speech(round(duration, 3), rate, frequency=spec.frequency))
+            try:
+                audio, pauses = _join_parts(pieces, [p.pause for p in spec.parts], rate)
+            except ValueError as exc:
+                raise ConfigurationError(f"turn {scenario.turn_id(i)!r}: {exc}") from exc
+            span = span or (0.0, audio.duration)
+        elif source == "synthetic":
             duration = spec.duration or max(0.4, len(spec.text or "") / _CHARS_PER_SECOND)
             audio = synth_speech(round(duration, 3), rate, frequency=spec.frequency)
             span = span or (0.0, audio.duration)
+        elif source == "noise":
+            assert spec.duration is not None  # checked by the model validator
+            audio = noise_burst(spec.duration, rate, seed=spec.seed)
+            span = span or (0.0, audio.duration)
         elif source == "tts":
-            audio = resample(tts_audio[i], rate)
+            audio = tts_audio[(i, None)]
         else:
             assert spec.wav is not None
             path = Path(spec.wav)
@@ -388,11 +536,12 @@ async def render_stimuli(scenario: Scenario, *, turns: int | None = None) -> lis
                 f"({audio.duration:.3f} s)"
             )
         gain_db = 0.0
-        if scenario.loudness_dbfs is not None:
-            audio, gain_db = normalize_loudness(audio, scenario.loudness_dbfs, span)
+        loudness = spec.loudness_dbfs if spec.loudness_dbfs is not None else scenario.loudness_dbfs
+        if loudness is not None:
+            audio, gain_db = normalize_loudness(audio, loudness, span)
         cache[i] = Stimulus(
             id=scenario.turn_id(i),
-            text=spec.text,
+            text=spec.text or (" ".join(p.text for p in spec.parts if p.text) if spec.parts else None),
             audio=_pad_to_chunks(audio, scenario.chunk),
             speech_start=span[0],
             speech_end=span[1],
@@ -400,5 +549,8 @@ async def render_stimuli(scenario: Scenario, *, turns: int | None = None) -> lis
             expect_reply=spec.expect_reply,
             pause=spec.pause,
             gain_db=gain_db,
+            pauses=pauses,
+            barge_in=spec.barge_in,
+            category=spec.category,
         )
     return [cache[i % len(scenario.turns)] for i in range(count)]
