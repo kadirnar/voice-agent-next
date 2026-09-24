@@ -4,7 +4,8 @@ The *agent side* is a normal :class:`~voice_agent_next.transports.base.Transport
 the *user side* is driven by the test/simulator through ``push_user_audio`` /
 ``agent_audio``. With ``realtime_playout=True`` a virtual speaker consumes agent
 audio at real-time speed, so ``buffered_duration`` and interruption truncation
-behave like a real device.
+behave like a real device. Playback can be paused and resumed (false-interruption
+recovery); pass ``pausable=False`` to simulate an output that cannot pause.
 """
 
 from __future__ import annotations
@@ -33,7 +34,17 @@ class PlayedAudio:
 
 
 class LoopbackTransport(Transport):
-    capabilities = TransportCapabilities(playback_position=True, messages=True)
+    """In-memory transport (see the module docs).
+
+    Args:
+        input_format: format of the user audio pushed by the simulator.
+        output_format: format of the agent audio.
+        realtime_playout: consume agent audio at real-time speed (a virtual speaker).
+        pausable: support :meth:`pause_audio` / :meth:`resume_audio`. A pause takes
+            effect at the next frame boundary, like a device finishing its buffer.
+    """
+
+    capabilities = TransportCapabilities(pause=True, playback_position=True, messages=True)
 
     def __init__(
         self,
@@ -41,11 +52,14 @@ class LoopbackTransport(Transport):
         input_format: AudioFormat | None = None,
         output_format: AudioFormat | None = None,
         realtime_playout: bool = False,
+        pausable: bool = True,
     ) -> None:
         super().__init__(
             input_format=input_format or AudioFormat(16_000, 1),
             output_format=output_format or AudioFormat(24_000, 1),
         )
+        if not pausable:
+            self.capabilities = TransportCapabilities(playback_position=True, messages=True)
         self.realtime_playout = realtime_playout
         self._user_audio: Chan[AudioFrame] = Chan()
         self._played: Chan[PlayedAudio] = Chan()
@@ -55,9 +69,12 @@ class LoopbackTransport(Transport):
         self._wakeup = asyncio.Event()
         self._player: asyncio.Task[None] | None = None
         self._cleared = 0
+        self._paused = False
         self.messages: list[dict[str, Any]] = []
         self.played_log: list[PlayedAudio] = []
         self.clear_times: list[float] = []
+        self.pause_times: list[float] = []
+        self.resume_times: list[float] = []
 
     # ------------------------------------------------------------ agent side API
     async def start(self) -> None:
@@ -80,7 +97,7 @@ class LoopbackTransport(Transport):
             raise ValueError(f"expected {self.output_format}, got {frame.format}")
         if not frame:
             return
-        if not self.realtime_playout:
+        if not self.realtime_playout and not self._paused:
             self._deliver(frame, now())
             return
         self._queue.append(frame)
@@ -94,6 +111,31 @@ class LoopbackTransport(Transport):
         self._cleared += 1
         self.clear_times.append(now())
         self._wakeup.set()
+
+    async def pause_audio(self) -> None:
+        """Stop playback after the current frame, keeping queued audio."""
+        if not self.capabilities.pause:
+            await super().pause_audio()  # raises NotImplementedError
+        if not self._paused:
+            self._paused = True
+            self.pause_times.append(now())
+
+    async def resume_audio(self) -> None:
+        """Continue playback where :meth:`pause_audio` stopped it."""
+        if not self.capabilities.pause:
+            await super().resume_audio()  # raises NotImplementedError
+        if not self._paused:
+            return
+        self._paused = False
+        self.resume_times.append(now())
+        if not self.realtime_playout:  # hand over what was written while paused
+            while self._queue:
+                self._deliver(self._pop(), now())
+        self._wakeup.set()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
 
     def buffered_duration(self) -> float:
         current = 0.0
@@ -143,14 +185,21 @@ class LoopbackTransport(Transport):
         if not self._played.closed:
             self._played.send_nowait(played)
 
+    def _pop(self) -> AudioFrame:
+        frame = self._queue.popleft()
+        # reset when empty: float residue (e.g. 1e-17) would make wait_for_playout() spin
+        self._queued_duration = (
+            max(0.0, self._queued_duration - frame.duration) if self._queue else 0.0
+        )
+        return frame
+
     async def _play_loop(self) -> None:
         while True:
-            if not self._queue:
+            if not self._queue or self._paused:
                 self._wakeup.clear()
                 await self._wakeup.wait()
                 continue
-            frame = self._queue.popleft()
-            self._queued_duration = max(0.0, self._queued_duration - frame.duration)
+            frame = self._pop()
             cleared_at_start = self._cleared
             start = now()
             self._current_end = start + frame.duration

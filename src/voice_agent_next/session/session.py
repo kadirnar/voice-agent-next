@@ -6,8 +6,10 @@ Responsibilities (identical for native speech-to-speech and cascaded engines):
   processors such as echo cancellation);
 * play engine audio through the transport, paced in real time with a small
   look-ahead so the session always knows what the user has actually *heard*;
-* barge-in: when the user starts speaking over the agent, stop playback, cancel the
-  response and truncate the agent's turn to what was heard;
+* barge-in: when the user starts speaking over the agent, pause playback and let the
+  :mod:`~voice_agent_next.session.interruptions` policy decide — a real interruption
+  cancels the response and truncates the agent's turn to what was heard, a false one
+  (cough, noise, "uh-huh") resumes the agent where it stopped;
 * execute tool calls and feed the results back to the engine;
 * keep the conversation history and emit transcripts, state changes and metrics.
 """
@@ -16,10 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Mapping, Sequence
+from collections import deque
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from ..audio.frame import AudioFrame
 from ..audio.processing import AudioProcessor, ProcessorChain
 from ..audio.resample import StreamResampler
 from ..chat import ChatContext, ChatMessage, FunctionCall, FunctionCallOutput
@@ -51,6 +55,7 @@ from ..utils.ids import new_id
 from ..utils.log import logger
 from .agent import Agent
 from .events import (
+    AgentFalseInterruption,
     AgentState,
     AgentStateChanged,
     AgentTranscript,
@@ -64,11 +69,19 @@ from .events import (
     UserStateChanged,
     UserTranscript,
 )
+from .interruptions import InterruptionPolicy, Overlap, Verdict
 
 if TYPE_CHECKING:
     from ..engines.cascade import CascadeOptions
 
 __all__ = ["AgentSession", "SessionOptions"]
+
+_MAX_ONSET_LAG = 0.5
+"""Upper bound (s) on how long after its onset an engine reports user speech."""
+_SAY_REQUEST_TTL = 10.0
+"""A ``say()`` whose response has not started within this many seconds is forgotten."""
+_RECHECK_DELAY = 0.01
+"""Re-check an overlap this soon when engine events are still waiting to be handled."""
 
 
 @dataclass(slots=True)
@@ -83,6 +96,36 @@ class SessionOptions:
     """Maximum consecutive tool-call rounds per user turn."""
     close_on_disconnect: bool = True
     """Close the session when the transport's audio input ends (user hung up)."""
+    min_interruption_duration: float = 0.5
+    """Seconds of user speech needed to confirm a barge-in; until then the agent is only
+    paused. ``0`` together with ``min_interruption_words=0`` interrupts at the first sign
+    of speech, without pausing (the behaviour before the interruption policy)."""
+    min_interruption_words: int = 0
+    """Non-backchannel words needed as well, counted in the engine's interim transcripts
+    (``0`` = duration only). Use 1+ with a streaming STT to ignore noise and coughs."""
+    backchannel_words: Sequence[str] | None = None
+    """Words and phrases that never count as an interruption ("uh-huh", "okay"...).
+    ``None`` = the built-in list for the agent's language (see
+    :func:`~voice_agent_next.session.interruptions.backchannel_words_for`)."""
+    false_interruption_timeout: float | None = 2.0
+    """Seconds the user must stay quiet, without meaningful words, before paused speech
+    resumes. ``None`` disables pause-and-resume."""
+    resume_false_interruption: bool = True
+    """Pause the agent while a barge-in is unconfirmed and resume it after a false
+    interruption. ``False``: the agent keeps talking until the barge-in is confirmed."""
+    discard_audio_if_uninterruptible: bool = True
+    """While uninterruptible speech plays, the engine receives silence instead of the
+    user's audio (so it can neither barge in nor queue a turn)."""
+
+    def __post_init__(self) -> None:
+        if self.min_interruption_duration < 0:
+            raise ValueError("min_interruption_duration must be >= 0")
+        if self.min_interruption_words < 0:
+            raise ValueError("min_interruption_words must be >= 0")
+        if self.false_interruption_timeout is not None and self.false_interruption_timeout < 0:
+            raise ValueError("false_interruption_timeout must be >= 0 or None")
+        if isinstance(self.backchannel_words, str):
+            raise TypeError("backchannel_words must be a list of words, not a string")
 
 
 @dataclass
@@ -118,6 +161,8 @@ class _Response:
     """Seconds of audio received from the engine."""
     segments: list[tuple[float, float]] = field(default_factory=list)
     """(playback start time, duration) of every chunk sent to the transport."""
+    allow_interruptions: bool | None = None
+    """Overrides ``SessionOptions.allow_interruptions`` (``say(..., allow_interruptions=)``)."""
 
     def played(self, t: float) -> float:
         return sum(min(max(t - start, 0.0), dur) for start, dur in self.segments)
@@ -126,10 +171,37 @@ class _Response:
     def sent(self) -> float:
         return sum(d for _, d in self.segments)
 
+    @property
+    def end(self) -> float:
+        """Playback time at which the audio sent so far ends."""
+        return max((start + dur for start, dur in self.segments), default=0.0)
+
 
 @dataclass(slots=True)
 class _EndOfResponse:
     response_id: str
+
+
+@dataclass(eq=False)
+class _BargeIn:
+    """User speech over ``response`` awaiting a verdict (see :class:`Overlap`)."""
+
+    overlap: Overlap
+    response: _Response
+    ignore_items: frozenset[str]
+    """Input items committed before the overlap: their late transcripts are not evidence."""
+    paused_at: float | None = None
+    """When this overlap paused playback (``None`` = not paused)."""
+    paused_total: float = 0.0
+    """Seconds of pauses that already ended."""
+    input_cleared: bool = False
+    """The engine's pending input was cleared during the current silence."""
+
+
+@dataclass(eq=False, slots=True)
+class _SayRequest:
+    allow_interruptions: bool | None
+    created: float = field(default_factory=now)
 
 
 class AgentSession(EventEmitter):
@@ -201,6 +273,19 @@ class AgentSession(EventEmitter):
         self._turn: _Turn | None = None
         self._user_speech_end: float | None = None
         self._tool_steps = 0
+        # interruption policy: the overlap awaiting a verdict and the playback pause state
+        self._barge: _BargeIn | None = None
+        self._barge_timer: asyncio.TimerHandle | None = None
+        self._committed_items: deque[str] = deque(maxlen=8)
+        self._say_requests: deque[_SayRequest] = deque()
+        self._send_gate = asyncio.Event()  # cleared while playback is paused
+        self._send_gate.set()
+        self._clock_paused_at: float | None = None  # the transport itself is paused
+        self._clock_running = asyncio.Event()
+        self._clock_running.set()
+        self._transport_paused = False
+        self._pause_seq = 0  # bumped whenever the playback timeline pauses or moves
+        self._engine_events: AsyncIterator[EngineEvent] | None = None
         self.engine.on("metrics", self._on_metrics)
 
     # ---------------------------------------------------------------- properties
@@ -274,6 +359,7 @@ class AgentSession(EventEmitter):
             await self._closed.wait()
             return
         self._closing = True
+        self._cancel_barge_in_timer()
         current = asyncio.current_task()
         await cancel_and_wait(*[t for t in self._loops if t is not current])
         await self._tasks.cancel_all()
@@ -300,9 +386,24 @@ class AgentSession(EventEmitter):
         await self.aclose()
 
     # --------------------------------------------------------------- public API
-    async def say(self, text: str) -> None:
-        """Speak ``text`` (verbatim when the engine supports it)."""
-        await self.connection.say(text)
+    async def say(self, text: str, *, allow_interruptions: bool | None = None) -> None:
+        """Speak ``text`` (verbatim when the engine supports it).
+
+        Args:
+            allow_interruptions: ``False`` makes this utterance uninterruptible (the user's
+                audio is discarded while it plays, see
+                ``SessionOptions.discard_audio_if_uninterruptible``); ``None`` follows
+                ``SessionOptions.allow_interruptions``.
+        """
+        # the engine gives no handle for the response it starts: the next one is ours
+        request = _SayRequest(allow_interruptions)
+        self._say_requests.append(request)
+        try:
+            await self.connection.say(text)
+        except BaseException:
+            with contextlib.suppress(ValueError):
+                self._say_requests.remove(request)
+            raise
 
     async def generate_reply(
         self, *, instructions: str | None = None, user_input: str | None = None
@@ -317,7 +418,10 @@ class AgentSession(EventEmitter):
 
     async def interrupt(self) -> None:
         """Stop the agent's current response immediately."""
+        if self._barge is not None:
+            self._end_barge_in(self._barge)  # the app decided: no verdict needed
         await self._interrupt()
+        await self._ensure_playback()
 
     async def update_instructions(self, instructions: str) -> None:
         self.agent.instructions = instructions
@@ -326,10 +430,26 @@ class AgentSession(EventEmitter):
     # ------------------------------------------------------------------- loops
     async def _input_loop(self) -> None:
         transport, conn = self.transport, self.connection
+        discarding = False
         try:
             async for frame in transport.audio_input():
                 if self._processors is not None:
                     frame = self._processors.process_capture(frame)
+                discard = self._discard_input()
+                if discard and not discarding and self.user_state == UserState.SPEAKING:
+                    # the user is mid-utterance: silence would end it and the engine would
+                    # answer the fragment (cancelling the uninterruptible speech): drop it
+                    try:
+                        await conn.clear_input()
+                    except Exception as exc:
+                        logger.warning("engine clear_input failed: %s", exc)
+                    self._set_user_state(UserState.LISTENING)
+                discarding = discard
+                if discard:
+                    # uninterruptible speech is playing: the engine must not hear the user
+                    frame = AudioFrame(
+                        bytes(len(frame.data)), frame.sample_rate, frame.channels, frame.timestamp
+                    )
                 await conn.send_audio(frame)
         except Exception as exc:
             logger.exception("audio input failed")
@@ -338,7 +458,8 @@ class AgentSession(EventEmitter):
             self._schedule_close("user_disconnected")
 
     async def _event_loop(self) -> None:
-        async for ev in self.connection.events():
+        self._engine_events = events = self.connection.events()
+        async for ev in events:
             try:
                 await self._handle(ev)
             except Exception as exc:
@@ -364,9 +485,7 @@ class AgentSession(EventEmitter):
             frame = resampler.push(item.frame)
             if not frame:
                 continue
-            ahead = self._virtual_end - now()
-            if ahead > self.options.output_lookahead:
-                await asyncio.sleep(ahead - self.options.output_lookahead)
+            await self._wait_for_playout_slot()
             if resp.interrupted:
                 continue
             t = now()
@@ -386,17 +505,17 @@ class AgentSession(EventEmitter):
     async def _handle(self, ev: EngineEvent) -> None:
         if isinstance(ev, InputSpeechStarted):
             self._set_user_state(UserState.SPEAKING)
-            if self.options.allow_interruptions and self._is_responding():
-                await self._interrupt()
+            await self._on_user_speech_started(ev)
         elif isinstance(ev, InputSpeechStopped):
             self._set_user_state(UserState.LISTENING)
-            wall = None
-            if ev.audio_time is not None:
-                wall = self.connection.audio_time_to_wall(ev.audio_time)
-            self._user_speech_end = wall if wall is not None else ev.timestamp
+            self._user_speech_end = self._wall_time(ev.audio_time, ev.timestamp)
+            await self._on_user_speech_stopped(ev, self._user_speech_end)
         elif isinstance(ev, InputTranscript):
             self._on_input_transcript(ev)
+            await self._on_barge_in_transcript(ev)
         elif isinstance(ev, InputCommitted):
+            self._committed_items.append(ev.item_id)
+            await self._on_barge_in_committed()
             if self._turn is not None:
                 self._close_turn(self._turn)
             self._turn = _Turn(new_id("turn_"), self._user_speech_end, ev.timestamp)
@@ -405,8 +524,10 @@ class AgentSession(EventEmitter):
             if self.agent_state == AgentState.LISTENING:
                 self._set_agent_state(AgentState.THINKING)
         elif isinstance(ev, ResponseStarted):
+            await self._on_barge_in_superseded()
             turn = self._turn if self._turn is not None and not self._turn.closed else None
             started = _Response(ev.response_id, ev.timestamp, turn)
+            started.allow_interruptions = self._say_request_for(ev.timestamp)
             self._responses[ev.response_id] = started
             self._current = started
             if self.agent_state != AgentState.SPEAKING:
@@ -422,6 +543,7 @@ class AgentSession(EventEmitter):
         elif isinstance(ev, ResponseToolCall):
             self._on_tool_call(ev)
         elif isinstance(ev, ResponseDone):
+            await self._on_barge_in_response_done(ev)
             self._on_response_done(ev)
         elif isinstance(ev, ToolCallCancelled):
             for task_owner in self._responses.values():
@@ -432,6 +554,15 @@ class AgentSession(EventEmitter):
             self.emit("error", SessionError(ev.error, ev.recoverable))
             if not ev.recoverable:
                 self._schedule_close("engine_error")
+
+    def _say_request_for(self, started_at: float) -> bool | None:
+        """``allow_interruptions`` of the ``say()`` that started a response at ``started_at``."""
+        requests = self._say_requests
+        while requests and started_at - requests[0].created > _SAY_REQUEST_TTL:
+            requests.popleft()  # the engine never started a response for it
+        if requests and started_at >= requests[0].created:
+            return requests.popleft().allow_interruptions
+        return None
 
     def _on_input_transcript(self, ev: InputTranscript) -> None:
         self.emit("user_transcript", UserTranscript(ev.text, ev.is_final, ev.item_id, ev.language))
@@ -525,11 +656,15 @@ class AgentSession(EventEmitter):
                 self._set_agent_state(AgentState.LISTENING)
 
     async def _finish_after(self, resp: _Response, delay: float) -> None:
+        pauses = self._pause_seq
         if delay > 0:
             await asyncio.sleep(delay)
+        if pauses != self._pause_seq or self._clock_paused_at is not None:
+            await self._wait_playout_end(resp)  # paused meanwhile: its audio ends later
         if resp.finished or resp.interrupted:
             return
         resp.finished = True
+        await self._release_barge_in(resp)
         if resp.turn is not None:
             resp.turn.agent_speech += resp.played(now())
         if resp.tool_calls:
@@ -540,27 +675,361 @@ class AgentSession(EventEmitter):
             self._current = None
             self._set_agent_state(AgentState.LISTENING)
 
+    async def _wait_for_playout_slot(self) -> None:
+        """Pace against the virtual playback clock; hold audio back while paused."""
+        while True:
+            await self._send_gate.wait()
+            ahead = self._virtual_end - now()
+            if ahead > self.options.output_lookahead:
+                pauses = self._pause_seq
+                await asyncio.sleep(ahead - self.options.output_lookahead)
+                if pauses != self._pause_seq:
+                    continue  # paused meanwhile: the timeline may have moved
+            if self._send_gate.is_set():
+                return
+
+    async def _wait_playout_end(self, resp: _Response) -> None:
+        """Wait until the audio sent for ``resp`` has been played, pauses included."""
+        while resp.segments and not (resp.finished or resp.interrupted):
+            paused_at = self._clock_paused_at
+            if paused_at is not None:
+                if resp.end <= paused_at:
+                    return
+                await self._clock_running.wait()
+                continue
+            remaining = resp.end - now()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(remaining)
+
     # ------------------------------------------------------------- interruption
+    def _can_interrupt(self, resp: _Response) -> bool:
+        if resp.allow_interruptions is not None:
+            return resp.allow_interruptions
+        return self.options.allow_interruptions
+
     def _is_responding(self) -> bool:
         resp = self._current
         if resp is None or resp.interrupted or resp.finished:
             return False
+        if self._clock_paused_at is not None:
+            return True  # paused mid-speech
         return not resp.done or self._virtual_end > now() or not self._out.empty()
 
-    async def _interrupt(self) -> None:
+    def _discard_input(self) -> bool:
+        """True while uninterruptible speech plays (and discarding is enabled)."""
+        if not self.options.discard_audio_if_uninterruptible:
+            return False
         resp = self._current
+        return resp is not None and not self._can_interrupt(resp) and self._is_responding()
+
+    def _wall_time(self, audio_time: float | None, fallback: float) -> float:
+        """``now()`` time at which an input-stream position was captured."""
+        if audio_time is not None and self._conn is not None:
+            wall = self._conn.audio_time_to_wall(audio_time)
+            if wall is not None:
+                return wall
+        return fallback
+
+    async def _on_user_speech_started(self, ev: InputSpeechStarted) -> None:
+        # where speech began; an onset mapped earlier than the VAD could plausibly report it
+        # comes from a gap in the input stream, not from speech
+        start = self._wall_time(ev.audio_time, ev.timestamp)
+        start = min(max(start, ev.timestamp - _MAX_ONSET_LAG), now())
+        barge = self._barge
+        if barge is not None:
+            barge.overlap.speech_started(start)  # the same overlap goes on
+            barge.input_cleared = False
+            await self._evaluate_barge_in()
+            return
+        resp = self._current
+        if resp is None or not self._can_interrupt(resp) or not self._is_responding():
+            return
+        opts = self.options
+        if opts.min_interruption_duration <= 0 and opts.min_interruption_words <= 0:
+            await self._interrupt()  # no policy: interrupt at the first sign of speech
+            return
+        language = self._agent.language if self._agent is not None else None
+        policy = InterruptionPolicy.from_options(opts, language=language)
+        overlap = Overlap.begin(policy, start, held=policy.pauses)
+        barge = _BargeIn(overlap, resp, frozenset(self._committed_items))
+        self._barge = barge
+        if policy.pauses:
+            await self._pause_playback(barge)
+        await self._evaluate_barge_in()
+
+    async def _on_user_speech_stopped(self, ev: InputSpeechStopped, speech_end: float) -> None:
+        if self._barge is not None:
+            self._barge.overlap.speech_stopped(speech_end, ev.timestamp)
+            await self._evaluate_barge_in()
+
+    async def _on_barge_in_transcript(self, ev: InputTranscript) -> None:
+        barge = self._barge
+        if barge is None or ev.item_id in barge.ignore_items:
+            return
+        final = ev.is_final or ev.segment_final
+        barge.overlap.add_transcript(ev.item_id, ev.text, final=final)
+        await self._evaluate_barge_in()
+
+    async def _on_barge_in_committed(self) -> None:
+        if self._barge is not None:
+            # the engine took the user's turn (and answers it): the agent's speech is over
+            await self._close_barge_in(self._barge, interrupt=True)
+
+    async def _on_barge_in_superseded(self) -> None:
+        barge = self._barge
+        if barge is not None:
+            # another response starts: paused speech can no longer be resumed
+            await self._close_barge_in(barge, interrupt=barge.paused_at is not None)
+
+    async def _on_barge_in_response_done(self, ev: ResponseDone) -> None:
+        barge = self._barge
+        if (
+            barge is None
+            or barge.overlap.confirmed
+            or ev.status != "cancelled"
+            or barge.response.response_id != ev.response_id
+        ):
+            return
+        # the engine cancelled the response itself (e.g. server-side VAD): resuming is
+        # impossible, so treat it as a real interruption and keep watching for a false one
+        barge.overlap.confirmed = True
+        await self._interrupt(barge.response, cancel=False)
+        self._watch_aftermath(barge)
+
+    async def _evaluate_barge_in(self) -> None:
+        barge = self._barge
+        if barge is None:
+            return
+        if self._engine_events_pending():
+            # decide on everything the engine already reported: e.g. a queued InputCommitted
+            # means it took the user's turn, and a cancel would hit the response it started
+            self._schedule_barge_in_check(barge, delay=_RECHECK_DELAY)
+            return
+        overlap = barge.overlap
+        if overlap.not_a_turn() and not barge.input_cleared:
+            # keep the engine from committing it (and answering it, which would cancel the
+            # paused speech)
+            barge.input_cleared = True
+            try:
+                await self.connection.clear_input()
+            except Exception as exc:
+                logger.warning("engine clear_input failed: %s", exc)
+            if self._barge is not barge:
+                return
+        verdict = overlap.verdict(now())
+        if verdict is None:
+            self._schedule_barge_in_check(barge)
+        elif verdict == Verdict.INTERRUPT:
+            overlap.confirmed = True
+            # only a response still being generated needs cancelling; a complete one is just
+            # truncated (a cancel might hit a response the engine started meanwhile)
+            await self._interrupt(barge.response, cancel=not barge.response.done)
+            self._watch_aftermath(barge)
+        elif verdict == Verdict.UNPAUSE:
+            overlap.held = False
+            if barge.paused_at is not None:
+                barge.paused_total += now() - barge.paused_at
+                barge.paused_at = None
+                await self._resume_playback()
+            if self._barge is barge:
+                self._schedule_barge_in_check(barge)
+        elif verdict == Verdict.RESUME:
+            await self._resume_after_false_interruption(barge)
+        else:
+            self._end_barge_in(barge)
+            if verdict == Verdict.FALSE_INTERRUPTION:
+                self._emit_false_interruption(barge, resumed=False, paused=0.0)
+        await self._ensure_playback()
+
+    def _engine_events_pending(self) -> bool:
+        """Engine events are queued but not handled yet (known for the base :class:`Chan`)."""
+        events = self._engine_events
+        return isinstance(events, Chan) and not events.empty()
+
+    async def _ensure_playback(self) -> None:
+        """Invariant: audio is only held back while an overlap has playback paused."""
+        barge = self._barge
+        if not self._send_gate.is_set() and (barge is None or barge.paused_at is None):
+            await self._resume_playback()
+
+    def _watch_aftermath(self, barge: _BargeIn) -> None:
+        """After a confirmed interruption, watch whether the user really takes the turn."""
+        if self._barge is not barge:
+            return
+        if barge.overlap.policy.false_interruption_timeout is None:
+            self._end_barge_in(barge)
+        else:
+            self._schedule_barge_in_check(barge)
+
+    async def _resume_after_false_interruption(self, barge: _BargeIn) -> None:
+        self._end_barge_in(barge)
+        if barge.paused_at is not None:
+            barge.paused_total += now() - barge.paused_at
+            barge.paused_at = None
+            await self._resume_playback()
+        if barge.paused_total > 0:  # else the agent never stopped talking: nothing to report
+            self._emit_false_interruption(barge, resumed=True, paused=barge.paused_total)
+
+    async def _release_barge_in(self, resp: _Response) -> None:
+        """``resp`` finished playing while its overlap was pending: nothing to decide."""
+        barge = self._barge
+        if barge is not None and barge.response is resp and not barge.overlap.confirmed:
+            await self._close_barge_in(barge, interrupt=False)
+
+    async def _close_barge_in(self, barge: _BargeIn, *, interrupt: bool) -> None:
+        """Stop tracking ``barge``: interrupt its response (truncate only: the engine has
+        moved on) or, if it is still paused, let playback continue."""
+        self._end_barge_in(barge)
+        paused = barge.paused_at is not None
+        barge.paused_at = None
+        resp = barge.response
+        if interrupt and not barge.overlap.confirmed and not (resp.interrupted or resp.finished):
+            barge.overlap.confirmed = True
+            await self._interrupt(resp, cancel=False)  # also restarts playback
+        elif paused:
+            await self._resume_playback()
+
+    def _end_barge_in(self, barge: _BargeIn) -> None:
+        if self._barge is barge:
+            self._barge = None
+            self._cancel_barge_in_timer()
+
+    def _schedule_barge_in_check(self, barge: _BargeIn, *, delay: float | None = None) -> None:
+        """Re-evaluate ``barge`` at its next deadline (or after ``delay`` seconds)."""
+        self._cancel_barge_in_timer()
+        if self._closing:
+            return
+        if delay is None:
+            deadline = barge.overlap.deadline()
+            if deadline is None:
+                return
+            delay = max(0.0, deadline - now())
+        self._barge_timer = asyncio.get_running_loop().call_later(
+            delay, self._on_barge_in_timer, barge
+        )
+
+    def _on_barge_in_timer(self, barge: _BargeIn) -> None:
+        self._barge_timer = None
+        if self._barge is barge and not self._closing:
+            self._tasks.spawn(self._evaluate_barge_in(), name="session-barge-in")
+
+    def _cancel_barge_in_timer(self) -> None:
+        if self._barge_timer is not None:
+            self._barge_timer.cancel()
+            self._barge_timer = None
+
+    def _emit_false_interruption(self, barge: _BargeIn, *, resumed: bool, paused: float) -> None:
+        overlap = barge.overlap
+        self.emit(
+            "agent_false_interruption",
+            AgentFalseInterruption(
+                resumed=resumed,
+                reason=overlap.reason(),
+                response_id=barge.response.response_id,
+                item_id=barge.response.item_id,
+                transcript=overlap.transcript,
+                speech_duration=overlap.speech_duration(now()),
+                paused=paused,
+            ),
+        )
+
+    # ------------------------------------------------------------ pause/resume
+    async def _pause_playback(self, barge: _BargeIn) -> None:
+        """Hold the agent's audio, without dropping it, until the overlap's verdict."""
+        t = now()
+        barge.paused_at = t
+        self._pause_seq += 1
+        self._send_gate.clear()
+        transport = self.transport
+        if transport.capabilities.pause:
+            self._transport_paused = True
+            self._freeze_clock(t)  # audio already queued in the transport stops too
+            try:
+                await transport.pause_audio()
+            except Exception as exc:
+                logger.warning("transport pause failed; holding back new audio only: %s", exc)
+                if self._clock_paused_at == t:
+                    self._transport_paused = False
+                    self._unfreeze_clock()
+        # else: the short look-ahead already handed to the transport plays out.
+        # The agent state is left as is: LISTENING means the agent's turn is over (clients
+        # finalize its transcript), which is only true once the interruption is confirmed.
+
+    async def _resume_playback(self) -> None:
+        paused_at = self._clock_paused_at
+        if paused_at is not None:
+            self._shift_timeline(paused_at, now() - paused_at)
+            self._unfreeze_clock()
+            self._pause_seq += 1  # the timeline moved: pending waits must re-check it
+        transport_paused, self._transport_paused = self._transport_paused, False
+        self._send_gate.set()
+        if transport_paused:
+            try:
+                await self.transport.resume_audio()
+            except Exception as exc:
+                logger.warning("transport resume failed: %s", exc)
+
+    def _freeze_clock(self, t: float) -> None:
+        self._clock_paused_at = t
+        self._clock_running.clear()
+
+    def _unfreeze_clock(self) -> None:
+        self._clock_paused_at = None
+        self._clock_running.set()
+
+    def _shift_timeline(self, paused_at: float, delta: float) -> None:
+        """Playback stood still from ``paused_at`` for ``delta`` s: unheard audio moves later."""
+        if delta <= 0:
+            return
+        for resp in self._responses.values():
+            if resp.finished or resp.interrupted or resp.end <= paused_at:
+                continue
+            shifted: list[tuple[float, float]] = []
+            for start, dur in resp.segments:
+                if start >= paused_at:
+                    shifted.append((start + delta, dur))
+                elif start + dur > paused_at:
+                    shifted.append((start, paused_at - start))
+                    shifted.append((paused_at + delta, start + dur - paused_at))
+                else:
+                    shifted.append((start, dur))
+            resp.segments = shifted
+        if self._virtual_end > paused_at:
+            self._virtual_end += delta
+
+    async def _interrupt(self, resp: _Response | None = None, *, cancel: bool = True) -> None:
+        """Stop ``resp`` (default: the current response) for good; truncate it to what was
+        heard. ``cancel=False`` when the engine already moved on (it committed the user's
+        turn or cancelled the response itself): only tell it how much was heard."""
+        if resp is None:
+            resp = self._current
         if resp is None or resp.interrupted or resp.finished:
             return
         resp.interrupted = True
-        t = now()
-        played = resp.played(t)
+        barge = self._barge
+        if barge is not None and barge.response is resp:
+            barge.overlap.confirmed = True
+            barge.paused_at = None
+        paused_at = self._clock_paused_at
+        played = resp.played(paused_at if paused_at is not None else now())
         self._out.clear()
-        self._virtual_end = t
+        self._virtual_end = now()
+        self._unfreeze_clock()  # paused audio is dropped, not resumed
+        transport_paused, self._transport_paused = self._transport_paused, False
         with contextlib.suppress(Exception):
             await self.transport.clear_audio()
+        if transport_paused:
+            with contextlib.suppress(Exception):
+                await self.transport.resume_audio()
+        self._send_gate.set()
         heard: str | None = None
+        played_ms = round(played * 1000)
         try:
-            heard = await self.connection.interrupt(resp.item_id, round(played * 1000))
+            if cancel:
+                heard = await self.connection.interrupt(resp.item_id, played_ms)
+            elif resp.item_id is not None and self.connection.capabilities.truncation:
+                heard = await self.connection.truncate(resp.item_id, played_ms)
         except Exception as exc:
             logger.warning("engine interrupt failed: %s", exc)
         if resp.message is not None:
@@ -576,8 +1045,9 @@ class AgentSession(EventEmitter):
             resp.turn.agent_speech += played
             self._close_turn(resp.turn)
         resp.finished = True
-        self._current = None
-        self._set_agent_state(AgentState.LISTENING)
+        if self._current is resp:
+            self._current = None
+            self._set_agent_state(AgentState.LISTENING)
 
     # ------------------------------------------------------------------ metrics
     def _on_metrics(self, m: Metrics) -> None:

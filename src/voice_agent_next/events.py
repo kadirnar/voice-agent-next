@@ -70,6 +70,9 @@ class InputTranscript:
     text: str
     is_final: bool
     language: str | None = None
+    segment_final: bool = False
+    """The recognizer will not revise this text any more, although the turn may continue
+    (e.g. the cascade's STT final after a pause). Always implied by ``is_final``."""
     timestamp: float = field(default_factory=now)
     type: Literal["input_transcript"] = "input_transcript"
 
