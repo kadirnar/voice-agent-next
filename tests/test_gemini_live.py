@@ -450,17 +450,30 @@ def quiet_noise(seconds: float, seed: int = 1) -> list[AudioFrame]:
 
 
 class Feeder:
-    """Streams frames into the engine in the background (about 5x real time)."""
+    """Streams frames into the engine in the background at ``speed`` x real time.
 
-    def __init__(self, conn: GeminiLiveConnection, frames: list[AudioFrame]) -> None:
+    Pacing follows ``perf_counter`` deadlines instead of fixed short sleeps: with a coarse
+    event-loop clock (Windows, Python < 3.13: ~15.6 ms) short sleeps return early, and the
+    stream would silently turn into a burst. Coarse timers now only make it lumpier.
+    """
+
+    def __init__(
+        self, conn: GeminiLiveConnection, frames: list[AudioFrame], speed: float = 5.0
+    ) -> None:
         self.sent = bytearray()
-        self._task = asyncio.create_task(self._run(conn, frames))
+        self._task = asyncio.create_task(self._run(conn, frames, speed))
 
-    async def _run(self, conn: GeminiLiveConnection, frames: list[AudioFrame]) -> None:
+    async def _run(
+        self, conn: GeminiLiveConnection, frames: list[AudioFrame], speed: float
+    ) -> None:
+        from voice_agent_next.utils import now
+
+        start, streamed = now(), 0.0
         for frame in frames:
             await conn.send_audio(frame)
             self.sent += frame.data
-            await asyncio.sleep(0.004)
+            streamed += frame.duration
+            await asyncio.sleep(max(0.0, start + streamed / speed - now()))
 
     async def done(self) -> bytes:
         await self._task
@@ -566,24 +579,64 @@ async def test_dropped_connection_is_resumed_and_buffered_audio_delivered(
     server = await fake()
     conn, events = await connect(server, resume_replay=0.05)
     first = server.connection
-    feeder = Feeder(conn, quiet_noise(2.5, seed=7))
-    await wait_for(lambda: len(feeder.sent) > 16_000)
-    await first.issue_handle()  # a fresh resumption point mid-stream
-    handle_pos = first.session.handles[first.handles[-1]]
-    await wait_for(lambda: len(feeder.sent) > 48_000)
+    # The engine replays what was sent since the handle *plus* the audio sent within
+    # `resume_replay` seconds (wall clock) before it arrived, which may still be in flight.
+    # So the pre-handle audio must be clearly older than that margin when the handle comes;
+    # otherwise replaying it is correct (and timing-dependent: coarse timers on Windows).
+    before = quiet_noise(0.5, seed=7)
+    for frame in before:
+        await conn.send_audio(frame)
+    before_bytes = b"".join(f.data for f in before)
+    await wait_for(lambda: len(first.audio) == len(before_bytes))  # all of it arrived
+    await asyncio.sleep(0.3)  # >> resume_replay, even with a 15.6 ms timer
+    handle = await first.issue_handle()  # a fresh resumption point mid-stream
+    assert handle is not None
+    handle_pos = first.session.handles[handle]
+    await wait_for(lambda: conn.resumption_handle == handle)
+    feeder = Feeder(conn, quiet_noise(2.0, seed=8))
+    await wait_for(lambda: len(feeder.sent) > 32_000)
     await server.drop(1011, "Internal error encountered.")
     await events.wait(lambda: resumed(events))
-    sent = await feeder.done()
+    after = await feeder.done()
     second = server.connections[1]
-    await wait_for(lambda: sent.endswith(bytes(second.audio)) and len(second.audio) > 0)
-    await asyncio.sleep(0.2)
+    await wait_for(lambda: len(second.audio) >= len(after), timeout=10)
     await conn.aclose()
 
     (reconnecting, done_status) = events.of(EngineStatus)
     assert reconnecting.status == "reconnecting" and "1011" in (reconnecting.detail or "")
-    assert done_status.status == "resumed" and second.resumed_from == first.handles[-1]
+    assert done_status.status == "resumed" and second.resumed_from == handle
+    sent = before_bytes + after
     start = assert_no_audio_lost(sent, bytes(first.audio), bytes(second.audio), handle_pos)
-    assert start > 0  # only the audio since the handle (plus a small margin) was replayed
+    # exactly the audio since the handle was replayed: nothing lost, nothing duplicated
+    assert start == handle_pos == len(before_bytes)
+    assert bytes(second.audio) == after
+
+
+async def test_zz_timer_diagnostics() -> None:  # TEMPORARY (Windows CI evidence), remove
+    import sys
+    import time
+    import warnings
+
+    loop = asyncio.get_running_loop()
+    sleeps = []
+    for _ in range(40):
+        t = time.perf_counter()
+        await asyncio.sleep(0.004)
+        sleeps.append(time.perf_counter() - t)
+    t = time.perf_counter()
+    for _ in range(25):  # the old Feeder: 25 frames (16 kB) with sleep(0.004) in between
+        await asyncio.sleep(0.004)
+    span = time.perf_counter() - t
+    info = time.get_clock_info("monotonic")
+    warnings.warn(
+        f"TIMER-DIAG py{sys.version_info[0]}.{sys.version_info[1]} {sys.platform} "
+        f"loop={type(loop).__name__} clock_resolution={loop._clock_resolution:.6f} "  # type: ignore[attr-defined]
+        f"monotonic={info.implementation}/{info.resolution:.6f} "
+        f"sleep(0.004): min={min(sleeps) * 1e3:.2f} mean={sum(sleeps) / len(sleeps) * 1e3:.2f} "
+        f"max={max(sleeps) * 1e3:.2f} ms; 25 old-feeder frames took {span * 1e3:.1f} ms "
+        f"(replay margin in the test: 50 ms)",
+        stacklevel=1,
+    )
 
 
 async def test_expired_handle_falls_back_to_a_fresh_session_with_history(
