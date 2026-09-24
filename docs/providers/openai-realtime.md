@@ -143,11 +143,16 @@ turn_detection=None`; Qwen3-Omni once [vllm-omni#6592](https://github.com/vllm-p
 | `response.done` | `ResponseDone(status, usage)` + `EngineMetrics` |
 | `error` | `EngineErrorEvent` (auth errors are fatal; `response_cancel_not_active` is ignored) |
 
-Control: `send_audio` → `input_audio_buffer.append`; `commit_input` → `input_audio_buffer.commit`
-+ `response.create`; `clear_input` → `input_audio_buffer.clear`; `send_text` / `send_tool_output`
-→ `conversation.item.create` (+ `response.create`); `create_response(instructions=...)` →
-`response.create` with the session instructions plus the extra ones; `update` → partial
-`session.update`; `interrupt(item_id, played_ms)` → `response.cancel` + `conversation.item.truncate`.
+Control methods:
+
+* `send_audio` → `input_audio_buffer.append`; `clear_input` → `input_audio_buffer.clear`;
+* `commit_input` → `input_audio_buffer.commit`, then `response.create` (manual turns);
+* `send_text` / `send_tool_output` → `conversation.item.create`, then `response.create` when
+  `respond=True`;
+* `create_response(instructions=...)` → `response.create` with the session instructions plus
+  the extra ones; `say(text)` → see the profile table;
+* `update` → partial `session.update`;
+* `interrupt(item_id, played_ms)` → `response.cancel`, then `conversation.item.truncate`.
 
 ## Barge-in and truncation
 
