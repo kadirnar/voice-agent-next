@@ -24,6 +24,10 @@ session drives it and handles pausing, truncation and events.
 | paused | quiet for `false_interruption_timeout`, meaningful words | interrupted | stop, cancel, truncate |
 | overlap / paused | the engine commits the user's turn or cancels the response itself | interrupted | truncate to what was heard (no cancel: the engine has moved on) |
 
+The agent state stays `speaking` (or `thinking`) while paused. It becomes `listening` only
+once the interruption is confirmed, because clients treat `listening` as "the agent's turn
+is over". A false interruption therefore leaves no trace in the state.
+
 1. **Overlap.** The engine reports `InputSpeechStarted` while a response is generating or
    playing. The session pauses playback. Queued audio is kept, and so is the
    played position.
