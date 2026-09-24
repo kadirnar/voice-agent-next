@@ -427,7 +427,7 @@ def map_anthropic_error(sdk: Any, exc: BaseException) -> ProviderError | None:
         if status < 400:  # an `error` event inside a successful (200) event stream
             status = _STATUS_BY_ERROR_TYPE.get(etype or "", 500)
         text = f"Anthropic API error {status}{f' ({etype})' if etype else ''}: "
-        text += message or str(getattr(exc, "message", exc))
+        text += (message or str(getattr(exc, "message", exc)))[:500]  # e.g. a proxy's HTML
         request_id = getattr(exc, "request_id", None)
         if request_id:
             text += f" [request-id: {request_id}]"

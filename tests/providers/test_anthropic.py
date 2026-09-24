@@ -548,7 +548,16 @@ async def test_http_errors_are_mapped(
     assert type(err) is expected
     assert (err.provider, err.status_code, err.retryable) == ("anthropic", status, retryable)
     assert f"{error_type} happened" in str(err) and "req_011CErrorTest" in str(err)
+    assert "sk-ant-test-key" not in str(err)
     assert metrics[0].error is not None
+
+
+async def test_non_json_gateway_errors_are_mapped_and_truncated(api: FakeAnthropicAPI) -> None:
+    api.reply(http.Response(502, text="<html>" + "bad gateway " * 200 + "</html>"))
+    with pytest.raises(ProviderError) as info:
+        await run(make_llm(api), user_ctx())
+    assert (info.value.status_code, info.value.retryable) == (502, True)
+    assert len(str(info.value)) < 600
 
 
 async def test_error_event_mid_stream_is_mapped_after_the_text_so_far(
