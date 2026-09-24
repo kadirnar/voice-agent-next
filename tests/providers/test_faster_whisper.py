@@ -15,14 +15,14 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pytest
 
-from voice_agent_next import AudioFrame, VADOptions, create
+from voice_agent_next import AudioFrame, VADOptions, create, hardware
 from voice_agent_next.engines import CascadeEngine
 from voice_agent_next.errors import (
     AuthenticationError,
@@ -142,9 +142,24 @@ class FakeBackend:
 @pytest.fixture
 def backend(monkeypatch: pytest.MonkeyPatch) -> FakeBackend:
     monkeypatch.delenv("VAN_OFFLINE", raising=False)
+    # the machine's real GPUs and CUDA libraries must not leak into device selection
+    monkeypatch.setattr(hardware, "detect_nvidia", lambda: hardware.NvidiaInfo())
+    monkeypatch.setattr(hardware, "load_cuda_libraries", _fake_cuda_libraries(loaded=True))
     fake = FakeBackend()
     fake.install(monkeypatch)
     return fake
+
+
+def _fake_cuda_libraries(*, loaded: bool) -> Any:
+    def load(components: Any, cuda_major: int) -> tuple[hardware.CudaLibrary, ...]:
+        return tuple(
+            replace(
+                hardware.find_cuda_libraries((c,), cuda_major, search_path=[])[0], loaded=loaded
+            )
+            for c in components
+        )
+
+    return load
 
 
 def chunks(frame: AudioFrame, step: float = 0.02) -> list[AudioFrame]:
@@ -306,6 +321,48 @@ async def test_auto_device_and_compute_type(
     assert ("falling back to CPU" in caplog.text) is (cuda_error is not None)
     assert (await stt.transcribe(speech())).text == TEXT
     assert backend.requests[-1]["device"] == device
+
+
+async def test_auto_stays_on_cpu_when_cublas_is_missing(
+    backend: FakeBackend, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The GPU is never tried without its libraries, and the log says how to fix it."""
+    backend.cuda_devices = 1
+    sys.modules["ctranslate2"].__version__ = "4.8.2"  # 4.x wheels: CUDA 12
+    monkeypatch.setattr(hardware, "load_cuda_libraries", _fake_cuda_libraries(loaded=False))
+    stt = FasterWhisperSTT(model="small")
+    with caplog.at_level(logging.INFO, logger="voice_agent_next"):
+        await stt.warmup()
+    assert (stt.resolved_device, stt.resolved_compute_type) == ("cpu", "int8")
+    assert [load["device"] for load in backend.loads] == ["cpu"]
+    messages = [r.getMessage() for r in caplog.records if "running on CPU" in r.getMessage()]
+    assert len(messages) == 1
+    assert "libcublas" in messages[0] or "cublas64_12.dll" in messages[0]
+    assert hardware.CUDA_EXTRA_HINT in messages[0]
+    assert "falling back" not in caplog.text
+
+
+async def test_cuda_libraries_are_loaded_before_the_model(
+    backend: FakeBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend.cuda_devices = 1
+    sys.modules["ctranslate2"].__version__ = "4.8.2"
+    calls: list[tuple[tuple[str, ...], int]] = []
+    loader = _fake_cuda_libraries(loaded=True)
+
+    def load(components: Any, cuda_major: int) -> Any:
+        calls.append((tuple(components), cuda_major))
+        return loader(components, cuda_major)
+
+    monkeypatch.setattr(hardware, "load_cuda_libraries", load)
+    for device in ("auto", "cuda"):
+        stt = FasterWhisperSTT(model="small", device=device)
+        await stt.warmup()
+        assert (stt.resolved_device, stt.resolved_compute_type) == ("cuda", "float16")
+    assert calls == [(("cublas",), 12)] * 2
+    cpu = FasterWhisperSTT(model="small", device="cpu")  # explicit CPU loads nothing
+    await cpu.warmup()
+    assert len(calls) == 2
 
 
 async def test_compute_type_follows_what_the_device_supports(backend: FakeBackend) -> None:
