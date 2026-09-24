@@ -3,7 +3,9 @@
 The SSE payloads mirror the event sequences documented for the streaming Messages API
 (``message_start`` -> content blocks -> ``message_delta`` -> ``message_stop``, with
 ``ping`` and ``error`` events), delivered in small byte chunks so events and JSON
-fragments are split across network reads.
+fragments are split across network reads. Needs the SDK (skipped otherwise):
+``uv sync --extra anthropic && uv run pytest tests/providers/test_anthropic.py``; the
+real-API test additionally needs ``ANTHROPIC_API_KEY`` and ``-m integration``.
 """
 
 from __future__ import annotations

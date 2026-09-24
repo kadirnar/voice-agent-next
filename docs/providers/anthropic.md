@@ -1,4 +1,4 @@
-# Anthropic Claude (LLM)
+# Anthropic Claude (`llm: anthropic`)
 
 `llm="anthropic/claude-haiku-4-5"` runs Claude through the official
 [`anthropic`](https://pypi.org/project/anthropic/) SDK and the streaming Messages API. It
@@ -142,13 +142,10 @@ and `cached_tokens`.
 
 ## Thinking
 
-Thinking and signature deltas are never forwarded, so the reasoning is never spoken.
-Thinking blocks are not stored in `ChatContext` either, so they are not sent back in
-tool-use loops. That is fine with adaptive thinking (Sonnet 5, Opus 5 and newer, on by
-default), where the API does not require them. Manual extended thinking
-(`thinking: {"type": "enabled", ...}`) combined with tools is not supported, because the API
-requires the thinking block to be replayed with the tool result. For voice, prefer a low
-`effort` over disabling thinking.
+Thinking and signature deltas are never forwarded, so the reasoning is never spoken. On
+models that think by default (Sonnet 5, Opus 5 and newer), control latency with
+`extra_params={"output_config": {"effort": "low"}}` rather than by turning thinking off.
+Thinking tokens count towards `max_tokens`. See also [Limitations](#limitations).
 
 ## Errors
 
@@ -165,7 +162,7 @@ Messages include the API error type, its message and the `request-id`, but never
 key. A mid-stream `error` event arrives with HTTP status 200; its status is derived from
 the error type.
 
-## Latency notes
+## Latency
 
 * Text streams token by token. The cascade's sentence segmenter starts TTS on the first
   clause.
@@ -173,14 +170,32 @@ the error type.
 * Keep the instructions and tool list stable during a call. Any change to them rewrites
   the cache.
 * `max_retries=1` and `timeout=30` favour failing fast over stalling a turn.
+* When a stream is cancelled (barge-in), `LLMMetrics` still reports the prompt tokens
+  already billed.
+
+## Limitations
+
+* **Thinking blocks are not replayed.** `ChatContext` has no place for them. Adaptive
+  thinking (on by default on Sonnet 5, Opus 5 and newer) does not need them, so tool loops
+  work. Manual extended thinking (`thinking: {"type": "enabled", ...}`) with tools does not
+  work: the API requires the thinking block with the tool result and returns a 400.
+* **Late system messages go to the top-level `system` prompt** rather than into
+  `messages`, so they invalidate the conversation cache for that request. Models that
+  support mid-conversation `system` messages could avoid this; that is not used yet.
+* **No audio input:** Claude reads transcripts only, so use an STT stage.
+* **Unit tests need the SDK.** `tests/providers/test_anthropic.py` is skipped unless the
+  `anthropic` extra is installed; CI's default `uv sync` does not install it. The
+  conversion tests run everywhere.
 
 ## Tests
 
-* `tests/test_anthropic_convert.py` covers `ChatContext` conversion without the SDK.
-* `tests/test_anthropic_llm.py` runs the provider against an `httpx2.MockTransport` that
-  replays real SSE event streams split into small byte chunks. It covers text, tool use
-  with fragmented JSON, parallel tools, usage with cache tokens, HTTP and mid-stream
-  errors, cancellation and warmup. It is skipped when the extra is not installed.
+* `tests/providers/test_anthropic_convert.py` covers `ChatContext` conversion without the
+  SDK.
+* `tests/providers/test_anthropic.py` runs the provider against an `httpx2.MockTransport`
+  that replays real SSE event streams split into small byte chunks. It covers text, tool
+  use with fragmented JSON, parallel tools, usage with cache tokens, HTTP and mid-stream
+  errors, cancellation, warmup, and a full `AgentSession` cascade turn with a tool call:
+  `uv sync --extra anthropic && uv run pytest tests/providers/test_anthropic.py`.
 * A real-API test (skipped unless `ANTHROPIC_API_KEY` is set):
-  `uv run pytest -m integration tests/test_anthropic_llm.py`. Set
+  `uv run pytest -m integration tests/providers/test_anthropic.py`. Set
   `ANTHROPIC_TEST_MODEL` to change the model.
