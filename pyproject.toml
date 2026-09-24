@@ -71,6 +71,10 @@ smart-turn = ["onnxruntime>=1.19"]
 # --- local STT / TTS / LLM ------------------------------------------------------
 faster-whisper = ["faster-whisper>=1.1"]
 kokoro = ["kokoro-onnx>=0.6.1; python_version < '3.14'"]  # upstream caps Requires-Python <3.14
+# moonshine-voice ships py3-none wheels only for these platforms (no sdist)
+moonshine = [
+  "moonshine-voice>=0.1.5; (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')) or (sys_platform == 'darwin' and platform_machine == 'arm64') or (sys_platform == 'win32' and platform_machine == 'AMD64')",
+]
 # CPU-only torch (see [tool.uv.sources]); no torch wheels for Intel macOS since torch 2.3
 pocket-tts = [
   "pocket-tts>=3.3,<4; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
