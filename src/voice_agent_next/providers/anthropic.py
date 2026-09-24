@@ -508,7 +508,7 @@ class AnthropicLLM(LLM):
         api_key: str | None = None,
         base_url: str | None = None,
         temperature: float | None = None,
-        max_tokens: int = DEFAULT_MAX_TOKENS,
+        max_tokens: int | None = DEFAULT_MAX_TOKENS,
         tool_choice: ToolChoice | None = None,
         parallel_tool_calls: bool | None = None,
         prompt_caching: bool = True,
@@ -521,6 +521,8 @@ class AnthropicLLM(LLM):
         client: Any = None,
         http_client: Any = None,
     ) -> None:
+        if max_tokens is None:
+            max_tokens = DEFAULT_MAX_TOKENS  # the Messages API requires a value
         if max_tokens < 1:
             raise ConfigurationError(f"max_tokens must be >= 1, got {max_tokens}")
         if cache_ttl not in ("5m", "1h"):
@@ -544,6 +546,7 @@ class AnthropicLLM(LLM):
         self.extra_headers: dict[str, str] = dict(extra_headers or {})
         self._sdk = require("anthropic", extra="anthropic")
         self._owns_client = False
+        self._external_client = client is not None
         self._closed = False
         if client is not None:
             self._client: Any = client
@@ -669,21 +672,19 @@ class AnthropicLLM(LLM):
         """Open the HTTP connection early and optionally pre-warm the prompt cache.
 
         Without arguments this sends a free ``GET /v1/models/{model}``: DNS, TCP and TLS are
-        done before the first turn (and credentials/model id are checked). With the agent
-        prompt (``ctx``, e.g. its instructions as a system message) and/or ``tools``, it
-        sends a ``max_tokens=0`` request that writes the tools + system prompt cache
-        entry, so the first real turn reads it. Pass exactly what later requests send.
-        Failures are logged, never raised.
+        done before the first turn (and credentials/model id are checked); skipped for a
+        user-supplied ``client`` (other platforms). With the agent prompt (``ctx``, e.g. its
+        instructions as a system message) and/or ``tools``, it sends a ``max_tokens=0``
+        request that writes the tools + system prompt cache entry, so the first real turn
+        reads it. Pass exactly what later requests send. Failures are logged, never raised.
         """
         try:
             thinking = self.extra_params.get("thinking")
             manual_thinking = isinstance(thinking, Mapping) and thinking.get("type") == "enabled"
             if (ctx is not None or tools) and self.prompt_caching and not manual_thinking:
                 await self._prewarm_cache(ctx or ChatContext(), tools)
-                return
-            models = getattr(self._client, "models", None)
-            if models is not None:
-                await models.retrieve(self.model)
+            elif not self._external_client:
+                await self._client.models.retrieve(self.model)
         except Exception as exc:
             logger.warning("Anthropic warmup failed: %s", self.map_error(exc) or exc)
 
@@ -754,8 +755,8 @@ class AnthropicLLMStream(LLMStream):
             max_tokens=self.max_tokens,
             extra=self.extra,
         )
-        self._tool_uses: dict[int, _PendingToolUse] = {}
-        self._stop_reason: str | None = None
+        self._tool_uses = {}
+        self._stop_reason = None
         self._tokens = {"input": 0, "cache_creation": 0, "cache_read": 0, "output": 0}
         try:
             async with llm.client.messages.stream(**params) as stream:
@@ -766,18 +767,21 @@ class AnthropicLLMStream(LLMStream):
             if mapped is None:
                 raise
             raise mapped from exc
-        tokens = self._tokens
         self._push(
             ChatChunk(
                 self.request_id,
-                usage=AnthropicUsage(
-                    prompt_tokens=tokens["input"] + tokens["cache_creation"] + tokens["cache_read"],
-                    completion_tokens=tokens["output"],
-                    cached_tokens=tokens["cache_read"],
-                    cache_creation_tokens=tokens["cache_creation"],
-                ),
+                usage=self._current_usage(),
                 finish_reason=_FINISH_REASONS.get(self._stop_reason or "", self._stop_reason),
             )
+        )
+
+    def _current_usage(self) -> AnthropicUsage:
+        tokens = self._tokens
+        return AnthropicUsage(
+            prompt_tokens=tokens["input"] + tokens["cache_creation"] + tokens["cache_read"],
+            completion_tokens=tokens["output"],
+            cached_tokens=tokens["cache_read"],
+            cache_creation_tokens=tokens["cache_creation"],
         )
 
     def _on_event(self, event: Any) -> None:
@@ -827,3 +831,6 @@ class AnthropicLLMStream(LLMStream):
             value = getattr(usage, attr, None)
             if isinstance(value, int):
                 self._tokens[key] = value
+        # Keep the base-class usage current: when the stream is cancelled (barge-in) or
+        # fails, its metrics still count the prompt tokens billed so far.
+        self._usage = self._current_usage()

@@ -633,6 +633,7 @@ async def test_cancellation_closes_the_http_stream(api: FakeAnthropicAPI) -> Non
 
     await asyncio.wait_for(closed.wait(), 5)
     assert metrics[0].cancelled
+    assert metrics[0].prompt_tokens == 25  # billed input is still counted after a barge-in
 
 
 # ------------------------------------------------------------ caching and options
@@ -861,26 +862,38 @@ def test_api_key_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     assert AnthropicLLM().client.api_key == "sk-ant-from-env"
 
 
-def test_invalid_options_are_rejected() -> None:
+def test_option_validation_and_defaults() -> None:
     with pytest.raises(ConfigurationError):
         AnthropicLLM(api_key="k", max_tokens=0)
     with pytest.raises(ConfigurationError):
         AnthropicLLM(api_key="k", cache_ttl="10m")  # type: ignore[arg-type]
+    # e.g. `max_tokens: null` in a config file: the API requires a value
+    assert AnthropicLLM(api_key="k", max_tokens=None).max_tokens == 1024
 
 
-async def test_aclose_closes_only_owned_clients(api: FakeAnthropicAPI) -> None:
+async def test_external_client_is_used_but_not_closed_or_probed(api: FakeAnthropicAPI) -> None:
+    external = anthropic.AsyncAnthropic(
+        api_key="k", http_client=http.AsyncClient(transport=http.MockTransport(api))
+    )
+    api.reply(
+        stream_response([message_start(), *text_block(0, "Hi!"), *message_end("end_turn", 2)])
+    )
+    borrowed = AnthropicLLM(client=external)
+    assert borrowed.client is external
+    assert (await borrowed.chat(user_ctx("Hello")).collect()).text == "Hi!"
+    await borrowed.warmup()  # e.g. a Bedrock/Vertex client: no /v1/models probe
+    await borrowed.aclose()
+    assert len(api.requests) == 1
+    assert not external.is_closed()
+    await external.close()
+
+
+async def test_aclose_closes_the_owned_client() -> None:
     owned = AnthropicLLM(api_key="sk-ant-test-key")
     async with owned:
         assert not owned.client.is_closed()
     assert owned.client.is_closed()
-
-    external = anthropic.AsyncAnthropic(
-        api_key="k", http_client=http.AsyncClient(transport=http.MockTransport(api))
-    )
-    borrowed = AnthropicLLM(client=external)
-    await borrowed.aclose()
-    assert not external.is_closed()
-    await external.close()
+    await owned.aclose()  # idempotent
 
 
 # --------------------------------------------------------------------- integration
