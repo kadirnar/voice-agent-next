@@ -10,7 +10,7 @@ in a `CascadeEngine`, an `AgentSession`, or on its own.
 from voice_agent_next import AgentSession, FallbackLLM, create
 
 session = AgentSession(
-    stt=["deepgram/nova-3", "elevenlabs"],               # a list = failover chain
+    stt=["deepgram/nova-3", "elevenlabs"],  # a list = failover chain
     llm=["groq/llama-3.3-70b-versatile", "openai/gpt-4.1-mini"],
     tts=[{"provider": "cartesia/sonic-2", "voice": "<id>"}, "elevenlabs"],
     vad="silero",
@@ -116,8 +116,10 @@ provider, the number of failovers, and failovers by reason. A stream returned by
 wrapper has a `served_by` attribute (`"provider/model"`).
 
 ```python
-llm.on("provider_failover", lambda ev: log.warning(
-    "%s -> %s (%s)", ev.from_provider, ev.to_provider, ev.reason))
+llm.on(
+    "provider_failover",
+    lambda ev: log.warning("%s -> %s (%s)", ev.from_provider, ev.to_provider, ev.reason),
+)
 ```
 
 ## Details
