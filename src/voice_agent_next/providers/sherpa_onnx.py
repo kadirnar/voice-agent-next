@@ -618,6 +618,11 @@ def _detect_kind(directory: Path, task: str) -> str | None:
             return "offline-sense-voice"
         if "paraformer" in lower and streaming:
             return "online-paraformer"
+        if any(n.startswith("encoder") and n.endswith(".onnx") for n in names):
+            # a transducer with missing files: report them instead of the kind
+            if streaming:
+                return "online-transducer"
+            return "offline-nemo-transducer" if "nemo" in lower else "offline-transducer"
         if "nemo" in lower and "ctc" in lower:
             return "online-nemo-ctc" if streaming else "offline-nemo-ctc"
         if "zipformer" in lower and "ctc" in lower and streaming:
@@ -1341,7 +1346,8 @@ class _SherpaOnlineStream(STTStream):
                     assert isinstance(nxt, AudioFrame)
                     chunks.append(nxt.to_float32())
             samples = chunks[0] if len(chunks) == 1 else np.concatenate(chunks)
-            self._update(await stt._run(self._accept_sync, samples))
+            for snap in await stt._run(self._accept_sync, samples):
+                self._update(snap)
             if flush:
                 self._finish(await stt._run(self._finalize_sync))
 
@@ -1391,7 +1397,9 @@ class _SherpaOnlineStream(STTStream):
         )
 
     # ------------------------------------------------------------ worker thread
-    def _accept_sync(self, samples: npt.NDArray[np.float32]) -> _Snapshot:
+    def _accept_sync(self, samples: npt.NDArray[np.float32]) -> list[_Snapshot]:
+        """Feed audio and decode every ready chunk. With endpoint detection, the endpoint
+        is checked after each chunk (a batch of queued audio may hold several)."""
         stt = self._sherpa
         recognizer = stt._ensure_recognizer()
         try:
@@ -1400,20 +1408,24 @@ class _SherpaOnlineStream(STTStream):
             stream = self._stream
             stream.accept_waveform(_SAMPLE_RATE, samples)
             self._fed += len(samples)
+            snaps: list[_Snapshot] = []
             while recognizer.is_ready(stream):
                 recognizer.decode_stream(stream)
-            endpoint = stt.endpoint_detection and bool(recognizer.is_endpoint(stream))
-            snap = stt._snapshot(
-                recognizer.get_result_all(stream),
-                self._offset / _SAMPLE_RATE,
-                self._fed,
-                endpoint=endpoint,
-            )
-            if endpoint:
-                recognizer.reset(stream)  # same stream: result times stay stream-relative
-            return snap
+                if stt.endpoint_detection and recognizer.is_endpoint(stream):
+                    snaps.append(self._result(recognizer, stream, endpoint=True))
+                    recognizer.reset(stream)  # same stream: result times stay stream-relative
+            snaps.append(self._result(recognizer, stream))  # interim for what follows
+            return snaps
         except Exception as exc:
             raise _sherpa_error(exc, "streaming recognition") from exc
+
+    def _result(self, recognizer: Any, stream: Any, *, endpoint: bool = False) -> _Snapshot:
+        return self._sherpa._snapshot(
+            recognizer.get_result_all(stream),
+            self._offset / _SAMPLE_RATE,
+            self._fed,
+            endpoint=endpoint,
+        )
 
     def _finalize_sync(self) -> _Snapshot:
         """Decode the tail of the current utterance and start a new sherpa stream."""

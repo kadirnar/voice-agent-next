@@ -684,7 +684,8 @@ async def test_streaming_emits_interim_and_final_transcripts(
     assert final.start_time == 0.0 and final.end_time == pytest.approx(1.05)
     assert final.confidence == pytest.approx(math.exp(-0.1))
     streamed = [m for m in metrics if m.streamed]
-    assert len(streamed) == 2 and all(m.latency is not None for m in streamed)
+    # end_input() flushes again right away: one flush-to-final latency is measured
+    assert len(streamed) == 1 and all(m.latency is not None for m in streamed)
     await stt.aclose()
 
 
