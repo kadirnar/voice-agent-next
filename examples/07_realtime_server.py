@@ -29,7 +29,7 @@ import contextlib
 import json
 import sys
 from collections.abc import AsyncIterator
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from websockets.asyncio.client import connect
 
@@ -56,7 +56,7 @@ async def openai_sdk_connection(url: str, model: str) -> AsyncIterator[Connectio
 
         class SDKConnection:
             async def send(self, event: dict[str, Any]) -> None:
-                await conn.send(event)  # type: ignore[arg-type]
+                await conn.send(cast(Any, event))  # a dict is a valid client event
 
             async def events(self) -> AsyncIterator[dict[str, Any]]:
                 async for event in conn:

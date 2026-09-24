@@ -156,7 +156,9 @@ async def main(argv: list[str] | None = None) -> int:
         process_request=webhook(args.public_host),
     )
     if not args.mock:
-        print(f"media stream on {server.url}stream, TwiML on http://{args.host}:{server.port}/twiml")
+        print(
+            f"media stream on {server.url}stream, TwiML on http://{args.host}:{server.port}/twiml"
+        )
         await server.serve_forever()  # Ctrl-C to stop
         return 0
     try:

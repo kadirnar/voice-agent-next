@@ -65,7 +65,11 @@ def print_spans(exporter: Any) -> None:
     by_id = {s.context.span_id: s for s in spans}
 
     def depth(span: Any) -> int:
-        return 0 if span.parent is None or span.parent.span_id not in by_id else 1 + depth(by_id[span.parent.span_id])
+        return (
+            0
+            if span.parent is None or span.parent.span_id not in by_id
+            else 1 + depth(by_id[span.parent.span_id])
+        )
 
     print(f"\n{len(spans)} spans:")
     for span in sorted(spans, key=lambda s: s.start_time):
@@ -111,8 +115,9 @@ async def main(argv: list[str] | None = None) -> int:
     transport = FileTransport(wav, trailing_silence=0.8, hold=0.5 if args.mock else 1.5)
     await session.run(Agent("You are a support agent.", tools=[check_order]), transport)
 
-    recorder = session.recorder
-    assert recorder is not None and recorder.wav_path and recorder.timeline_path
+    recorder = session.recorder  # set by record=; its files are closed when run() returns
+    if recorder is None or recorder.wav_path is None or recorder.timeline_path is None:
+        return 1
     audio = read_wav(recorder.wav_path)
     print(f"\nrecording {recorder.wav_path} ({audio.channels} channels, {audio.duration:.1f} s)")
     summarize_timeline(recorder.timeline_path)

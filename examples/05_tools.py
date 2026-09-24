@@ -100,7 +100,9 @@ async def main(argv: list[str] | None = None) -> int:
                            userdata=userdata)  # fmt: skip
     log_conversation(session)
     session.on("tool_filler", lambda ev: print(f"  (filler after {ev.waited:.1f} s: {ev.text!r})"))
-    session.on("tool_progress", lambda ev: print(f"  (progress, spoken={ev.spoken}: {ev.message!r})"))
+    session.on(
+        "tool_progress", lambda ev: print(f"  (progress, spoken={ev.spoken}: {ev.message!r})")
+    )
 
     def on_result(ev: Any) -> None:
         if not ev.blocking:
@@ -108,7 +110,9 @@ async def main(argv: list[str] | None = None) -> int:
 
     session.on("tool_result", on_result)
 
-    agent = Agent("You are a travel agent. Use your tools.", tools=[search_flights, email_itinerary])
+    agent = Agent(
+        "You are a travel agent. Use your tools.", tools=[search_flights, email_itinerary]
+    )
     if args.mock:
         # an in-memory call: a simulated caller asks two questions, waiting for each answer
         loopback = LoopbackTransport()

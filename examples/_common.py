@@ -43,7 +43,9 @@ def log_conversation(session: AgentSession, prefix: str = "") -> None:
         # (a file fed faster than real time can make an engine's speech-end estimate land
         # after its first audio: such a negative number means nothing, so skip it)
         if m.voice_to_voice is not None and m.voice_to_voice >= 0:
-            print(f"{prefix}  (voice-to-voice latency {m.voice_to_voice * 1000:.0f} ms)", flush=True)
+            print(
+                f"{prefix}  (voice-to-voice latency {m.voice_to_voice * 1000:.0f} ms)", flush=True
+            )
 
     def flush_agent() -> None:
         for text in agent_text.values():
@@ -51,14 +53,20 @@ def log_conversation(session: AgentSession, prefix: str = "") -> None:
                 print(f"{prefix}agent: {text.strip()}", flush=True)
         agent_text.clear()
 
+    def on_close(ev: Any) -> None:
+        flush_agent()
+        print(f"{prefix}(session closed: {ev.reason})", flush=True)
+
     session.on("user_transcript", on_user)
     session.on("agent_transcript", on_agent)
     session.on("agent_state_changed", on_state)
     session.on("metrics", on_metrics)
-    session.on("tool_call", lambda ev: print(f"{prefix}  -> tool {ev.call.name}({ev.call.arguments})"))
+    session.on(
+        "tool_call", lambda ev: print(f"{prefix}  -> tool {ev.call.name}({ev.call.arguments})")
+    )
     session.on("tool_result", lambda ev: print(f"{prefix}  <- {ev.output.output!r}"))
     session.on("error", lambda ev: print(f"{prefix}error: {ev.error}", flush=True))
-    session.on("close", lambda ev: (flush_agent(), print(f"{prefix}(session closed: {ev.reason})")))
+    session.on("close", on_close)
 
 
 def synthetic_question(path: str | Path | None = None, seconds: float = 1.0) -> Path:

@@ -67,7 +67,9 @@ def mock_session() -> tuple[AgentSession, Agent]:
     )
     tts.on(
         "provider_failover",
-        lambda ev: print(f"  failover: {ev.kind} {ev.from_provider} -> {ev.to_provider} ({ev.reason})"),
+        lambda ev: print(
+            f"  failover: {ev.kind} {ev.from_provider} -> {ev.to_provider} ({ev.reason})"
+        ),
     )
     session = AgentSession(
         stt=MockSTT(transcripts=["Find me a train to Lyon."]),
