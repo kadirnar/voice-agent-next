@@ -228,7 +228,12 @@ class GeminiTTS(TTS):
         speech: dict[str, Any] = {"voice_config": _voice_config(voice or self.voice or "")}
         if self.language:
             speech["language_code"] = self.language
-        config: dict[str, Any] = {"response_modalities": ["AUDIO"], "speech_config": speech}
+        config: dict[str, Any] = {
+            "response_modalities": ["AUDIO"],
+            "speech_config": speech,
+            # nothing to call, but the SDK logs an AFC warning unless it is disabled
+            "automatic_function_calling": {"disable": True},
+        }
         if self.temperature is not None:
             config["temperature"] = self.temperature
         if self.extra_config:
