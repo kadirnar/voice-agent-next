@@ -13,6 +13,7 @@ from typing import Annotated, Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from .. import __version__
@@ -80,8 +81,8 @@ def providers(
         table.add_column(col, overflow="fold")
     for r in rows:
         style = "green" if r["status"] == "ready" else "yellow"
-        table.add_row(*(str(r[c]) for c in ("kind", "name", "where", "default_model")),
-                      f"[{style}]{r['status']}[/{style}]", r["description"])  # fmt: skip
+        cells = [escape(str(r[c])) for c in ("kind", "name", "where", "default_model")]
+        table.add_row(*cells, f"[{style}]{escape(r['status'])}[/{style}]", escape(r["description"]))
     console.print(table)
 
 
