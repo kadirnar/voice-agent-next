@@ -239,6 +239,23 @@ class EngineConnection(ABC):
     ) -> None:
         """Update instructions and/or tools mid-session."""
 
+    async def update_voice(self, voice: str) -> bool:
+        """Switch the output voice mid-session (agent handoffs).
+
+        Returns ``False`` when the engine cannot (the default: many native models fix the
+        voice once they have spoken); the session then keeps the current voice.
+        """
+        return False
+
+    async def update_chat_ctx(self, chat_ctx: ChatContext) -> bool:
+        """Replace the conversation context the model sees (agent handoffs with a history
+        carry-over other than ``"full"``).
+
+        Returns ``False`` when the engine cannot (the default); the model then keeps its
+        full context.
+        """
+        return False
+
     async def say(self, text: str) -> None:
         """Speak ``text``. Engines with direct TTS access override this to be verbatim."""
         await self.create_response(

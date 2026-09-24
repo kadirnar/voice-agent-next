@@ -10,7 +10,8 @@ Span tree (one trace per session)::
     │   ├── chat {model}           LLM request (cascade): ttft, tokens (GenAI conventions)
     │   ├── tts                    synthesis (cascade): ttfb, characters
     │   ├── response               one engine response: status, usage, ttfb (native S2S)
-    │   └── execute_tool {name}    tool call (GenAI conventions)
+    │   ├── execute_tool {name}    tool call (GenAI conventions)
+    │   └── agent_handoff          the conversation moved to another agent
     └── response                   responses outside a user turn (greeting, say())
 
 Spans are built from the session's own events and metrics, with their real start and end
@@ -58,6 +59,7 @@ if TYPE_CHECKING:
     from ..events import EngineEvent
     from .events import (
         AgentFalseInterruption,
+        AgentHandoff,
         AgentTranscript,
         Interrupted,
         SessionError,
@@ -154,6 +156,7 @@ class SessionTracer(SessionTap):
         session.on("interrupted", self._on_interrupted)
         session.on("agent_false_interruption", self._on_false_interruption)
         session.on("error", self._on_error)
+        session.on("agent_handoff", self._on_agent_handoff)
         if self.capture_content:
             session.on("user_transcript", self._on_user_transcript)
             session.on("agent_transcript", self._on_agent_transcript)
@@ -212,6 +215,7 @@ class SessionTracer(SessionTap):
                     "gen_ai.request.model": engine.model,
                     "voice_agent.engine": type(engine).__name__,
                     "voice_agent.transport": type(session.transport).__name__,
+                    "gen_ai.agent.name": session.agent.name,
                 }
             ),
             start_time=self._ns(t),
@@ -489,6 +493,19 @@ class SessionTracer(SessionTap):
                 },
                 timestamp=self._ns(ev.timestamp),
             )
+
+    def _on_agent_handoff(self, ev: AgentHandoff) -> None:
+        attrs: dict[str, Any] = {
+            "gen_ai.agent.name": ev.to_agent,
+            "voice_agent.handoff.from": ev.from_agent,
+            "voice_agent.handoff.to": ev.to_agent,
+            "voice_agent.handoff.history": ev.history,
+            "voice_agent.handoff.voice_changed": ev.voice_changed,
+            "voice_agent.handoff.unsupported": list(ev.unsupported),
+        }
+        if ev.call is not None:
+            attrs["gen_ai.tool.call.id"] = ev.call.call_id
+        self._child(_Child("agent_handoff", ev.timestamp - ev.duration, ev.timestamp, attrs))
 
     def _on_error(self, ev: SessionError) -> None:
         if self._closed or self._root is None:
