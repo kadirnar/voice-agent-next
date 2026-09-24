@@ -401,7 +401,9 @@ def _image_part(image: ImageContent) -> dict[str, Any]:
         media_type, *params = header.split(";")
         media_type = (media_type.strip() or image.mime_type or "").lower()
         if not media_type:
-            raise ConfigurationError("image data: URL has no media type; set ImageContent.mime_type")
+            raise ConfigurationError(
+                "image data: URL has no media type; set ImageContent.mime_type"
+            )
         if any(p.strip().lower() == "base64" for p in params):
             compact = "".join(payload.split())
             compact += "=" * (-len(compact) % 4)
