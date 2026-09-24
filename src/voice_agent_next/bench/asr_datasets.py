@@ -331,12 +331,8 @@ def load_builtin_dataset(
             raise DownloadError(f"dataset {name} is not cached and VAN_OFFLINE is set")
         archive = spec["archive"]
         if progress is not None:
-            progress(
-                f"fetching {len(missing)} file(s) of {name} (streaming {archive['urls'][0]})"
-            )
-        fetch_archive_members(
-            archive["urls"], missing, directory, client=client, progress=progress
-        )
+            progress(f"fetching {len(missing)} file(s) of {name} (streaming {archive['urls'][0]})")
+        fetch_archive_members(archive["urls"], missing, directory, client=client, progress=progress)
     source = {k: v for k, v in spec.items() if k not in ("items",)}
     utterances = [
         AsrUtterance(
@@ -455,7 +451,8 @@ def load_asr_dataset(
     path = Path(spec)
     if path.suffix.lower() in (".jsonl", ".json", ".tsv", ".csv") or path.exists():
         return load_manifest(path, language=language)
+    names = ", ".join(sorted(builtin_datasets()))
     raise ValueError(
-        f"unknown dataset {spec!r}: use a built-in subset ({', '.join(sorted(builtin_datasets()))}) "
+        f"unknown dataset {spec!r}: use a built-in subset ({names}) "
         "or a manifest file (.jsonl/.json/.tsv/.csv)"
     )

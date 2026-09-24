@@ -42,7 +42,13 @@ LIBRISPEECH_URLS = [
 ]
 FLEURS_REVISION = "70bb2e84b976b7e960aa89f1c648e09c59f894dd"
 FLEURS_BASE = f"https://huggingface.co/datasets/google/fleurs/resolve/{FLEURS_REVISION}/data"
-FLEURS_LANGUAGES = {"en": "en_us", "es": "es_419", "de": "de_de", "tr": "tr_tr", "zh": "cmn_hans_cn"}
+FLEURS_LANGUAGES = {
+    "en": "en_us",
+    "es": "es_419",
+    "de": "de_de",
+    "tr": "tr_tr",
+    "zh": "cmn_hans_cn",
+}
 FLEURS_ATTRIBUTION = (
     "FLEURS (Conneau et al., 2022, arXiv:2205.12446), google/fleurs on the Hugging Face Hub"
 )
@@ -105,13 +111,19 @@ def librispeech(tmp: Path) -> dict[str, Any]:
         )
     for item in selected:
         item["text"] = texts[item["id"]]
-    print(f"librispeech: {len(selected)} items from {len(speakers)} speakers, {streamed / 1e6:.1f} MB streamed")
+    print(
+        f"librispeech: {len(selected)} items from {len(speakers)} speakers, {streamed / 1e6:.1f} MB streamed"
+    )
     return {
         "description": f"LibriSpeech test-clean: 50 utterances (1.5-20 s) of {len(speakers)} speakers",
         "language": "en",
         "license": "CC-BY-4.0",
         "attribution": "LibriSpeech ASR corpus (Panayotov et al., ICASSP 2015), https://www.openslr.org/12",
-        "archive": {"urls": LIBRISPEECH_URLS, "format": "tar.gz", "streamed_mb": round(streamed / 1e6, 1)},
+        "archive": {
+            "urls": LIBRISPEECH_URLS,
+            "format": "tar.gz",
+            "streamed_mb": round(streamed / 1e6, 1),
+        },
         "selection": "first 50 utterances of 1.5-20 s in archive order, at most 5 per speaker",
         "items": selected,
     }

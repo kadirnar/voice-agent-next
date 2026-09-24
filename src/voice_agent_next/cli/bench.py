@@ -52,7 +52,7 @@ _TABLE_METRICS = (
 
 @app.callback()
 def _bench() -> None:
-    """Benchmark suite: T1 latency, T7 framework overhead (more tracks: see ROADMAP M6)."""
+    """Benchmark suite: T1 latency, T2 ASR, T7 framework overhead (more: see ROADMAP M6)."""
 
 
 def _num(value: float | None) -> str:
@@ -225,11 +225,12 @@ def report(
 ) -> None:
     """Re-render report.md from a run directory and print it."""
     from ..bench.results import REPORT_FILE, load_run
-    from ..bench.tracks import latency, overhead
+    from ..bench.tracks import asr, latency, overhead
 
     renderers = {
         latency.TRACK: latency.render_latency_report,
         overhead.TRACK: overhead.render_overhead_report,
+        asr.TRACK: asr.render_asr_report,
     }
     try:
         results = load_run(run_dir)
@@ -244,6 +245,193 @@ def report(
     if write:
         (Path(run_dir) / REPORT_FILE).write_text(text, encoding="utf-8")
     typer.echo(text)
+
+
+# -------------------------------------------------------------------------- T2 ASR
+
+
+def _print_asr(results: object) -> None:
+    from rich.markup import escape
+
+    from ..bench.report import fmt
+    from ..bench.results import RunResults
+
+    assert isinstance(results, RunResults)
+    s = results.summary
+    table = Table(title=f"{s.track} · {s.system} · {s.transport}", title_justify="left")
+    for col in ("dataset", "n", "WER", "CER", "perfect", "RTFx", "TTFS p50", "TTFS p90",
+                "1st partial p50"):  # fmt: skip
+        table.add_column(col, justify="left" if col == "dataset" else "right")
+
+    def pct(x: float | None, bold: bool = False) -> str:
+        text = "-" if x is None else f"{100 * x:.2f}%"
+        return f"[bold]{text}[/bold]" if bold and x is not None else text
+
+    for name, d in s.extra.get("datasets", {}).items():
+        cer = d.get("metric") == "cer"
+        table.add_row(
+            escape(name), fmt(d.get("scored")), pct(d.get("wer"), not cer), pct(d.get("cer"), cer),
+            pct(d.get("perfect_rate")), fmt(d.get("rtfx"), 1),
+            fmt(d.get("ttfs_p50_ms"), 0, unit=" ms"), fmt(d.get("ttfs_p90_ms"), 0, unit=" ms"),
+            fmt(d.get("first_partial_p50_ms"), 0, unit=" ms"),
+        )  # fmt: skip
+    console.print(table)
+    revisions = s.rates.get("interim_revision_rate")
+    if revisions is not None:
+        console.print(f"interim revision rate: {100 * revisions:.1f}%", highlight=False)
+    if results.directory is not None:
+        console.print(f"results: [bold]{results.directory}[/bold] (report.md, summary.json)")
+    for note in results.manifest.notes:
+        console.print(f"[yellow]note:[/yellow] {escape(note)}")
+
+
+@app.command()
+def asr(
+    stt: Annotated[
+        str,
+        typer.Option(
+            help="STT spec: faster-whisper/base, sherpa-onnx/nemo-fastconformer-en-80ms, or "
+            "an inline mapping like '{provider: faster-whisper, model: base, device: cpu}'"
+        ),
+    ],
+    dataset: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--dataset",
+            "-d",
+            help="Built-in subset (librispeech-test-clean-smoke, fleurs-{en,es,de,tr,zh}-smoke) "
+            "or a manifest file (.jsonl/.json/.tsv/.csv: audio + text). Repeatable.",
+        ),
+    ] = None,
+    mode: Annotated[str, typer.Option(help="batch (transcribe()) or streaming (stream())")] = (
+        "batch"
+    ),
+    chunk_ms: Annotated[
+        float, typer.Option(min=1.0, max=1000.0, help="Streaming chunk size (ms)")
+    ] = 20.0,
+    realtime_factor: Annotated[
+        float,
+        typer.Option(
+            min=0.0, help="Streaming pacing: 1 = real time, 2 = 2x, 0 = as fast as possible"
+        ),
+    ] = 1.0,
+    normalizer: Annotated[
+        str, typer.Option(help="auto, whisper-english, whisper-basic or none")
+    ] = "auto",
+    language: Annotated[
+        str | None, typer.Option(help="Override the dataset language (e.g. for manifests)")
+    ] = None,
+    limit: Annotated[
+        int | None, typer.Option(min=1, help="Only the first N utterances of each dataset")
+    ] = None,
+    vad: Annotated[
+        str | None,
+        typer.Option(help="VAD spec to stream a batch-only STT through StreamAdapter"),
+    ] = None,
+    warmup: Annotated[
+        bool, typer.Option("--warmup/--no-warmup", help="stt.warmup() + one unmeasured utterance")
+    ] = True,
+    final_timeout: Annotated[
+        float, typer.Option(min=0.1, help="Streaming: seconds to wait for the final transcript")
+    ] = 30.0,
+    out: Annotated[Path, typer.Option("--out", "-o", help="Results directory")] = Path(
+        "bench-results"
+    ),
+    run_id: Annotated[str | None, typer.Option(help="Run directory name")] = None,
+    label: Annotated[str | None, typer.Option(help="System label used in reports")] = None,
+    seed: Annotated[int, typer.Option(help="Bootstrap seed")] = 0,
+    as_json: Annotated[bool, typer.Option("--json", help="Print summary.json to stdout")] = False,
+    markdown: Annotated[
+        bool, typer.Option("--markdown", help="Print the per-dataset Markdown table")
+    ] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """T2: ASR accuracy (WER/CER), throughput (RTFx) and latency (TTFS, first partial).
+
+    Examples:
+
+        van bench asr --stt faster-whisper/base
+
+        van bench asr --stt sherpa-onnx/nemo-fastconformer-en-80ms --mode streaming
+
+        van bench asr --stt faster-whisper/base -d fleurs-es-smoke -d fleurs-de-smoke
+
+        van bench asr --stt mock -d my-data/manifest.jsonl --language en
+    """
+    from ..bench.asr_datasets import load_asr_dataset
+    from ..bench.system import parse_component_spec
+    from ..bench.tracks.asr import AsrItem, AsrOptions, asr_markdown_table, run_asr_benchmark
+    from ..errors import VoiceAgentError
+
+    _tolerate_narrow_console()
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    options = AsrOptions(
+        mode=mode,  # type: ignore[arg-type]  # validated below
+        chunk_ms=chunk_ms,
+        realtime_factor=realtime_factor,
+        normalizer=normalizer,
+        language=language,
+        limit=limit,
+        warmup=warmup,
+        final_timeout=final_timeout,
+        seed=seed,
+    )
+    try:
+        options.validate()
+        spec = parse_component_spec(stt)
+        assert spec is not None  # --stt is required
+        vad_spec = parse_component_spec(vad)
+        progress = lambda line: err.print(f"  {line}", highlight=False)  # noqa: E731
+        sets = [
+            load_asr_dataset(d, language=language, progress=progress)
+            for d in (dataset or ["librispeech-test-clean-smoke"])
+        ]
+    except (VoiceAgentError, ValueError) as exc:
+        err.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(2) from exc
+    total = sum(len(d.limit(limit).utterances) for d in sets)
+    err.print(
+        f"[bold]van bench asr[/bold] · {label or stt} · {mode} · "
+        f"{', '.join(d.name for d in sets)} ({total} utterances)",
+        highlight=False,
+    )
+    done = 0
+
+    def on_item(item: AsrItem) -> None:
+        nonlocal done
+        done += 1
+        if item.error is not None:
+            detail = f"[red]error[/red] {item.error}"
+        else:
+            rate = item.cer if item.metric == "cer" else item.wer
+            detail = f"{item.metric.upper()} {'-' if rate is None else f'{100 * rate:5.1f}%'}"
+            if item.ttfs_ms is not None:
+                detail += f"  TTFS {item.ttfs_ms:,.0f} ms"
+        err.print(f"  {done:>4}/{total} {item.dataset:<28} {item.id:<28} {detail}",
+                  highlight=False)  # fmt: skip
+
+    try:
+        results = asyncio.run(
+            run_asr_benchmark(
+                spec, sets, options, vad=vad_spec, out_dir=out, run_id=run_id, label=label,
+                on_item=on_item,
+            )
+        )  # fmt: skip
+    except ValueError as exc:
+        err.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(2) from exc
+    except VoiceAgentError as exc:
+        err.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    if as_json:
+        typer.echo(json.dumps(results.summary.model_dump(mode="json"), indent=2))
+    elif markdown:
+        typer.echo(asr_markdown_table(results))
+    else:
+        _print_asr(results)
 
 
 # --------------------------------------------------------------------- T7 overhead
