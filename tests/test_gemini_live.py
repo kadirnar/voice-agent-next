@@ -258,6 +258,20 @@ async def test_late_input_transcript_still_precedes_the_answer(fake: Callable[..
     assert "".join(e.delta for e in events.of(ResponseText)) == "Sure thing."
 
 
+async def test_interim_then_final_input_transcripts(fake: Callable[..., Any]) -> None:
+    server = await fake(replies=["Okay."], transcripts=["book a table"], interim_transcription=True)
+    conn, events = await connect(server)
+    await say(conn)
+    await events.wait(lambda: bool(events.of(ResponseDone)))
+    await conn.aclose()
+
+    partials = [e.text for e in events.of(InputTranscript) if not e.is_final]
+    assert partials[:3] == ["book", "book a", "book a table"]  # interim hypotheses
+    assert partials[-1] == "book a table"
+    assert [e.text for e in events.of(InputTranscript) if e.is_final] == ["book a table"]
+    assert len({e.item_id for e in events.of(InputTranscript)}) == 1
+
+
 async def test_without_voice_activity_the_speech_end_is_estimated_locally(
     fake: Callable[..., Any],
 ) -> None:

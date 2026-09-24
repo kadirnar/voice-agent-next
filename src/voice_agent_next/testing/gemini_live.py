@@ -318,10 +318,15 @@ class FakeConnection:
         if text is None:
             text = server._next_transcript()
             if self._input_transcription and text:
+                words = _words(text)
+                if server.interim_transcription:  # low-latency hypotheses first
+                    for i in range(1, len(words) + 1):
+                        interim = {"text": "".join(words[:i]).strip()}
+                        await self.send({"serverContent": {"interimInputTranscription": interim}})
                 if server.late_transcription:
-                    late = _words(text)
+                    late = words
                 else:
-                    for word in _words(text):
+                    for word in words:
                         await self.send({"serverContent": {"inputTranscription": {"text": word}}})
         self.user_turns.append(text)
         self.session.history.append({"role": "user", "parts": [{"text": text}]})
@@ -461,6 +466,7 @@ class FakeGeminiLiveServer:
             ``default_transcript``).
         api_key: expected key (``None`` accepts anything).
         voice_activity: send ``voiceActivity`` start/end messages.
+        interim_transcription: send ``interimInputTranscription`` hypotheses first.
         late_transcription: send the user's transcript after the first reply audio.
         realtime_factor: pacing of reply audio (0 = as fast as possible, 1 = real time).
         reject_status: reject the WebSocket handshake with this HTTP status.
@@ -475,6 +481,7 @@ class FakeGeminiLiveServer:
         default_transcript: str = "hello",
         api_key: str | None = "fake-gemini-key",
         voice_activity: bool = True,
+        interim_transcription: bool = False,
         late_transcription: bool = False,
         realtime_factor: float = 0.0,
         chunk_duration: float = 0.04,
@@ -489,6 +496,7 @@ class FakeGeminiLiveServer:
         self.default_transcript = default_transcript
         self.api_key = api_key
         self.voice_activity = voice_activity
+        self.interim_transcription = interim_transcription
         self.late_transcription = late_transcription
         self.realtime_factor = realtime_factor
         self.chunk_duration = chunk_duration
