@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 
 from ..audio.frame import AudioFrame
@@ -123,6 +123,9 @@ class CallerEmulator:
         should_stop: optional probe that aborts the call (e.g. the session closed).
         on_turn: called with each :class:`TurnTiming` once the caller moves on.
         tail: silence streamed after the last turn (s).
+        sleep_until: waits until a ``now()`` deadline, never returning early (default: a
+            precise per-caller wait). Many concurrent callers can share one timer instead
+            (e.g. the overhead track's load test).
     """
 
     def __init__(
@@ -135,6 +138,7 @@ class CallerEmulator:
         should_stop: Callable[[], bool] | None = None,
         on_turn: Callable[[TurnTiming], None] | None = None,
         tail: float = 0.2,
+        sleep_until: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         if not transport.realtime_playout:
             raise ValueError("CallerEmulator needs LoopbackTransport(realtime_playout=True)")
@@ -147,6 +151,7 @@ class CallerEmulator:
         self.should_stop = should_stop
         self.on_turn = on_turn
         self.tail = tail
+        self._sleep_until = sleep_until or _sleep_until
         self._rate = transport.input_format.sample_rate
         self._chunk_samples = max(1, round(chunk * self._rate))
         self._chunk_dur = self._chunk_samples / self._rate
@@ -220,7 +225,7 @@ class CallerEmulator:
             pcm = pcm + bytes(self._chunk_samples * 2 - len(pcm))
         capture_start = self._t_stream + self._sent * self._chunk_dur
         due = capture_start + self._chunk_dur
-        await _sleep_until(due)
+        await self._sleep_until(due)
         self._lags.append(max(0.0, now() - due))
         self.transport.push_user_audio(AudioFrame(pcm, self._rate, 1, capture_start))
         self._user.append(pcm)
