@@ -1,17 +1,73 @@
-# Endpointing: when is the user done?
+# Endpointing
 
-After the user stops speaking, the cascade waits some silence, the **endpointing delay**
-(measured from the end of speech), and then commits the turn and replies. If the user
-speaks again before that, the turn goes on. A short delay makes the agent fast. It also
-cuts off users who pause mid-thought ("I'd like to book a table for… two people").
+Endpointing is the cascade's decision to **commit** the user's turn: stop listening for
+more and start answering. It runs at every candidate pause the VAD reports and is the
+largest single contributor to voice-to-voice latency in a cascade, so it is worth tuning.
+Native engines endpoint on the server ([turn-taking](turn-taking.md#native-engines)).
+
+## The algorithm
+
+All delays are measured from the **end of speech** (where the VAD saw the voice stop), not
+from when the pause was confirmed:
 
 ```
-end of speech ─ VAD pause (0.25 s) ─ final transcript + turn detector ─ ··· delay ··· ─ commit
+speech ends ──► VAD END_OF_SPEECH (min_silence_duration later: a candidate pause)
+   │
+   ├─ flush the STT: force-finalize, wait ≤ final_transcript_timeout for the final text
+   ├─ turn detector: p = P(user is done)        (audio detectors run during the flush)
+   │
+   ├─ p ≥ threshold (or no detector)  → commit at  min_endpointing_delay
+   └─ p <  threshold                  → commit at  max_endpointing_delay
+                                        (the fixed policy; see "Endpointing policies")
+   │
+   └─ speech resumes before the commit → cancel; the same turn continues
 ```
 
-With a streaming or GPU STT, the final transcript arrives 50–100 ms after the end of
-speech (`docs/benchmarks/results.md`). The end-of-turn delay then equals the endpointing
-delay, so the policy that picks this delay is the next latency lever.
+* Without a turn detector the cascade can't tell a finished sentence from a hesitation,
+  so it waits longer: `min_endpointing_delay` defaults to **0.6 s** without a detector and
+  **0.4 s** with one.
+* `max_endpointing_delay` (**2.5 s**) bounds how long a user who is "probably not done"
+  can pause before the agent answers anyway.
+* An STT `END_OF_TURN` event (Deepgram Flux, AssemblyAI, Cartesia Ink) commits
+  immediately and replaces this procedure.
+* If the STT doesn't deliver the final transcript within `final_transcript_timeout`
+  (1 s), the interim text is used.
+* A pause with no transcript at all (noise) commits nothing.
+
+## Tuning
+
+| Goal | Change |
+|---|---|
+| Snappier replies | a turn detector (`turn_detector="smart_turn"`), then lower `min_endpointing_delay` (0.2–0.3 s) |
+| Fewer cut-offs for slow or thoughtful speakers | `endpointing: dynamic` (learns the user's pauses), raise the detector's `threshold` or `min_endpointing_delay` |
+| Numbers, addresses, dictated notes | [dictation mode](#dictation-mode) |
+| Hide the LLM's time to first token | [preemptive generation](preemptive-generation.md): the reply starts during the endpointing silence and is released at the commit |
+| Faster final transcripts | a streaming STT with forced finalization (sherpa-onnx, Moonshine, Deepgram, AssemblyAI) |
+
+```yaml
+turn_detector: smart_turn
+cascade:
+  min_endpointing_delay: 0.3
+  max_endpointing_delay: 2.0
+  preemptive_generation: true
+```
+
+Measure the effect with `van bench latency` ([methodology](../benchmarks/methodology.md)):
+`end_of_turn_delay` in the turn metrics is exactly this delay, and `voice_to_voice` is what
+the user experiences.
+
+## Metrics
+
+Every endpointing decision emits an `EndpointingMetrics` ([below](#endpointing-metrics)).
+Each user turn produces a `TurnMetrics` with `end_of_turn_delay` (end of speech → commit),
+`response_ttfb` and `voice_to_voice`; the turn detector emits `EOTMetrics` with its
+probability and inference time ([observability](observability.md)).
+
+With a streaming or GPU STT the final transcript arrives 50–100 ms after the end of
+speech (`docs/benchmarks/results.md`). The end-of-turn delay then *is* the endpointing
+delay, and the policy that picks it is the next latency lever.
+
+## Endpointing policies
 
 `CascadeOptions` has three policies:
 
@@ -116,7 +172,7 @@ async def start_dictation(ctx: ToolContext) -> str:
 `CascadeConnection.update_endpointing`) applies from the next pause on. Engines that do
 their own turn detection (native speech-to-speech models) raise `ConfigurationError`.
 
-## Metrics
+## Endpointing metrics
 
 Every endpointing decision emits one `EndpointingMetrics` (`session.on("metrics")`):
 `policy`, the chosen `delay`, the detector's `probability`/`threshold`, the `hold` delay,

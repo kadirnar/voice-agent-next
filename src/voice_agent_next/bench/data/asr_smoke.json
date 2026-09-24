@@ -1,0 +1,1058 @@
+{
+ "schema": 1,
+ "datasets": {
+  "fleurs-de-smoke": {
+   "description": "FLEURS de_de test: 10 distinct sentences (2-20 s)",
+   "language": "de",
+   "license": "CC-BY-4.0",
+   "attribution": "FLEURS (Conneau et al., 2022, arXiv:2205.12446), google/fleurs on the Hugging Face Hub",
+   "archive": {
+    "urls": [
+     "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/de_de/audio/test.tar.gz"
+    ],
+    "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+    "format": "tar.gz",
+    "streamed_mb": 8.3
+   },
+   "selection": "first 10 files of 2-20 s with distinct sentences, in archive order; sentences with digits skipped",
+   "items": [
+    {
+     "id": "de_de-2003-10004059102127011984",
+     "member": "test/10004059102127011984.wav",
+     "file": "10004059102127011984.wav",
+     "sha256": "1603ed8fcea31a7f32f51d137eaa3516d15aca947898b81a136f4a9732f08ad2",
+     "bytes": 1148218,
+     "duration": 17.94,
+     "gender": "MALE",
+     "text": "Für die besten Aussichten auf Hongkong sollten Sie die Insel verlassen und zum gegenüberliegenden Ufer von Kowloon fahren."
+    },
+    {
+     "id": "de_de-1738-10009182821551087671",
+     "member": "test/10009182821551087671.wav",
+     "file": "10009182821551087671.wav",
+     "sha256": "90d0470adf728783e98cc8dddd51e2c2cbf0d6bf360da65f7d2ac5c3e65876aa",
+     "bytes": 714298,
+     "duration": 11.16,
+     "gender": "MALE",
+     "text": "Er griff auch alles an, was ins Wasser kam; selbst ein großer Dinosaurier wie der T. Rex war ihm nicht gewachsen."
+    },
+    {
+     "id": "de_de-1849-10014044777125235464",
+     "member": "test/10014044777125235464.wav",
+     "file": "10014044777125235464.wav",
+     "sha256": "13041e21e6a44d30da9595905fbb4367056191a513245b84e64a13449c8d08ea",
+     "bytes": 794938,
+     "duration": 12.42,
+     "gender": "MALE",
+     "text": "Wenn Sie den Film „Das Vermächtnis der Tempelritter“ gesehen haben, denken Sie vielleicht, dass auf die Rückseite der Unabhängigkeitserklärung eine Schatzkarte gezeichnet wurde."
+    },
+    {
+     "id": "de_de-1683-10030056357041867775",
+     "member": "test/10030056357041867775.wav",
+     "file": "10030056357041867775.wav",
+     "sha256": "fda294888110e8bc13a0e468033a21f3b0f2f6a6e7efe40c32583c4760a58f0e",
+     "bytes": 683578,
+     "duration": 10.68,
+     "gender": "MALE",
+     "text": "Es leben noch viele Männer und Frauen, die ihre Zeit hier überlebt haben, und viele weitere mit Angehörigen, die dort ermordet wurden oder sich zu Tode arbeiteten, Juden und Nichtjuden gleichermaßen."
+    },
+    {
+     "id": "de_de-1739-10058186628567796965",
+     "member": "test/10058186628567796965.wav",
+     "file": "10058186628567796965.wav",
+     "sha256": "8859c90aaeeb54915cc3a7d0010aba564f996f1bc6f393f184a06825d0940090",
+     "bytes": 633658,
+     "duration": 9.9,
+     "gender": "MALE",
+     "text": "Die Höhle befindet sich auf der Spitze eines der Berge nördlich von Mekka und ist vom Rest der Welt völlig isoliert."
+    },
+    {
+     "id": "de_de-1796-10058299886985225661",
+     "member": "test/10058299886985225661.wav",
+     "file": "10058299886985225661.wav",
+     "sha256": "4dba8160f102695aa4f5b5407241037e9d91bb6febd1854e7cda499e953abb7a",
+     "bytes": 537658,
+     "duration": 8.4,
+     "gender": "MALE",
+     "text": "Dieses Sediment war nötig, um Sandbänke und Strände zu bilden, die als Lebensräume für Wildtiere dienten."
+    },
+    {
+     "id": "de_de-1990-10095057775426831514",
+     "member": "test/10095057775426831514.wav",
+     "file": "10095057775426831514.wav",
+     "sha256": "fd254f62c724d0db0c1e0d288dbe121a4770ecb5b5547fad91d28a967d454499",
+     "bytes": 829498,
+     "duration": 12.96,
+     "gender": "MALE",
+     "text": "Blogs können auch dazu beitragen, die Schreibfertigkeiten von Schülern zu verbessern. Zwar haben Schüler am Anfang ihrer Blogerfahrung oft eine schlampige Grammatik und Rechtschreibung, aber das ändert sich normalerweise, wenn es ein Publikum gibt."
+    },
+    {
+     "id": "de_de-1884-10166547362714956625",
+     "member": "test/10166547362714956625.wav",
+     "file": "10166547362714956625.wav",
+     "sha256": "adf91db1187ebac0228f3cabe0be4f18c47c34702a8027793462e5f8485be7dc",
+     "bytes": 706618,
+     "duration": 11.04,
+     "gender": "MALE",
+     "text": "Insbesondere wird behauptet, dass man erkennen kann, ob jemand lügt, indem man minimale Veränderungen des Gesichtsausdrucks richtig deutet.x"
+    },
+    {
+     "id": "de_de-1797-10229344228128634115",
+     "member": "test/10229344228128634115.wav",
+     "file": "10229344228128634115.wav",
+     "sha256": "bd32736573baee445faef9d586796c76adfc105dde0c666120e778f5b4ff5838",
+     "bytes": 457018,
+     "duration": 7.14,
+     "gender": "MALE",
+     "text": "Jeder nimmt an der Gesellschaft teil und benutzt Transportsysteme. Fast jeder beklagt sich über die Transportsysteme.x"
+    },
+    {
+     "id": "de_de-1862-10240730312646485406",
+     "member": "test/10240730312646485406.wav",
+     "file": "10240730312646485406.wav",
+     "sha256": "c9d1ade20c467adc98fe23fcf31f28292f4b0ee6370babd783e4b22f843c4395",
+     "bytes": 1079098,
+     "duration": 16.86,
+     "gender": "MALE",
+     "text": "NextGen ist ein System, von dem die FAA behauptet, dass es Flugzeugen erlauben würde, kürzere Strecken zu fliegen und jedes Jahr Millionen Gallonen an Treibstoff zu sparen und die Kohlenstoffemissionen zu reduzieren."
+    }
+   ]
+  },
+  "fleurs-en-smoke": {
+   "description": "FLEURS en_us test: 10 distinct sentences (2-20 s)",
+   "language": "en",
+   "license": "CC-BY-4.0",
+   "attribution": "FLEURS (Conneau et al., 2022, arXiv:2205.12446), google/fleurs on the Hugging Face Hub",
+   "archive": {
+    "urls": [
+     "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/en_us/audio/test.tar.gz"
+    ],
+    "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+    "format": "tar.gz",
+    "streamed_mb": 3.9
+   },
+   "selection": "first 10 files of 2-20 s with distinct sentences, in archive order",
+   "items": [
+    {
+     "id": "en_us-1904-1003119935936341070",
+     "member": "test/1003119935936341070.wav",
+     "file": "1003119935936341070.wav",
+     "sha256": "33aca50159ec2e3cbcc894eb26faa916d6badb1b49fb75994973561540a7f012",
+     "bytes": 675898,
+     "duration": 10.56,
+     "gender": "MALE",
+     "text": "However, due to the slow communication channels, styles in the west could lag behind by 25 to 30 year."
+    },
+    {
+     "id": "en_us-1675-10052240106321793346",
+     "member": "test/10052240106321793346.wav",
+     "file": "10052240106321793346.wav",
+     "sha256": "7603cae3294309ef70d234180cefccc3b13865ee525262228a636069b9b62841",
+     "bytes": 560698,
+     "duration": 8.76,
+     "gender": "MALE",
+     "text": "All nouns, alongside the word Sie for you, always begin with a capital letter, even in the middle of a sentence."
+    },
+    {
+     "id": "en_us-1950-10167324587744183095",
+     "member": "test/10167324587744183095.wav",
+     "file": "10167324587744183095.wav",
+     "sha256": "260bdd1a15e1d35bcc5d91667516ca3bc659285e10f94872182715bcd7880398",
+     "bytes": 733498,
+     "duration": 11.46,
+     "gender": "FEMALE",
+     "text": "To the north and within easy reach is the romantic and fascinating town of Sintra and which was made famous to foreigners after a glowing account of its splendours recorded by Lord Byron."
+    },
+    {
+     "id": "en_us-1728-10197164397713068203",
+     "member": "test/10197164397713068203.wav",
+     "file": "10197164397713068203.wav",
+     "sha256": "b174be7730f0aab6a26762130b66f2125392b50550645727bd057d8479fb6219",
+     "bytes": 368698,
+     "duration": 5.76,
+     "gender": "FEMALE",
+     "text": "The cabbage juice changes color depending on how acidic or basic (alkaline) the chemical is."
+    },
+    {
+     "id": "en_us-1972-10233995782544396174",
+     "member": "test/10233995782544396174.wav",
+     "file": "10233995782544396174.wav",
+     "sha256": "bfa2f3fb72a05cbcb7c0000a460435f2d0eedca7c5cc90f01aacc89127df7f63",
+     "bytes": 276538,
+     "duration": 4.32,
+     "gender": "FEMALE",
+     "text": "Many people don't think about them as dinosaurs because they have feathers and can fly."
+    },
+    {
+     "id": "en_us-1938-10235738076911595987",
+     "member": "test/10235738076911595987.wav",
+     "file": "10235738076911595987.wav",
+     "sha256": "3802ffc3e69c66e0d2e66652015bff0c6b1b8498bfb8670623eb4e34bc9e008d",
+     "bytes": 730938,
+     "duration": 11.42,
+     "gender": "MALE",
+     "text": "The hospital has followed protocol for infection control, including separating the patient from others to prevent possible infection of others."
+    },
+    {
+     "id": "en_us-1876-10323357556845456822",
+     "member": "test/10323357556845456822.wav",
+     "file": "10323357556845456822.wav",
+     "sha256": "6b3081a29a5bb6fc6434e8525690edc26b23844841e119c916183f4ba1863372",
+     "bytes": 691258,
+     "duration": 10.8,
+     "gender": "FEMALE",
+     "text": "The Northern Marianas emergency management office said that there were no damages reported in the nation."
+    },
+    {
+     "id": "en_us-1914-10335587906469246566",
+     "member": "test/10335587906469246566.wav",
+     "file": "10335587906469246566.wav",
+     "sha256": "14c9f40d7087ed487823917a9bc1838a037d78d315a694f7ace632651c612a61",
+     "bytes": 445498,
+     "duration": 6.96,
+     "gender": "FEMALE",
+     "text": "Twentieth century research has shown that there are two pools of genetic variation: hidden and expressed."
+    },
+    {
+     "id": "en_us-1846-10344335557154974057",
+     "member": "test/10344335557154974057.wav",
+     "file": "10344335557154974057.wav",
+     "sha256": "8152d901627ad1bb88fee68b1f3adb706e33d2292bca02ef4d92465e2db4c84f",
+     "bytes": 706618,
+     "duration": 11.04,
+     "gender": "MALE",
+     "text": "The aspect ratio of this format (dividing by twelve to obtain the simplest whole-number ratio) is therefore said to be 3:2."
+    },
+    {
+     "id": "en_us-1806-1036771894648013441",
+     "member": "test/1036771894648013441.wav",
+     "file": "1036771894648013441.wav",
+     "sha256": "9514bffb9e0bd3397f2cf90041eff51b87e68293335f7ff904515a19f8d416e3",
+     "bytes": 633658,
+     "duration": 9.9,
+     "gender": "FEMALE",
+     "text": "As light pollution in their heyday was not the kind of problem it is today, they are usually located in cities or at campuses, easier to reach than those built in modern times."
+    }
+   ]
+  },
+  "fleurs-es-smoke": {
+   "description": "FLEURS es_419 test: 10 distinct sentences (2-20 s)",
+   "language": "es",
+   "license": "CC-BY-4.0",
+   "attribution": "FLEURS (Conneau et al., 2022, arXiv:2205.12446), google/fleurs on the Hugging Face Hub",
+   "archive": {
+    "urls": [
+     "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/es_419/audio/test.tar.gz"
+    ],
+    "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+    "format": "tar.gz",
+    "streamed_mb": 5.8
+   },
+   "selection": "first 10 files of 2-20 s with distinct sentences, in archive order; sentences with digits skipped",
+   "items": [
+    {
+     "id": "es_419-2001-1001146817223348054",
+     "member": "test/1001146817223348054.wav",
+     "file": "1001146817223348054.wav",
+     "sha256": "861ceedc4d50fbe52fc89b6d0c0fa740b9cd6fa668388e754064847386af0faf",
+     "bytes": 821818,
+     "duration": 12.84,
+     "gender": "MALE",
+     "text": "Se recomienda enfáticamente a los viajeros que se informen sobre cualquier riesgo de clima extremo en el área que visitan, dado que ello puede afectar sus planes de viaje."
+    },
+    {
+     "id": "es_419-1764-1008205615316519958",
+     "member": "test/1008205615316519958.wav",
+     "file": "1008205615316519958.wav",
+     "sha256": "0576e73da35ef17b6ce6396d31b32830b7ab19cea98f9f5db68de3756dc3d4fc",
+     "bytes": 622138,
+     "duration": 9.72,
+     "gender": "MALE",
+     "text": "Fue tanta la cantidad de gente que se concentró, que no todos pudieron acceder al funeral en la Plaza de San Pedro."
+    },
+    {
+     "id": "es_419-1770-10084850086754329587",
+     "member": "test/10084850086754329587.wav",
+     "file": "10084850086754329587.wav",
+     "sha256": "275d5d9dcbfb7099b9aac08ea81fc7383b94e085a683d127ce4d8ff742cb3961",
+     "bytes": 549178,
+     "duration": 8.58,
+     "gender": "MALE",
+     "text": "Esto parece tener sentido, ya que en la Tierra no se percibe su movimiento, ¿cierto?"
+    },
+    {
+     "id": "es_419-1799-10107325335956726764",
+     "member": "test/10107325335956726764.wav",
+     "file": "10107325335956726764.wav",
+     "sha256": "675d977de02f4ae1314252277c44375f9969732cb80db56e024b853fbbb939f7",
+     "bytes": 679738,
+     "duration": 10.62,
+     "gender": "MALE",
+     "text": "Carpanedo participó en dos carreras individuales del campeonato aparte de la competencia del miércoles."
+    },
+    {
+     "id": "es_419-1820-1013662909103347734",
+     "member": "test/1013662909103347734.wav",
+     "file": "1013662909103347734.wav",
+     "sha256": "27c060cfd8abfffe6f31dc41b3e1fb8ab0adef25ac8347a038c6ef1e536077f8",
+     "bytes": 625978,
+     "duration": 9.78,
+     "gender": "MALE",
+     "text": "Hoy en día, las personas escriben mensajes en las pantallas de sus computadoras. No tienen la necesidad de, siquiera, aproximarse a un sacapuntas."
+    },
+    {
+     "id": "es_419-1747-10149016836336603986",
+     "member": "test/10149016836336603986.wav",
+     "file": "10149016836336603986.wav",
+     "sha256": "13b06188bd62a1a63ed350e6fe1a1ee8518db1ea7bc8f75d72849ca023de7c32",
+     "bytes": 361018,
+     "duration": 5.64,
+     "gender": "FEMALE",
+     "text": "Los luchadores compañeros de Luna también le rindieron homenaje."
+    },
+    {
+     "id": "es_419-1816-10150624747569080019",
+     "member": "test/10150624747569080019.wav",
+     "file": "10150624747569080019.wav",
+     "sha256": "41b0e8fe385400d1d4653717d017c4b6f6666b63a21e5b13eb7e3d4d6149c3d4",
+     "bytes": 656698,
+     "duration": 10.26,
+     "gender": "FEMALE",
+     "text": "Duvall, que está casado y tiene dos hijos adultos, no causó una buena impresión a Miller, que fue a quien le relató la historia."
+    },
+    {
+     "id": "es_419-1783-10155332265364188477",
+     "member": "test/10155332265364188477.wav",
+     "file": "10155332265364188477.wav",
+     "sha256": "7459d655bf0ff1c24e46df4d94a0fbf02ebcd2b86eaa9c38f54f8e8ee7ac6273",
+     "bytes": 683578,
+     "duration": 10.68,
+     "gender": "MALE",
+     "text": "Entre los fenómenos climáticos regionales y estacionales extremos encontramos los ventarrones, las tormentas de nieve, hielo o polvo."
+    },
+    {
+     "id": "es_419-1794-10192388533260519980",
+     "member": "test/10192388533260519980.wav",
+     "file": "10192388533260519980.wav",
+     "sha256": "14f6bbd87ddcf98ade6364dc21f7dff9d5d826429c1e1bd17ef12d2bebad0b8d",
+     "bytes": 775738,
+     "duration": 12.12,
+     "gender": "FEMALE",
+     "text": "Se puede definir a una civilización como una cultura específica de la que forma parte un extenso grupo de personas que viven y trabajan en conjunto; es decir, una sociedad."
+    },
+    {
+     "id": "es_419-1965-10206659851013694932",
+     "member": "test/10206659851013694932.wav",
+     "file": "10206659851013694932.wav",
+     "sha256": "158131b86fbcf2524a8153c810c8e4e10a39a4c6ec1d544ef6b4e7ce5828a5f4",
+     "bytes": 779578,
+     "duration": 12.18,
+     "gender": "MALE",
+     "text": "Las playas son casi todas de arena con lugares seguros para nadar y en su mayoría tienen árboles pohutukawa que ofrecen lugares de sombra."
+    }
+   ]
+  },
+  "fleurs-tr-smoke": {
+   "description": "FLEURS tr_tr test: 10 distinct sentences (2-20 s)",
+   "language": "tr",
+   "license": "CC-BY-4.0",
+   "attribution": "FLEURS (Conneau et al., 2022, arXiv:2205.12446), google/fleurs on the Hugging Face Hub",
+   "archive": {
+    "urls": [
+     "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/tr_tr/audio/test.tar.gz"
+    ],
+    "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+    "format": "tar.gz",
+    "streamed_mb": 7.9
+   },
+   "selection": "first 10 files of 2-20 s with distinct sentences, in archive order; sentences with digits skipped",
+   "items": [
+    {
+     "id": "tr_tr-2004-10000377651956138413",
+     "member": "test/10000377651956138413.wav",
+     "file": "10000377651956138413.wav",
+     "sha256": "e2efd9f3ce2fcc9e191126dcded8e674233a9ce83a9c2132541700e8f1bd57c3",
+     "bytes": 906298,
+     "duration": 14.16,
+     "gender": "MALE",
+     "text": "Aynı ay, başka bir yolcu uçağı Meşhed'deki bir pisti aşarak bir duvara çarptı ve on yedi kişinin ölümüne neden oldu."
+    },
+    {
+     "id": "tr_tr-1660-10002518854052673247",
+     "member": "test/10002518854052673247.wav",
+     "file": "10002518854052673247.wav",
+     "sha256": "8d49d9d174794b25da72852685120ff5dd1d7319ca629256fafd1e25c635fc9a",
+     "bytes": 791098,
+     "duration": 12.36,
+     "gender": "MALE",
+     "text": "Romantizm; Goethe, Fichte ve Schlegel gibi yazarlardan geçen geniş bir kültürel determinizm özelliği taşıyordu."
+    },
+    {
+     "id": "tr_tr-1692-10067972835475076305",
+     "member": "test/10067972835475076305.wav",
+     "file": "10067972835475076305.wav",
+     "sha256": "0d35468a6dec8161711e470404f64471ceed7d7197adcd2e7638a4fc3182620d",
+     "bytes": 710458,
+     "duration": 11.1,
+     "gender": "MALE",
+     "text": "Japonya'nın nükleer ajansına göre, tesiste radyoaktif sezyum ve iyodin tespit edildi."
+    },
+    {
+     "id": "tr_tr-1711-10073710776711594036",
+     "member": "test/10073710776711594036.wav",
+     "file": "10073710776711594036.wav",
+     "sha256": "71c90819a4b8f5c5ade78626e921d7efe27fa087cf1e17581d1242a6f26ca5de",
+     "bytes": 1063738,
+     "duration": 16.62,
+     "gender": "MALE",
+     "text": "Bu teoriler, bazı insanların yaptıkları şeyleri arzu etmelerine sebebiyet veren şeylere ve çevrelerindeki şeylerin onlara belirli şeyleri yapıp yapmamasına sebep olan şeyler ile ilgilenir."
+    },
+    {
+     "id": "tr_tr-1689-101089684978402857",
+     "member": "test/101089684978402857.wav",
+     "file": "101089684978402857.wav",
+     "sha256": "be09d0e727f1fef777e542902f10798d43e468359015af7e02bccde8f9e4e1a9",
+     "bytes": 1013818,
+     "duration": 15.84,
+     "gender": "MALE",
+     "text": "Avrupa nispeten küçük ama birçok bağımsız ülkenin bulunduğu bir kıtadır. Normal şartlar altında, birden fazla ülkeyi gezmek birçok vize uygulamalarından ve pasaport kontrollerinden geçmek anlamına gelmektedir."
+    },
+    {
+     "id": "tr_tr-1747-10147164563742619338",
+     "member": "test/10147164563742619338.wav",
+     "file": "10147164563742619338.wav",
+     "sha256": "e1f1ca24c6d251db5cb48bbebe21ceddc163f54baf7af029dcad7dcf03d0ccd8",
+     "bytes": 268858,
+     "duration": 4.2,
+     "gender": "MALE",
+     "text": "Güreşçi arkadaşları da Luna'ya saygılarını sundular."
+    },
+    {
+     "id": "tr_tr-1884-10175328357718171270",
+     "member": "test/10175328357718171270.wav",
+     "file": "10175328357718171270.wav",
+     "sha256": "63aa20f0e8bb209a52a0bd4f7b7d2a7dd6de08cea13123a4ff74970856cc2c0e",
+     "bytes": 583738,
+     "duration": 9.12,
+     "gender": "MALE",
+     "text": "Özellikle mikro ifadeleri doğru bir şekilde yorumlama yöntemi ile bir kişinin yalan söyleyip söylemediğinin anlaşılabileceği öne sürülüyor."
+    },
+    {
+     "id": "tr_tr-1908-10199707715835400660",
+     "member": "test/10199707715835400660.wav",
+     "file": "10199707715835400660.wav",
+     "sha256": "90cb56524422534fb409cd9ee21ca5f6e2bfaccc2812dbb847c18c171b8a64ad",
+     "bytes": 368698,
+     "duration": 5.76,
+     "gender": "MALE",
+     "text": "Bu, bazı fiiller ve nesneler arasında ayrım yapmanın önemli bir yoludur."
+    },
+    {
+     "id": "tr_tr-2002-10213509574977034508",
+     "member": "test/10213509574977034508.wav",
+     "file": "10213509574977034508.wav",
+     "sha256": "9a023acff26593a6fa073dbd52de87e2fd6a4cac133a67bc6b3976f3c9bd8304",
+     "bytes": 553018,
+     "duration": 8.64,
+     "gender": "MALE",
+     "text": "Bu, oyunculara cihazı havada hareket ettirerek video oyunlarındaki hareket ve eylemleri kontrol etme imkanı sunacaktır."
+    },
+    {
+     "id": "tr_tr-1752-10238618737057418994",
+     "member": "test/10238618737057418994.wav",
+     "file": "10238618737057418994.wav",
+     "sha256": "97f2f84479c44fd317bafbc45ce92ff558f5c9114f5d87f7377f26999279c435",
+     "bytes": 783418,
+     "duration": 12.24,
+     "gender": "MALE",
+     "text": "Bunun neticesinde iki balık cinsinin soyu tükendi ve aralarında kambur kefalin de yer aldığı iki balık cinsi tehlike altına girdi."
+    }
+   ]
+  },
+  "fleurs-zh-smoke": {
+   "description": "FLEURS cmn_hans_cn test: 10 distinct sentences (2-20 s)",
+   "language": "zh",
+   "license": "CC-BY-4.0",
+   "attribution": "FLEURS (Conneau et al., 2022, arXiv:2205.12446), google/fleurs on the Hugging Face Hub",
+   "archive": {
+    "urls": [
+     "https://huggingface.co/datasets/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/cmn_hans_cn/audio/test.tar.gz"
+    ],
+    "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+    "format": "tar.gz",
+    "streamed_mb": 7.4
+   },
+   "selection": "first 10 files of 2-20 s with distinct sentences, in archive order; sentences with digits skipped; sentences with Latin letters skipped",
+   "items": [
+    {
+     "id": "cmn_hans_cn-1906-10026684690566417990",
+     "member": "test/10026684690566417990.wav",
+     "file": "10026684690566417990.wav",
+     "sha256": "a72c0b59fdba80850552af7991de07f9f4940846d2d70f0890eeb153c40f164b",
+     "bytes": 664378,
+     "duration": 10.38,
+     "gender": "MALE",
+     "text": "“这并不是告别。这是一个篇章的结束，也是新篇章的开始。”"
+    },
+    {
+     "id": "cmn_hans_cn-2006-10040380210557600780",
+     "member": "test/10040380210557600780.wav",
+     "file": "10040380210557600780.wav",
+     "sha256": "b39d2c84aefada280b73a9ab439726d370d45e5a75bd05f0a90153288ea4561b",
+     "bytes": 529978,
+     "duration": 8.28,
+     "gender": "MALE",
+     "text": "钙、钾等元素属于金属，银和金等元素当然也是金属。"
+    },
+    {
+     "id": "cmn_hans_cn-1734-10056338555786085046",
+     "member": "test/10056338555786085046.wav",
+     "file": "10056338555786085046.wav",
+     "sha256": "7cc0e10d7c4ad3297d1803ac968c996a747117edd75a6cec59e485a93bbe0fe9",
+     "bytes": 825658,
+     "duration": 12.9,
+     "gender": "MALE",
+     "text": "科学家们可以得出结论，暗物质对其他暗物质的影响方式与普通物质相同。"
+    },
+    {
+     "id": "cmn_hans_cn-1890-10073099671796350432",
+     "member": "test/10073099671796350432.wav",
+     "file": "10073099671796350432.wav",
+     "sha256": "e07c342ae53173bec1c3d5f534073fa6368713f76e7b5ab9497b015b1020167f",
+     "bytes": 879418,
+     "duration": 13.74,
+     "gender": "MALE",
+     "text": "大多数现代科研望远镜都是巨型设施，位于大气条件优良的偏远地区。"
+    },
+    {
+     "id": "cmn_hans_cn-1965-10134195680525011353",
+     "member": "test/10134195680525011353.wav",
+     "file": "10134195680525011353.wav",
+     "sha256": "52cd9b630b984ed486d69f8ee8dd841a57f875c752e1af411e0a39dabd3e00cb",
+     "bytes": 437818,
+     "duration": 6.84,
+     "gender": "FEMALE",
+     "text": "这里几乎都是沙滩，游泳很安全，大部分地方都有新西兰圣诞树的树荫。"
+    },
+    {
+     "id": "cmn_hans_cn-1903-10142207404499844309",
+     "member": "test/10142207404499844309.wav",
+     "file": "10142207404499844309.wav",
+     "sha256": "cd570cba752dd4214a9c6ec050759172932e4bc4df18ed2a2bb0d8a9e30172db",
+     "bytes": 464698,
+     "duration": 7.26,
+     "gender": "FEMALE",
+     "text": "当所有可用的资源在一个组织的职能部门之间得到有效利用时，创造力和独创性就会发生。"
+    },
+    {
+     "id": "cmn_hans_cn-1953-10144930991730701959",
+     "member": "test/10144930991730701959.wav",
+     "file": "10144930991730701959.wav",
+     "sha256": "9f1ab1af9c909d2710aa3e1b0af70d490e2104b5992a47e4c59469e3068b939f",
+     "bytes": 322618,
+     "duration": 5.04,
+     "gender": "FEMALE",
+     "text": "他随后被转送到剑桥的阿登布鲁克医院。"
+    },
+    {
+     "id": "cmn_hans_cn-1910-10154699825088384418",
+     "member": "test/10154699825088384418.wav",
+     "file": "10154699825088384418.wav",
+     "sha256": "49a1d118b44c83e35ce60df9ea90f54a89740551be65730728ea3175894f1ed1",
+     "bytes": 326458,
+     "duration": 5.1,
+     "gender": "FEMALE",
+     "text": "巴黎人是出了名的以自我中心、粗鲁和傲慢。"
+    },
+    {
+     "id": "cmn_hans_cn-1902-1015891181557233386",
+     "member": "test/1015891181557233386.wav",
+     "file": "1015891181557233386.wav",
+     "sha256": "34dff751ff55dbd0c49fd83481ea2e3fe4d3d6d4e4e484fa8cb2bd7f325c5950",
+     "bytes": 445498,
+     "duration": 6.96,
+     "gender": "FEMALE",
+     "text": "起初，他被送往位于大雅茅斯的詹姆斯·佩吉特医院进行救治。"
+    },
+    {
+     "id": "cmn_hans_cn-1874-1017060882143751441",
+     "member": "test/1017060882143751441.wav",
+     "file": "1017060882143751441.wav",
+     "sha256": "3396a3e3612d2451f4a1acb0f3ce9170a7b0db64ceb1e4aed149b4bc5f8e3b0d",
+     "bytes": 1180218,
+     "duration": 18.44,
+     "gender": "MALE",
+     "text": "有些人认为他是对的，但也有很多人持相反意见；他们认为太阳系是围绕着地球运转的，太阳也是（甚至其他恒星也是）。"
+    }
+   ]
+  },
+  "librispeech-test-clean-smoke": {
+   "description": "LibriSpeech test-clean: 50 utterances (1.5-20 s) of 10 speakers",
+   "language": "en",
+   "license": "CC-BY-4.0",
+   "attribution": "LibriSpeech ASR corpus (Panayotov et al., ICASSP 2015), https://www.openslr.org/12",
+   "archive": {
+    "urls": [
+     "https://www.openslr.org/resources/12/test-clean.tar.gz",
+     "https://us.openslr.org/resources/12/test-clean.tar.gz",
+     "https://openslr.elda.org/resources/12/test-clean.tar.gz"
+    ],
+    "format": "tar.gz",
+    "streamed_mb": 78.9
+   },
+   "selection": "first 50 utterances of 1.5-20 s in archive order, at most 5 per speaker",
+   "items": [
+    {
+     "id": "6930-75918-0000",
+     "member": "LibriSpeech/test-clean/6930/75918/6930-75918-0000.flac",
+     "file": "6930-75918-0000.flac",
+     "sha256": "9ce35224156f071ab58eb7feb8a5ceae600f6f9f353da2a6cbf797b6b1ac8a23",
+     "bytes": 74138,
+     "duration": 3.505,
+     "text": "CONCORD RETURNED TO ITS PLACE AMIDST THE TENTS"
+    },
+    {
+     "id": "6930-75918-0007",
+     "member": "LibriSpeech/test-clean/6930/75918/6930-75918-0007.flac",
+     "file": "6930-75918-0007.flac",
+     "sha256": "059969de8f6b780e1a4982805e977c3e73e40d3759c8fa8cb0cb8fabd9eb5b27",
+     "bytes": 65106,
+     "duration": 3.315,
+     "text": "YOU WILL BE FRANK WITH ME I ALWAYS AM"
+    },
+    {
+     "id": "6930-75918-0006",
+     "member": "LibriSpeech/test-clean/6930/75918/6930-75918-0006.flac",
+     "file": "6930-75918-0006.flac",
+     "sha256": "4bed112ebfdba58ec061abd3fe013f89946863e9c51e8a83b50a5eb7afb9ce65",
+     "bytes": 120849,
+     "duration": 5.85,
+     "text": "THIS HAS INDEED BEEN A HARASSING DAY CONTINUED THE YOUNG MAN HIS EYES FIXED UPON HIS FRIEND"
+    },
+    {
+     "id": "6930-75918-0005",
+     "member": "LibriSpeech/test-clean/6930/75918/6930-75918-0005.flac",
+     "file": "6930-75918-0005.flac",
+     "sha256": "ccc0da025ef4f4596a4e70fbde291527d140364166d19d9bb516a48407b3491e",
+     "bytes": 261183,
+     "duration": 13.16,
+     "text": "THE COUNT HAD THROWN HIMSELF BACK ON HIS SEAT LEANING HIS SHOULDERS AGAINST THE PARTITION OF THE TENT AND REMAINED THUS HIS FACE BURIED IN HIS HANDS WITH HEAVING CHEST AND RESTLESS LIMBS"
+    },
+    {
+     "id": "6930-75918-0004",
+     "member": "LibriSpeech/test-clean/6930/75918/6930-75918-0004.flac",
+     "file": "6930-75918-0004.flac",
+     "sha256": "e1c4755c2febfc6b77fde418821c57e2e980d84d4c79a73ff60c6e6dfc794eac",
+     "bytes": 217640,
+     "duration": 11.065,
+     "text": "SHE TAUGHT HER DAUGHTER THEN BY HER OWN AFFECTION FOR IT THAT LOVE FOR A COUNTRY WHERE THEY HAD BOTH BEEN HOSPITABLY RECEIVED AND WHERE A BRILLIANT FUTURE OPENED BEFORE THEM"
+    },
+    {
+     "id": "1320-122617-0003",
+     "member": "LibriSpeech/test-clean/1320/122617/1320-122617-0003.flac",
+     "file": "1320-122617-0003.flac",
+     "sha256": "bbe9ef85bbe228c73a414f064c9bd992c94135d73f9900b33104ad93c07d0594",
+     "bytes": 120261,
+     "duration": 6.285,
+     "text": "THERE WAS SOMETHING IN HIS AIR AND MANNER THAT BETRAYED TO THE SCOUT THE UTTER CONFUSION OF THE STATE OF HIS MIND"
+    },
+    {
+     "id": "1320-122617-0012",
+     "member": "LibriSpeech/test-clean/1320/122617/1320-122617-0012.flac",
+     "file": "1320-122617-0012.flac",
+     "sha256": "6b5cd2c31ee61665ea0d81f2c76a1f2c32cb4f46e5ec5861bd9157e262785252",
+     "bytes": 132892,
+     "duration": 7.59,
+     "text": "FOUR OR FIVE OF THE LATTER ONLY LINGERED ABOUT THE DOOR OF THE PRISON OF UNCAS WARY BUT CLOSE OBSERVERS OF THE MANNER OF THEIR CAPTIVE"
+    },
+    {
+     "id": "1320-122617-0026",
+     "member": "LibriSpeech/test-clean/1320/122617/1320-122617-0026.flac",
+     "file": "1320-122617-0026.flac",
+     "sha256": "8e46137d386c181c23a97932fb560a1fffa0b8e635bfe38c81c6f0791dbbe9ed",
+     "bytes": 94225,
+     "duration": 5.225,
+     "text": "WELL WHAT CAN'T BE DONE BY MAIN COURAGE IN WAR MUST BE DONE BY CIRCUMVENTION"
+    },
+    {
+     "id": "1320-122617-0022",
+     "member": "LibriSpeech/test-clean/1320/122617/1320-122617-0022.flac",
+     "file": "1320-122617-0022.flac",
+     "sha256": "9c4d285c536c8562a3b9add558d159b84c5b3d8c27922669906ae8da831fc25c",
+     "bytes": 74492,
+     "duration": 3.855,
+     "text": "THE DELAWARES ARE CHILDREN OF THE TORTOISE AND THEY OUTSTRIP THE DEER"
+    },
+    {
+     "id": "1320-122617-0002",
+     "member": "LibriSpeech/test-clean/1320/122617/1320-122617-0002.flac",
+     "file": "1320-122617-0002.flac",
+     "sha256": "c567f708d614c54f20e4727cdcb3cf81aaf434277bb180e878edc2118f5e4abc",
+     "bytes": 250081,
+     "duration": 13.585,
+     "text": "IN OTHER WORDS WHILE HE HAD IMPLICIT FAITH IN THE ABILITY OF BALAAM'S ASS TO SPEAK HE WAS SOMEWHAT SKEPTICAL ON THE SUBJECT OF A BEAR'S SINGING AND YET HE HAD BEEN ASSURED OF THE LATTER ON THE TESTIMONY OF HIS OWN EXQUISITE ORGANS"
+    },
+    {
+     "id": "5639-40744-0032",
+     "member": "LibriSpeech/test-clean/5639/40744/5639-40744-0032.flac",
+     "file": "5639-40744-0032.flac",
+     "sha256": "ecba1c65406f3d2fdfe383a22385dfe19cc117b71b126817f5e20df791f22a50",
+     "bytes": 252169,
+     "duration": 17.43,
+     "text": "FOR GOD'S SAKE MY LADY MOTHER GIVE ME A WIFE WHO WOULD BE AN AGREEABLE COMPANION NOT ONE WHO WILL DISGUST ME SO THAT WE MAY BOTH BEAR EVENLY AND WITH MUTUAL GOOD WILL THE YOKE IMPOSED ON US BY HEAVEN INSTEAD OF PULLING THIS WAY AND THAT WAY AND FRETTING EACH OTHER TO DEATH"
+    },
+    {
+     "id": "5639-40744-0002",
+     "member": "LibriSpeech/test-clean/5639/40744/5639-40744-0002.flac",
+     "file": "5639-40744-0002.flac",
+     "sha256": "111c6b8b19d093736570bced344035b48f75c770aacc60103da9d9a20f904fb2",
+     "bytes": 143975,
+     "duration": 8.91,
+     "text": "RODOLFO AND HIS COMPANIONS WITH THEIR FACES MUFFLED IN THEIR CLOAKS STARED RUDELY AND INSOLENTLY AT THE MOTHER THE DAUGHTER AND THE SERVANT MAID"
+    },
+    {
+     "id": "5639-40744-0033",
+     "member": "LibriSpeech/test-clean/5639/40744/5639-40744-0033.flac",
+     "file": "5639-40744-0033.flac",
+     "sha256": "3cf3d1325b9a643f43f503a3be74b29e081e2a233774f39a48fe40e0040258cf",
+     "bytes": 147682,
+     "duration": 9.15,
+     "text": "HER BEARING WAS GRACEFUL AND ANIMATED SHE LED HER SON BY THE HAND AND BEFORE HER WALKED TWO MAIDS WITH WAX LIGHTS AND SILVER CANDLESTICKS"
+    },
+    {
+     "id": "5639-40744-0023",
+     "member": "LibriSpeech/test-clean/5639/40744/5639-40744-0023.flac",
+     "file": "5639-40744-0023.flac",
+     "sha256": "dd277d4b42ef738b14b59fa1d835988e71ec031e2f01d024279202edc26ad9c0",
+     "bytes": 196910,
+     "duration": 13.92,
+     "text": "WHEN THE BOY WALKED THROUGH THE STREETS BLESSINGS WERE SHOWERED UPON HIM BY ALL WHO SAW HIM BLESSINGS UPON HIS BEAUTY UPON THE MOTHER THAT BORE HIM UPON THE FATHER THAT BEGOT HIM UPON THOSE WHO BROUGHT HIM UP SO WELL"
+    },
+    {
+     "id": "5639-40744-0001",
+     "member": "LibriSpeech/test-clean/5639/40744/5639-40744-0001.flac",
+     "file": "5639-40744-0001.flac",
+     "sha256": "1ebdee7e694543ec03aaee954ce90a7b27911c24423b1a67f872cd82a426f59d",
+     "bytes": 202495,
+     "duration": 12.44,
+     "text": "SECURE AS HE THOUGHT IN THE CAREFUL ADMINISTRATION OF JUSTICE IN THAT CITY AND THE CHARACTER OF ITS WELL DISPOSED INHABITANTS THE GOOD HIDALGO WAS FAR FROM THINKING THAT ANY DISASTER COULD BEFAL HIS FAMILY"
+    },
+    {
+     "id": "260-123440-0018",
+     "member": "LibriSpeech/test-clean/260/123440/260-123440-0018.flac",
+     "file": "260-123440-0018.flac",
+     "sha256": "a80d66d866b8f9114094301a965a7b6d0a62d9467c96885ff1098a27f5b02cb4",
+     "bytes": 70026,
+     "duration": 3.64,
+     "text": "I AM VERY TIRED OF SWIMMING ABOUT HERE O MOUSE"
+    },
+    {
+     "id": "260-123440-0004",
+     "member": "LibriSpeech/test-clean/260/123440/260-123440-0004.flac",
+     "file": "260-123440-0004.flac",
+     "sha256": "288d22f60ab2527ac2e4035a16c9095438c71deed8becde769d91a964234d139",
+     "bytes": 213575,
+     "duration": 12.02,
+     "text": "ALICE TOOK UP THE FAN AND GLOVES AND AS THE HALL WAS VERY HOT SHE KEPT FANNING HERSELF ALL THE TIME SHE WENT ON TALKING DEAR DEAR HOW QUEER EVERYTHING IS TO DAY"
+    },
+    {
+     "id": "260-123440-0001",
+     "member": "LibriSpeech/test-clean/260/123440/260-123440-0001.flac",
+     "file": "260-123440-0001.flac",
+     "sha256": "449a66d0f644eb6ff82a52fc4c45b3dbf96daf10d4cef97877e7789b46f42346",
+     "bytes": 30751,
+     "duration": 1.74,
+     "text": "POOR ALICE"
+    },
+    {
+     "id": "260-123440-0002",
+     "member": "LibriSpeech/test-clean/260/123440/260-123440-0002.flac",
+     "file": "260-123440-0002.flac",
+     "sha256": "f5497179cc011bb2d0a131789b68d322ef332a5c2da600df679873e7d981430e",
+     "bytes": 255534,
+     "duration": 14.715,
+     "text": "IT WAS THE WHITE RABBIT RETURNING SPLENDIDLY DRESSED WITH A PAIR OF WHITE KID GLOVES IN ONE HAND AND A LARGE FAN IN THE OTHER HE CAME TROTTING ALONG IN A GREAT HURRY MUTTERING TO HIMSELF AS HE CAME OH THE DUCHESS THE DUCHESS"
+    },
+    {
+     "id": "260-123440-0007",
+     "member": "LibriSpeech/test-clean/260/123440/260-123440-0007.flac",
+     "file": "260-123440-0007.flac",
+     "sha256": "87cb8fbcddb28a25deeb6ce7a889312eaede1ef07d26ebfdafe86c2a400ab493",
+     "bytes": 65496,
+     "duration": 3.385,
+     "text": "I ALMOST THINK I CAN REMEMBER FEELING A LITTLE DIFFERENT"
+    },
+    {
+     "id": "7729-102255-0045",
+     "member": "LibriSpeech/test-clean/7729/102255/7729-102255-0045.flac",
+     "file": "7729-102255-0045.flac",
+     "sha256": "52b2863422cf066b046facaf8c9608e81179a61be437b8e321c2832b2119805c",
+     "bytes": 123940,
+     "duration": 6.805,
+     "text": "CAPTAIN MARTIN SAID I SHALL GIVE YOU A PISTOL TO HELP PROTECT YOURSELF IF WORSE COMES TO WORST"
+    },
+    {
+     "id": "7729-102255-0041",
+     "member": "LibriSpeech/test-clean/7729/102255/7729-102255-0041.flac",
+     "file": "7729-102255-0041.flac",
+     "sha256": "e8743423540b2a32a4a51473ba5812455c854920875c0fa2ce59736936274042",
+     "bytes": 241422,
+     "duration": 12.415,
+     "text": "THE WHOLE PROCEEDING WAS SO CHILDISH THE MISERABLE PLOT SO TRANSPARENT THE OUTRAGE SO GROSS AS TO BRING DISGUST TO THE BETTER CLASS OF BORDER RUFFIANS WHO WERE WITNESSES AND ACCESSORIES"
+    },
+    {
+     "id": "7729-102255-0012",
+     "member": "LibriSpeech/test-clean/7729/102255/7729-102255-0012.flac",
+     "file": "7729-102255-0012.flac",
+     "sha256": "438b540a2a84f8a9ffcec80aae8ab08dd95a1d9f829eeb89164192978d5672cd",
+     "bytes": 81324,
+     "duration": 4.075,
+     "text": "SEVERAL HUNDRED FREE STATE MEN PROMPTLY RESPONDED TO THE SUMMONS"
+    },
+    {
+     "id": "7729-102255-0031",
+     "member": "LibriSpeech/test-clean/7729/102255/7729-102255-0031.flac",
+     "file": "7729-102255-0031.flac",
+     "sha256": "a70927141540999713fe2f4f11292f5430ac022327cd523bfce6bdc6ffab7824",
+     "bytes": 125167,
+     "duration": 6.75,
+     "text": "HE CONTINUED HIS PRETENDED SEARCH AND TO GIVE COLOR TO HIS ERRAND MADE TWO ARRESTS"
+    },
+    {
+     "id": "7729-102255-0008",
+     "member": "LibriSpeech/test-clean/7729/102255/7729-102255-0008.flac",
+     "file": "7729-102255-0008.flac",
+     "sha256": "af65b207cdf2e382216ff88142563e5274896ba3ad8568775587dd54d62ff092",
+     "bytes": 345795,
+     "duration": 19.065,
+     "text": "ALL THE TERRITORIAL DIGNITARIES WERE PRESENT GOVERNOR SHANNON PRESIDED JOHN CALHOUN THE SURVEYOR GENERAL MADE THE PRINCIPAL SPEECH A DENUNCIATION OF THE ABOLITIONISTS SUPPORTING THE TOPEKA MOVEMENT CHIEF JUSTICE LECOMPTE DIGNIFIED THE OCCASION WITH APPROVING REMARKS"
+    },
+    {
+     "id": "2094-142345-0059",
+     "member": "LibriSpeech/test-clean/2094/142345/2094-142345-0059.flac",
+     "file": "2094-142345-0059.flac",
+     "sha256": "d9e10be49f95d6c601d63e3c229eeda6cf29a03a040d10078bf6cd0975964554",
+     "bytes": 189177,
+     "duration": 10.01,
+     "text": "THIS MISSUS POYSER SAID BLUSHING AND BELIEVING THAT THE CAPTAIN WAS REALLY INTERESTED IN HER MILK PANS AND WOULD ADJUST HIS OPINION OF HER TO THE APPEARANCE OF HER DAIRY"
+    },
+    {
+     "id": "2094-142345-0045",
+     "member": "LibriSpeech/test-clean/2094/142345/2094-142345-0045.flac",
+     "file": "2094-142345-0045.flac",
+     "sha256": "1d62c5f9b72822a151674a2d6df7e11829ffd140b4bb12a9090b3df763ea7d9d",
+     "bytes": 62933,
+     "duration": 3.005,
+     "text": "OH SIR DON'T MENTION IT SAID MISSUS POYSER"
+    },
+    {
+     "id": "2094-142345-0053",
+     "member": "LibriSpeech/test-clean/2094/142345/2094-142345-0053.flac",
+     "file": "2094-142345-0053.flac",
+     "sha256": "41167c43cf7e66d8dc66354ac0dce53d157519b2ec8c7f7fe2c3f96235bf5594",
+     "bytes": 75299,
+     "duration": 3.395,
+     "text": "FOR IF HE'S ANYWHERE ON THE FARM WE CAN SEND FOR HIM IN A MINUTE"
+    },
+    {
+     "id": "2094-142345-0004",
+     "member": "LibriSpeech/test-clean/2094/142345/2094-142345-0004.flac",
+     "file": "2094-142345-0004.flac",
+     "sha256": "de2ffb60c2b2a5d1c9c3cce598322ded7b9870252387df184019124d57137b33",
+     "bytes": 55259,
+     "duration": 2.64,
+     "text": "AND WHAT THROUGH THE LEFT HAND WINDOW"
+    },
+    {
+     "id": "2094-142345-0051",
+     "member": "LibriSpeech/test-clean/2094/142345/2094-142345-0051.flac",
+     "file": "2094-142345-0051.flac",
+     "sha256": "063d9d8b04c0321bb824b57ab7bab65b63353fb5c0eea8f09f327f642f8076a1",
+     "bytes": 106897,
+     "duration": 5.31,
+     "text": "NO THANK YOU I'LL JUST LOOK AT THE WHELPS AND LEAVE A MESSAGE ABOUT THEM WITH YOUR SHEPHERD"
+    },
+    {
+     "id": "3575-170457-0016",
+     "member": "LibriSpeech/test-clean/3575/170457/3575-170457-0016.flac",
+     "file": "3575-170457-0016.flac",
+     "sha256": "4bb3d2070e18ea324ad48f7f3d84a1c71fff283d632e3081a88df601b395fbd4",
+     "bytes": 35555,
+     "duration": 1.695,
+     "text": "FAREWELL MADAM"
+    },
+    {
+     "id": "3575-170457-0023",
+     "member": "LibriSpeech/test-clean/3575/170457/3575-170457-0023.flac",
+     "file": "3575-170457-0023.flac",
+     "sha256": "2a062109a1c67a7b724649ce0e0d43c8e06c992a43fc9e21758db2c7ec83fc1d",
+     "bytes": 179401,
+     "duration": 9.095,
+     "text": "I CAREFULLY AVOID ANY APPEARANCE OF PREOCCUPATION AND ECCENTRICITY WHICH MIGHT LEAD THOSE I LIVE AMONGST TO SUSPECT THE NATURE OF MY PURSUITS"
+    },
+    {
+     "id": "3575-170457-0020",
+     "member": "LibriSpeech/test-clean/3575/170457/3575-170457-0020.flac",
+     "file": "3575-170457-0020.flac",
+     "sha256": "39daa9ebbb087564cf6b1cb1c7edcc21fc5bbac1060d4ffd04eb8c7fea427dc4",
+     "bytes": 174712,
+     "duration": 8.645,
+     "text": "I KNOW THE FIRST LETTER I WROTE TO YOU WAS ALL SENSELESS TRASH FROM BEGINNING TO END BUT I AM NOT ALTOGETHER THE IDLE DREAMING BEING IT WOULD SEEM TO DENOTE"
+    },
+    {
+     "id": "3575-170457-0025",
+     "member": "LibriSpeech/test-clean/3575/170457/3575-170457-0025.flac",
+     "file": "3575-170457-0025.flac",
+     "sha256": "6febbd60b33d8dac809cce01d2931348bf6884c7f56e87ad5ab61aecaaf21a8f",
+     "bytes": 172709,
+     "duration": 9.205,
+     "text": "AGAIN I THANK YOU THIS INCIDENT I SUPPOSE WILL BE RENEWED NO MORE IF I LIVE TO BE AN OLD WOMAN I SHALL REMEMBER IT THIRTY YEARS HENCE AS A BRIGHT DREAM"
+    },
+    {
+     "id": "3575-170457-0037",
+     "member": "LibriSpeech/test-clean/3575/170457/3575-170457-0037.flac",
+     "file": "3575-170457-0037.flac",
+     "sha256": "5180faa0af5e9c3b66b55b8d016c67a5609fc113133dd8d7a887da70dbe4ef24",
+     "bytes": 272824,
+     "duration": 14.2,
+     "text": "IF CHRISTIAN PERFECTION BE NECESSARY TO SALVATION I SHALL NEVER BE SAVED MY HEART IS A VERY HOTBED FOR SINFUL THOUGHTS AND WHEN I DECIDE ON AN ACTION I SCARCELY REMEMBER TO LOOK TO MY REDEEMER FOR DIRECTION"
+    },
+    {
+     "id": "7127-75947-0011",
+     "member": "LibriSpeech/test-clean/7127/75947/7127-75947-0011.flac",
+     "file": "7127-75947-0011.flac",
+     "sha256": "e1bbd2d0c4d8800ab59fe4f4a1f027601dc96c787ad8bf50fd97e051270ee72b",
+     "bytes": 69577,
+     "duration": 3.62,
+     "text": "REMAIN I IMPLORE YOU THE EVENING IS MOST LOVELY"
+    },
+    {
+     "id": "7127-75947-0004",
+     "member": "LibriSpeech/test-clean/7127/75947/7127-75947-0004.flac",
+     "file": "7127-75947-0004.flac",
+     "sha256": "4c31e7243eb083ca91a6a491288533bef6cf23ee2c0b8ad7b0e0a8b0436e0979",
+     "bytes": 37632,
+     "duration": 1.905,
+     "text": "EXPLAIN YOURSELF"
+    },
+    {
+     "id": "7127-75947-0040",
+     "member": "LibriSpeech/test-clean/7127/75947/7127-75947-0040.flac",
+     "file": "7127-75947-0040.flac",
+     "sha256": "aa02839c35fc214b5dc0115abda669ca178c7db5b03c74af40f12df06eec59f1",
+     "bytes": 242107,
+     "duration": 13.79,
+     "text": "IN THIS WAY THE FETE OF THE WHOLE COURT WAS A FETE ALSO FOR THE MYSTERIOUS INHABITANTS OF THE FOREST FOR CERTAINLY THE DEER IN THE BRAKE THE PHEASANT ON THE BRANCH THE FOX IN ITS HOLE WERE ALL LISTENING"
+    },
+    {
+     "id": "7127-75947-0010",
+     "member": "LibriSpeech/test-clean/7127/75947/7127-75947-0010.flac",
+     "file": "7127-75947-0010.flac",
+     "sha256": "26d778ef3c4b9a9d8f405bf5e1d02f4198bcd72456a54f01f4eafb40a8082552",
+     "bytes": 175335,
+     "duration": 8.865,
+     "text": "WHEN SHE PERCEIVED THE YOUNG MAN SHE ROSE LIKE A WOMAN SURPRISED IN THE MIDST OF IDEAS SHE WAS DESIROUS OF CONCEALING FROM HERSELF"
+    },
+    {
+     "id": "7127-75947-0000",
+     "member": "LibriSpeech/test-clean/7127/75947/7127-75947-0000.flac",
+     "file": "7127-75947-0000.flac",
+     "sha256": "b06cfec9f44db0fc53fdc1195c7b2431838269ad49c3d96f41836d075740914f",
+     "bytes": 347115,
+     "duration": 17.97,
+     "text": "EVERY ONE COULD OBSERVE HIS AGITATION AND PROSTRATION A PROSTRATION WHICH WAS INDEED THE MORE REMARKABLE SINCE PEOPLE WERE NOT ACCUSTOMED TO SEE HIM WITH HIS ARMS HANGING LISTLESSLY BY HIS SIDE HIS HEAD BEWILDERED AND HIS EYES WITH ALL THEIR BRIGHT INTELLIGENCE BEDIMMED"
+    },
+    {
+     "id": "2961-960-0012",
+     "member": "LibriSpeech/test-clean/2961/960/2961-960-0012.flac",
+     "file": "2961-960-0012.flac",
+     "sha256": "f826af04b7df4abba8fa174409ac319b5792d787066060042653cf38fa877f4c",
+     "bytes": 132837,
+     "duration": 6.89,
+     "text": "MANY IF NOT ALL THE ELEMENTS OF THE PRE SOCRATIC PHILOSOPHY ARE INCLUDED IN THE TIMAEUS"
+    },
+    {
+     "id": "2961-960-0022",
+     "member": "LibriSpeech/test-clean/2961/960/2961-960-0022.flac",
+     "file": "2961-960-0022.flac",
+     "sha256": "d14fbb6c6224147ae2205c4b4abdf4b63b27c78a0ddd785cd8b3ee25d29ad8e5",
+     "bytes": 141169,
+     "duration": 7.425,
+     "text": "PLATO HAD NOT THE COMMAND OF HIS MATERIALS WHICH WOULD HAVE ENABLED HIM TO PRODUCE A PERFECT WORK OF ART"
+    },
+    {
+     "id": "2961-960-0006",
+     "member": "LibriSpeech/test-clean/2961/960/2961-960-0006.flac",
+     "file": "2961-960-0006.flac",
+     "sha256": "d4d7c0da46b3191ed90d3f4175e2b3b7ff1f02f59e8e5c83143dcdc6ea1d2953",
+     "bytes": 295877,
+     "duration": 15.725,
+     "text": "THE FANCIES OF THE NEO PLATONISTS ARE ONLY INTERESTING TO US BECAUSE THEY EXHIBIT A PHASE OF THE HUMAN MIND WHICH PREVAILED WIDELY IN THE FIRST CENTURIES OF THE CHRISTIAN ERA AND IS NOT WHOLLY EXTINCT IN OUR OWN DAY"
+    },
+    {
+     "id": "2961-960-0015",
+     "member": "LibriSpeech/test-clean/2961/960/2961-960-0015.flac",
+     "file": "2961-960-0015.flac",
+     "sha256": "e801dfb56618d4faccd73d88725ca24c961e5e5be141e0932406d37becf9cca7",
+     "bytes": 149203,
+     "duration": 7.83,
+     "text": "THE STYLE AND PLAN OF THE TIMAEUS DIFFER GREATLY FROM THAT OF ANY OTHER OF THE PLATONIC DIALOGUES"
+    },
+    {
+     "id": "2961-960-0005",
+     "member": "LibriSpeech/test-clean/2961/960/2961-960-0005.flac",
+     "file": "2961-960-0005.flac",
+     "sha256": "0d0c423dc55c236b5f55ca2fc4ab87b39b85d5d2a34585573afe6038ebf3a091",
+     "bytes": 193719,
+     "duration": 10.355,
+     "text": "IN THE PRESENT DAY WE ARE WELL AWARE THAT AN ANCIENT PHILOSOPHER IS TO BE INTERPRETED FROM HIMSELF AND BY THE CONTEMPORARY HISTORY OF THOUGHT"
+    },
+    {
+     "id": "8463-287645-0008",
+     "member": "LibriSpeech/test-clean/8463/287645/8463-287645-0008.flac",
+     "file": "8463-287645-0008.flac",
+     "sha256": "314be02258cadb927690ee20ade1283cdc3835e87d1fe1b32a206d9ac808da1e",
+     "bytes": 64214,
+     "duration": 3.325,
+     "text": "AS USUAL NOTHING WAS DONE IN THE WAY OF PUNISHMENT"
+    },
+    {
+     "id": "8463-287645-0010",
+     "member": "LibriSpeech/test-clean/8463/287645/8463-287645-0010.flac",
+     "file": "8463-287645-0010.flac",
+     "sha256": "7a0e54163a0d243f619b5ebe79df0ddb2ee64e43485d67cd766d9796765c06ae",
+     "bytes": 85386,
+     "duration": 4.325,
+     "text": "HE WORKED ME VERY HARD HE WANTED TO BE BEATING ME ALL THE TIME"
+    },
+    {
+     "id": "8463-287645-0003",
+     "member": "LibriSpeech/test-clean/8463/287645/8463-287645-0003.flac",
+     "file": "8463-287645-0003.flac",
+     "sha256": "224879b9c8804034671dc7f765e8a301d03be9a407727a82458dc3349a0de6c4",
+     "bytes": 150218,
+     "duration": 7.905,
+     "text": "OF THIS PARTY EDWARD A BOY OF SEVENTEEN CALLED FORTH MUCH SYMPATHY HE TOO WAS CLAIMED BY HOLLAN"
+    },
+    {
+     "id": "8463-287645-0006",
+     "member": "LibriSpeech/test-clean/8463/287645/8463-287645-0006.flac",
+     "file": "8463-287645-0006.flac",
+     "sha256": "80bc6a26a429f3fee0d04f3dd4f437d34c57dec0122fb77b01a4ad4f55d66ea8",
+     "bytes": 162558,
+     "duration": 7.71,
+     "text": "THE DOCTOR WHO ATTENDED THE INJURED CREATURE IN THIS CASE WAS SIMPLY TOLD THAT SHE SLIPPED AND FELL DOWN STAIRS AS SHE WAS COMING DOWN"
+    },
+    {
+     "id": "8463-287645-0000",
+     "member": "LibriSpeech/test-clean/8463/287645/8463-287645-0000.flac",
+     "file": "8463-287645-0000.flac",
+     "sha256": "055fc9fb67be0272bde9aaf2019bb6a306c652a823ca62b0cb61cdf0a27c05c4",
+     "bytes": 102050,
+     "duration": 4.73,
+     "text": "THIS WAS WHAT DID THE MISCHIEF SO FAR AS THE RUNNING AWAY WAS CONCERNED"
+    }
+   ]
+  }
+ }
+}
