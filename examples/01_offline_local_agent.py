@@ -6,7 +6,7 @@ to stop.
 
 Setup (once)::
 
-    pip install 'voice-agent-next[audio,sherpa-onnx,kokoro,silero,smart-turn]'
+    pip install 'voice-agent-next[audio,sherpa-onnx,openai,kokoro,silero,smart-turn]'
     ollama serve & ollama pull LiquidAI/lfm2.5-1.2b-instruct
     van presets local-cpu            # checks everything and prints what is missing
 

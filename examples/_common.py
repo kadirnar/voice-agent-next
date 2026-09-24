@@ -32,7 +32,9 @@ def log_conversation(session: AgentSession, prefix: str = "") -> None:
         if not isinstance(m, TurnMetrics):
             return  # per-component metrics (STT/LLM/TTS...) are also emitted here
         flush_agent()
-        if m.voice_to_voice is not None:
+        # (a file fed faster than real time can make an engine's speech-end estimate land
+        # after its first audio: such a negative number means nothing, so skip it)
+        if m.voice_to_voice is not None and m.voice_to_voice >= 0:
             print(f"{prefix}       (voice-to-voice {m.voice_to_voice * 1000:.0f} ms)", flush=True)
 
     def flush_agent() -> None:
