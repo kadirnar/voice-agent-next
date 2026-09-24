@@ -8,8 +8,9 @@ is labelled:
 
 * **labels** — 10 ms frames of each *clean* utterance whose level is within 40 dB of its
   loudest frame and at least 10 dB above its noise floor (10th percentile of the frame
-  levels); dips shorter than 150 ms inside speech (stop closures, short breaths) are
-  bridged and runs shorter than 30 ms dropped. An utterance's span (for onset / offset
+  levels; this floor rule never asks for more than 20 dB below the peak); dips shorter
+  than 150 ms inside speech (stop closures, short breaths) are bridged and runs shorter
+  than 30 ms dropped. An utterance's span (for onset / offset
   latency) is its first to last speech frame;
 * **layout** — ``lead`` seconds of noise, then every utterance followed by a gap drawn
   uniformly from ``gap`` (seeded, rounded to 10 ms), then ``tail`` seconds of noise only;
@@ -181,8 +182,9 @@ def speech_labels(
     finite = levels[np.isfinite(levels)]
     if finite.size == 0:
         return np.zeros(len(levels), dtype=bool)
-    floor = float(np.percentile(finite, 10))
-    thr = max(float(finite.max()) - range_db, floor + floor_margin_db)
+    peak = float(finite.max())
+    floor = float(np.percentile(np.where(np.isfinite(levels), levels, -150.0), 10))
+    thr = max(peak - range_db, min(floor + floor_margin_db, peak - 20.0))
     mask = np.asarray(levels >= thr, dtype=bool)
     out = np.zeros_like(mask)
     min_frames = max(1, round(min_run / FRAME))

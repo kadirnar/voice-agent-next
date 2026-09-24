@@ -181,7 +181,7 @@ class Scenario(BaseModel):
             source = turn.source or self.stimuli
             if source == "wav" and not turn.wav:
                 raise ValueError(f"turn {i}: 'wav' stimuli need a `wav:` path")
-            if source == "tts" and not turn.text:
+            if source == "tts" and not (turn.text or turn.parts):
                 raise ValueError(f"turn {i}: 'tts' stimuli need `text:`")
             if source == "tts" and self.tts is None:
                 raise ValueError(f"turn {i}: 'tts' stimuli need a scenario-level `tts:` spec")
