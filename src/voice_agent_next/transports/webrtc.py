@@ -848,11 +848,11 @@ class WebRTCAgentServer:
         for a malformed offer and :class:`~voice_agent_next.errors.TransportError` when the
         server is closing or full (map them to HTTP 400 / 503 in your framework).
         """
+        sdp, kind = _parse_offer(request)
         if self._closing:
             raise _HttpError(HTTPStatus.SERVICE_UNAVAILABLE, "server is shutting down")
         if self.max_sessions is not None and len(self._transports) >= self.max_sessions:
             raise _HttpError(HTTPStatus.SERVICE_UNAVAILABLE, "too many sessions")
-        sdp, kind = _parse_offer(request)
         transport = WebRTCTransport(**self._transport_options)
         transport.offer = dict(request)
         self._transports.add(transport)
