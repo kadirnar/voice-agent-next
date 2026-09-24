@@ -56,6 +56,24 @@ jobs:
       - name: providers import without optional dependencies
         run: uv run van providers --json > /dev/null
 
+  # Provider tests that need optional SDKs (anthropic, openai, onnxruntime, faster-whisper,
+  # livekit, ...) are skipped by the jobs above; this job installs every extra.
+  test-extras:
+    name: test (ubuntu, py3.12, all extras)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: System audio library (sounddevice)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libportaudio2
+      - run: uv sync --all-extras
+      - run: uv run pytest -q
+      - run: uv run van providers --json > /dev/null
+
   # macOS / Windows minutes are expensive on private repos: run them on main, weekly,
   # manually, or on pull requests labelled `ci:full`.
   test-cross-platform:
