@@ -141,10 +141,12 @@ async def test_missed_replies_dead_air_and_greeting() -> None:
     assert answered.dead_air and not answered.missed
     assert answered.v2v_ms == pytest.approx(600, abs=60)  # the reply, not the greeting
     assert missed.missed and missed.dead_air and missed.v2v_ms is None
-    assert missed.agent_onset_s is None
+    assert missed.agent_onset_s is None and not missed.agent_audio
+    assert answered.agent_audio
     summary = results.summary
     assert summary.rates["dead_air_rate"] == 1.0 and summary.rates["missed_rate"] == 0.5
-    assert summary.counts["missed"] == 1
+    assert summary.counts["missed"] == 1 and summary.counts["missed_with_audio"] == 0
+    assert results.manifest.notes == []
     greeting = summary.metrics["greeting_ms"]
     assert greeting.n == 1 and greeting.p50 is not None
     assert greeting.p50 == pytest.approx(200, abs=40)  # response_delay applies to it too

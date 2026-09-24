@@ -96,8 +96,9 @@ with 95 % percentile-bootstrap confidence intervals (2,000 resamples, fixed seed
 **Reference VAD.** It slightly biases every latency, so it is explicit and configurable:
 `--reference-vad rms` (default: 10 ms frames at ≥ −40 dBFS, numpy-only, deterministic,
 independent of the engine under test), `rms:-45` (another threshold) or any registered
-VAD provider spec (`energy`, `silero` once installed). The choice is recorded in the
-manifest.
+VAD provider spec (`energy`, `silero` with the `silero` extra). The choice is recorded in
+the manifest. Speech models such as Silero do not treat the mock engine's synthetic tone as
+speech: keep `rms` for mock engines (the report notes "missed" turns that did play audio).
 
 ## Results
 

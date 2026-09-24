@@ -151,6 +151,9 @@ class LatencyItem(BaseModel):
     engine_ttfb_ms: float | None = None
     agent_speech_ms: float | None = None
     """Agent speech (reference VAD) between this turn and the next."""
+    agent_audio: bool = False
+    """Any agent audio was played after the user started this turn (transport playout log),
+    whether or not the reference VAD found speech in it."""
     missed: bool = False
     premature: bool = False
     dead_air: bool = False
@@ -365,6 +368,7 @@ def _analyze_session(
                 tts_ttfb_ms=_ms(_first(m.ttfb for m in comps if isinstance(m, TTSMetrics))),
                 engine_ttfb_ms=_ms(_first(m.ttfb for m in comps if isinstance(m, EngineMetrics))),
                 agent_speech_ms=_ms(agent_speech),
+                agent_audio=turn.reply_start is not None,
                 missed=missed,
                 premature=v2v is not None and v2v < 0,
                 dead_air=stim.expect_reply
@@ -452,6 +456,7 @@ def summarize_latency(
         "warmup_turns": sum(it.warmup for it in items),
         "replies": sum(it.v2v_ms is not None for it in main),
         "missed": sum(it.missed for it in main),
+        "missed_with_audio": sum(it.missed and it.agent_audio for it in main),
         "dead_air": sum(it.dead_air for it in main),
         "premature": sum(it.premature for it in main),
         "errors": sum(len(it.errors) for it in items),
@@ -699,6 +704,12 @@ async def _run_latency(
         )
     if any(s.get("aborted") for s in sessions):
         notes.append("At least one session closed early (see errors in summary.json).")
+    if counts["missed_with_audio"]:
+        notes.append(
+            f"{counts['missed_with_audio']} missed turn(s) had agent audio in which the reference "
+            "VAD found no speech onset: check --reference-vad (speech models such as Silero do "
+            "not treat the mock engine's synthetic tone as speech)."
+        )
     if counts["turns_measured"] == 0:
         notes.append("No turns in the headline population: increase --turns or lower warm-up.")
 
