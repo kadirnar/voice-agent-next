@@ -131,7 +131,31 @@ eager end of turn. It is zero when the final transcript only arrives after the
 endpointing delay, e.g. a local batch STT (faster-whisper takes ~360 ms after the VAD's
 0.25 s pause) with a confident turn detector (0.4 s).
 
-MEASUREMENTS
+Measured with `van bench latency` (voice-to-voice on the call recording, 19 measured
+turns of `latency-smoke`) on the mock cascade with injected latencies — STT final
+transcript 150 ms after the flush, LLM TTFT 400 ms, TTS first audio 150 ms, energy VAD:
+
+| configuration | v2v p50 off | v2v p50 on | saved | hits / waste |
+|---|---:|---:|---:|---:|
+| VAD only (commit at 0.6 s) | 1,194 ms | 1,005 ms | **−189 ms** | 20 / 0 |
+| VAD only + `preemptive_tts` | 1,194 ms | 1,005 ms | −189 ms | 20 / 0 |
+| fast STT (50 ms), LLM TTFT 300 ms, VAD only | 1,095 ms | 805 ms | **−290 ms** | 20 / 0 |
+| confident turn detector (commit at 0.4 s) | 1,027 ms | 1,027 ms | 0 | 0 / 0 |
+| VAD only, every turn said with a 0.4 s mid-turn pause | 1,216 ms | 1,027 ms | −189 ms | 12 / 12 (`resumed`) |
+
+The window between the final transcript (0.25 s VAD pause + 150 ms) and the commit is
+200 ms with VAD-only endpointing, so ~190 ms of the 400 ms TTFT is hidden (and nothing is
+left for `preemptive_tts` to hide); with a 50 ms STT the whole 300 ms TTFT is. With the
+confident turn detector the transcript arrives just after the 0.4 s commit point: no
+speculation starts, and nothing is wasted. Mid-turn pauses cost one discarded LLM call
+each (no tokens yet: the user resumed before the first one).
+
+On the fully local CPU stack (Silero, Smart Turn, faster-whisper `base`, Ollama
+`lfm2.5-1.2b`, Kokoro; `benchmarks/scenarios/latency-local.yaml`) no speculation starts at
+all — even with `preemptive_threshold: 0`: Smart Turn judges every question complete
+(commit at 0.4 s) and faster-whisper's final transcript only comes ~650 ms after the end
+of speech, so the turn is committed as soon as the transcript is known. It neither helps
+nor costs anything there (and the local LLM's warm TTFT is ~12 ms anyway).
 
 ## Why it is off by default
 
