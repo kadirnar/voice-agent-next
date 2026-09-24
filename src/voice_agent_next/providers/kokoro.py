@@ -46,7 +46,7 @@ from ..hardware import select_onnx_backend
 from ..models import ModelFile, register_model
 from ..registry import register_provider
 from ..text.sentences import SentenceSegmenter
-from ..tts import TTS, ChunkedStream
+from ..tts import TTS, ChunkedStream, NormalizeOption
 from ..utils.clock import now
 from ..utils.deps import is_installed, require
 from ..utils.download import cache_dir, download
@@ -346,9 +346,14 @@ class KokoroTTS(TTS):
         g2p: optional ``(text, lang) -> phonemes`` function used instead of the built-in
             espeak-ng phonemizer (e.g. misaki for better Japanese/Chinese).
         clean_text: strip markdown/emoji before synthesis.
+        normalize: rewrite numbers, amounts, dates, e-mails, URLs... into words before
+            synthesis (:mod:`voice_agent_next.text.normalize`). Default: on (espeak-ng
+            reads plain numbers but not amounts, times, e-mails or URLs); needs ``num2words``
+            outside English.
     """
 
     provider = "kokoro"
+    normalize_by_default = True
 
     def __init__(
         self,
@@ -368,6 +373,7 @@ class KokoroTTS(TTS):
         trim: bool = True,
         g2p: Callable[[str, str], str] | None = None,
         clean_text: bool = True,
+        normalize: NormalizeOption = None,
     ) -> None:
         model_id = _normalize_model(model or DEFAULT_MODEL)
         variant = KOKORO_MODELS.get(model_id)
@@ -393,6 +399,7 @@ class KokoroTTS(TTS):
             sample_rate=SAMPLE_RATE,
             voice=voice or variant.default_voice,
             clean_text=clean_text,
+            normalize=normalize,
         )
         self.speed = float(speed)
         self.lang = lang
@@ -416,6 +423,9 @@ class KokoroTTS(TTS):
         self._executor: ThreadPoolExecutor | None = None
 
     # ------------------------------------------------------------------ public API
+    def text_language(self, voice: str | None) -> str | None:
+        return self.lang or lang_for_voice(voice or self.voice or "a")
+
     def _synthesize(self, text: str, *, voice: str | None) -> ChunkedStream:
         return _KokoroChunkedStream(self, text, voice=voice)
 

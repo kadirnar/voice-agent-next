@@ -53,7 +53,7 @@ from ..errors import ConfigurationError, ProviderError
 from ..registry import register_provider
 from ..stt import WordTiming
 from ..text.sentences import SentenceSegmenter
-from ..tts import TTS, ChunkedStream, SynthesizedAudio
+from ..tts import TTS, ChunkedStream, NormalizeOption, SynthesizedAudio
 from ..utils.clock import now
 from ..utils.deps import is_installed, require
 from ..utils.download import cache_dir
@@ -271,9 +271,13 @@ class PocketTTS(TTS):
         truncate_prompt: use only the first 30 s of a voice prompt.
         voice_cache_dir: where cloned voice states are cached (default: the model cache).
         clean_text: strip markdown/emoji before synthesis.
+        normalize: rewrite numbers, amounts, dates, e-mails, URLs... into words before
+            synthesis (:mod:`voice_agent_next.text.normalize`). Default: on (the
+            model reads raw digits badly); needs ``num2words`` outside English.
     """
 
     provider = "pocket-tts"
+    normalize_by_default = True
 
     def __init__(
         self,
@@ -293,6 +297,7 @@ class PocketTTS(TTS):
         truncate_prompt: bool = True,
         voice_cache_dir: str | os.PathLike[str] | None = None,
         clean_text: bool = True,
+        normalize: NormalizeOption = None,
     ) -> None:
         model_language, model_voice = parse_model(model)
         if language is not None:
@@ -326,6 +331,7 @@ class PocketTTS(TTS):
             sample_rate=SAMPLE_RATE,
             voice=default_voice,
             clean_text=clean_text,
+            normalize=normalize,
         )
         self.temperature = temperature
         self.sampler_decode_steps = sampler_decode_steps
@@ -345,6 +351,9 @@ class PocketTTS(TTS):
         self._active: set[threading.Event] = set()
 
     # ------------------------------------------------------------------ public API
+    def text_language(self, voice: str | None) -> str | None:
+        return self.language or None  # "english_2026-04" -> the English normalizer
+
     def _synthesize(self, text: str, *, voice: str | None) -> ChunkedStream:
         return _PocketChunkedStream(self, text, voice=voice)
 

@@ -102,7 +102,7 @@ class NormalizedText:
         i = bisect.bisect_right(self._n_starts, pos - 1 if end else pos) - 1
         if i < 0:
             return pos
-        n0, n1, o0, o1 = self._spans[i]
+        _, n1, o0, o1 = self._spans[i]
         if (pos <= n1) if end else (pos < n1):
             return o1 if end else o0
         return o1 + (pos - n1)
@@ -133,14 +133,16 @@ class WordAligner:
     Feed the normalized texts in the order they are synthesized (:meth:`add`), then the
     TTS's word timings in order (:meth:`map`). Consecutive spoken words that come from one
     original word ("forty-two dollars and fifty cents" <- "$42.50") are merged into one
-    timing that carries the original word; such a group is held back until its last word
-    is known, so call :meth:`finish` at the end of a segment to release it.
+    timing that carries the original word. A group is released as soon as its last spoken
+    word is seen; one whose words are split across calls to :meth:`map` is held back until
+    then, so call :meth:`finish` at the end of a segment to release it.
     """
 
     def __init__(self) -> None:
         self._keys: list[str] = []  # per normalized token
         self._group: list[int] = []  # token -> index in self._words
         self._words: list[str] = []  # original text of every group
+        self._last: list[int] = []  # group -> index of its last token
         self._cursor = 0
         self._rest = ""  # unmatched remainder of the current token's key (split words)
         self._pending: tuple[int, float, float, float | None] | None = None
@@ -156,8 +158,10 @@ class WordAligner:
             else:
                 group_start, group_end = o0, o1
                 self._words.append(original[o0:o1].strip())
+                self._last.append(-1)
             self._keys.append(_key(m.group()))
             self._group.append(len(self._words) - 1)
+            self._last[-1] = len(self._keys) - 1
 
     def _locate(self, word: str) -> int | None:
         """Index of the normalized token ``word`` belongs to (advances the cursor)."""
@@ -195,10 +199,13 @@ class WordAligner:
             p = self._pending
             if p is not None and p[0] == g:
                 self._pending = (g, p[1], max(p[2], w.end), p[3])
-                continue
-            if p is not None:
-                out.append(self._release(p))
-            self._pending = (g, w.start, w.end, w.confidence)
+            else:
+                if p is not None:
+                    out.append(self._release(p))
+                self._pending = (g, w.start, w.end, w.confidence)
+            if i >= self._last[g] and not self._rest:  # the group's last word: complete
+                out.append(self._release(self._pending))
+                self._pending = None
         return out
 
     def _release(self, p: tuple[int, float, float, float | None]) -> WordTiming:
@@ -278,11 +285,16 @@ def _pad(spoken: str, text: str, start: int, end: int) -> str:
 
 # --------------------------------------------------------------- English number words
 _ONES = (
-    "zero one two three four five six seven eight nine ten eleven twelve thirteen "
-    "fourteen fifteen sixteen seventeen eighteen nineteen"
-).split()
-_TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
-_SCALES = ["", "thousand", "million", "billion", "trillion", "quadrillion", "quintillion"]
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+    "eighteen", "nineteen",
+)  # fmt: skip
+_TENS = (
+    "_", "_", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+)  # fmt: skip
+_SCALES = (
+    "_", "thousand", "million", "billion", "trillion", "quadrillion", "quintillion",
+)  # fmt: skip
 _ORDINAL_IRREGULAR = {
     "one": "first", "two": "second", "three": "third", "five": "fifth", "eight": "eighth",
     "nine": "ninth", "twelve": "twelfth",
@@ -455,12 +467,15 @@ _YEAR_CONTEXT = re.compile(
     r"born|est)\W*$",
     re.IGNORECASE,
 )
-_SPELL_ACRONYMS = frozenset(
-    "USA UK EU UN UAE AI API ID CEO CFO CTO COO FAQ URL PDF SMS TV PC GPS ATM DIY FBI CIA "
-    "BBC CNN HR IP VIP USB CPU GPU LLM TTS STT SQL HTML CSS NYC LA DC NY SF PS IBM HP "
-    "AWS SUV RV ETA EST PST CST MST GMT UTC BTW FYI IOU DNA RNA ICU ER MD PhD MBA BA BS "
-    "ISP VPN LAN WIFI PR QA UX UI OS IQ KPI ROI B2B".split()
-)
+_SPELL_ACRONYMS = frozenset({
+    "USA", "UK", "EU", "UN", "UAE", "AI", "API", "ID", "CEO", "CFO", "CTO", "COO", "FAQ",
+    "URL", "PDF", "SMS", "TV", "PC", "GPS", "ATM", "DIY", "FBI", "CIA", "BBC", "CNN", "HR",
+    "IP", "VIP", "USB", "CPU", "GPU", "LLM", "TTS", "STT", "SQL", "HTML", "CSS", "NYC",
+    "LA", "DC", "NY", "SF", "PS", "IBM", "HP", "AWS", "SUV", "RV", "ETA", "EST", "PST",
+    "CST", "MST", "GMT", "UTC", "BTW", "FYI", "IOU", "DNA", "RNA", "ICU", "ER", "MD",
+    "MBA", "BA", "BS", "ISP", "VPN", "LAN", "PR", "QA", "UX", "UI", "OS", "IQ", "KPI",
+    "ROI",
+})  # fmt: skip
 _ROMAN = re.compile(r"^[IVXLCDM]+$")
 _ABBREVIATIONS = {
     # title before a name -> word
@@ -477,9 +492,10 @@ _ABBREVIATIONS = {
     "approx": "approximately", "etc": "et cetera", "vs": "versus", "est": "established",
     "min": "minimum", "max": "maximum", "tel": "telephone", "Tel": "telephone",
 }  # fmt: skip
-_TITLES = frozenset(
-    "Mr Mrs Ms Prof Gen Capt Lt Sgt Col Gov Sen Rep Rev Hon Mt Ft".split()
-)  # never end a sentence
+_TITLES = frozenset({
+    "Mr", "Mrs", "Ms", "Prof", "Gen", "Capt", "Lt", "Sgt", "Col", "Gov", "Sen", "Rep",
+    "Rev", "Hon", "Mt", "Ft",
+})  # fmt: skip
 _URL_SYMBOLS = {
     ".": "dot", "/": "slash", "-": "dash", "_": "underscore", "?": "question mark",
     "=": "equals", "&": "and", "#": "hash", "~": "tilde", "+": "plus", ":": "colon",
@@ -554,7 +570,8 @@ class EnglishNormalizer(RuleNormalizer):
              r"(?:,?\s+(\d{4})\b(?![.,]\d))?", self._day_month),
             (rf"\b({_MONTH})\.?,?\s+(\d{{4}})\b(?![.,]\d)", self._month_year),
             (r"(?<![\w.])([-−])?([$€£¥₹])\s?(\d{1,3}(?:,\d{3})+|\d+)?(?:\.(\d+))?"
-             r"(?:(k|K|mn|m|M|bn|b|B|t|T)\b|\s?(thousand|million|billion|trillion)\b)?", self._currency),
+             r"(?:(k|K|mn|m|M|bn|b|B|t|T)\b|\s?(thousand|million|billion|trillion)\b)?",
+             self._currency),
             (rf"(?<![\w.,])([-−])?({_NUM})(?:\.(\d+))?\s?(USD|EUR|GBP|JPY|INR|CAD|AUD)\b",
              self._currency_code),
             (rf"(?<![\w.,])([-−])?({_NUM}|(?=\.\d))(?:\.(\d+))?\s?%", self._percent),
@@ -736,7 +753,8 @@ class EnglishNormalizer(RuleNormalizer):
         century, decade, short, bare = m.groups()
         if bare and not re.search(
             r"\b(?:the|in|early|late|mid|her|his|their|my|your|our|its)\W*$",
-            _prev_words(text, m.start()), re.IGNORECASE,
+            _prev_words(text, m.start()),
+            re.IGNORECASE,
         ):
             return None  # "30s" without a decade context: thirty seconds
         d = int(decade or short or bare)
@@ -782,7 +800,9 @@ class EnglishNormalizer(RuleNormalizer):
         for part in m.group().split("-"):
             for p in re.findall(r"[A-Za-z]+|\d+", part):
                 if p.isdigit():
-                    words.append(cardinal(int(p)) if len(p) <= 2 and p[0] != "0" else spell_digits(p))
+                    words.append(
+                        cardinal(int(p)) if len(p) <= 2 and p[0] != "0" else spell_digits(p)
+                    )
                 elif p.isupper() and len(p) <= 3:
                     words.append(_letters(p))
                 else:
@@ -807,15 +827,21 @@ class EnglishNormalizer(RuleNormalizer):
         if "," in whole:
             return minus + cardinal(_int(whole))
         before = _prev_words(text, m.start())
-        if not sign and len(whole) > 1 and (
-            whole[0] == "0" or len(whole) >= 7 or (len(whole) >= 3 and _ID_CONTEXT.search(before))
+        if (
+            not sign
+            and len(whole) > 1
+            and (
+                whole[0] == "0"
+                or len(whole) >= 7
+                or (len(whole) >= 3 and _ID_CONTEXT.search(before))
+            )
         ):
             return spell_digits(whole)
         if (
             not sign
             and len(whole) == 4
             and 1000 <= int(whole) < 2100
-            and (_YEAR_CONTEXT.search(before) or int(whole) % 100 == 0 and int(whole) < 2000)
+            and (_YEAR_CONTEXT.search(before) or (int(whole) % 100 == 0 and int(whole) < 2000))
         ):
             return year(int(whole))
         return minus + cardinal(int(whole))
@@ -885,7 +911,10 @@ _PERCENT_WORDS = {
     "pt": "por cento", "nl": "procent", "pl": "procent", "tr": "yüzde", "ru": "процентов",
     "sv": "procent", "da": "procent", "no": "prosent", "fi": "prosenttia", "cs": "procent",
 }  # fmt: skip
-_COMMA_DECIMAL = frozenset("de fr es it pt nl pl tr ru sv da no fi cs ro hu uk id".split())
+_COMMA_DECIMAL = frozenset({
+    "de", "fr", "es", "it", "pt", "nl", "pl", "tr", "ru", "sv", "da", "no", "fi", "cs",
+    "ro", "hu", "uk", "id",
+})  # fmt: skip
 
 
 class Num2WordsNormalizer(RuleNormalizer):
@@ -896,7 +925,7 @@ class Num2WordsNormalizer(RuleNormalizer):
     """
 
     def __init__(self, language: str) -> None:
-        from num2words import num2words  # type: ignore[import-not-found, import-untyped]
+        from num2words import num2words  # type: ignore[import-not-found,unused-ignore]
 
         self.language = language
         self._words: Callable[..., str] = num2words
@@ -906,7 +935,7 @@ class Num2WordsNormalizer(RuleNormalizer):
         number = rf"(?<![\w{dec}])([-−])?(\d{{1,3}}(?:{grp}\d{{3}})+|\d+)(?:{dec}(\d+))?"
         rules: list[tuple[str, Handler]] = [
             (number + r"\s?%", self._percent),
-            (number + rf"(?![\w]|[.,]\d)", self._number),
+            (number + r"(?![\w]|[.,]\d)", self._number),
         ]
         super().__init__(rules)
 
@@ -980,6 +1009,7 @@ def normalize_text(text: str, language: str | None = "en") -> str:
 
 # ---------------------------------------------------------------------- streaming
 _PLAIN = re.compile(r"[\"'“‘(]*[A-Za-z][a-z'’]*[\"'”’),;:!?]*")
+_SENTENCE_END = re.compile(r"[^.][.!?]+$")
 _PLAIN_END = re.compile(r"[A-Za-z][a-z'’]*[,;:!?.]+[\"'”’)]*")
 
 
@@ -1005,11 +1035,14 @@ class StreamNormalizer:
         if not tokens:
             return 0
         last = tokens[-1]
-        if last.end() < len(buf) and _PLAIN_END.fullmatch(last.group()):
+        if last.end() < len(buf):
             core = last.group().rstrip("\"'”’)")
-            word = core.rstrip(",;:!?.").lower()
-            if not core.endswith(".") or (len(word) > 1 and word not in _SENTENCE_ABBREVIATIONS):
-                return len(buf)  # after a word that closes a clause or a sentence
+            if _PLAIN_END.fullmatch(last.group()) or _SENTENCE_END.search(core):
+                word = core.rstrip(",;:!?.").lower().lstrip("\"'“‘(")
+                if not core.endswith(".") or (
+                    len(word) > 1 and word not in _SENTENCE_ABBREVIATIONS
+                ):
+                    return len(buf)  # after a word that closes a clause or a sentence
         for prev, nxt in zip(reversed(tokens[:-1]), reversed(tokens[1:]), strict=True):
             if _PLAIN.fullmatch(prev.group()) and _PLAIN.fullmatch(nxt.group()):
                 return nxt.start()
