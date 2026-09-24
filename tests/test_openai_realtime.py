@@ -686,11 +686,13 @@ async def test_gives_up_when_the_server_is_gone() -> None:
 async def test_session_expiry_notice() -> None:
     async with FakeRealtimeServer(expires_in=1.5) as server:
         engine = OpenAIRealtimeEngine(base_url=server.url, api_key=KEY, expiry_warning=1.0)
-        async with connected(engine) as (_, rec):
+        async with connected(engine) as (conn, rec):
             await rec.wait(lambda: rec.of(EngineStatus), timeout=3)
             status = rec.of(EngineStatus)[0]
             assert status.status == "expiring"
             assert status.time_left is not None and 0.2 < status.time_left <= 1.5
+            await engine.aclose()  # closes every live connection
+            assert conn.closed and not engine._connections
 
 
 # ------------------------------------------------------------------ compatibility profiles
