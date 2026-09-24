@@ -10,7 +10,9 @@ Responsibilities (identical for native speech-to-speech and cascaded engines):
   :mod:`~voice_agent_next.session.interruptions` policy decide — a real interruption
   cancels the response and truncates the agent's turn to what was heard, a false one
   (cough, noise, "uh-huh") resumes the agent where it stopped;
-* execute tool calls and feed the results back to the engine;
+* execute tool calls and feed the results back to the engine: a filler when a round is
+  slow (watchdog), non-blocking tools whose results arrive later, progress updates and
+  background work (:meth:`AgentSession.delegate`);
 * keep the conversation history and emit transcripts, state changes and metrics.
 """
 
@@ -18,9 +20,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import os
+import random
 from collections import deque
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -47,7 +51,15 @@ from ..events import (
 )
 from ..metrics import Metrics, TurnMetrics, UsageSummary
 from ..registry import create
-from ..tools import ToolContext, execute_function_call
+from ..tools import (
+    DEFAULT_TOOL_ACK,
+    FunctionTool,
+    ToolContext,
+    ToolScheduling,
+    _stringify,
+    execute_function_call,
+    find_tool,
+)
 from ..transports.base import Transport
 from ..utils.aio import BackgroundTasks, Chan, cancel_and_wait
 from ..utils.clock import now
@@ -65,6 +77,9 @@ from .events import (
     SessionClosed,
     SessionError,
     ToolCalled,
+    ToolCancelled,
+    ToolFiller,
+    ToolProgress,
     ToolResult,
     UserState,
     UserStateChanged,
@@ -78,7 +93,7 @@ if TYPE_CHECKING:
     from .recording import SessionRecorder
     from .tracing import SessionTracer
 
-__all__ = ["AgentSession", "SessionOptions"]
+__all__ = ["DEFAULT_TOOL_FILLERS", "AgentSession", "SessionOptions"]
 
 _MAX_ONSET_LAG = 0.5
 """Upper bound (s) on how long after its onset an engine reports user speech."""
@@ -88,6 +103,22 @@ _RECHECK_DELAY = 0.01
 """Re-check an overlap this soon when engine events are still waiting to be handled."""
 _MAX_PLAYBACK_LAG = 2.0
 """Longest wait (s) for a transport to finish playing a response after the virtual clock."""
+_ASIDE_TIMEOUT = 10.0
+"""Longest wait (s) for a filler/progress utterance to be generated before tool outputs
+(whose follow-up response would cut it off) are sent."""
+_IDLE_POLL = 0.05
+"""Poll interval (s) of the watchdog and of result delivery waiting for a quiet moment."""
+_IDLE_SETTLE = 0.15
+"""The conversation must stay idle this long before a background result is delivered."""
+
+DEFAULT_TOOL_FILLERS: tuple[str, ...] = (
+    "One moment, let me check that.",
+    "Just a second.",
+    "Let me look that up.",
+    "Give me a moment.",
+    "Hang on, I'm checking.",
+)
+"""Default fillers of ``SessionOptions.tool_fillers``."""
 
 
 @dataclass(slots=True)
@@ -131,6 +162,16 @@ class SessionOptions:
     trace: bool = False
     """Export OpenTelemetry spans (needs the ``otel`` extra and an SDK configured by the
     app). See :class:`~voice_agent_next.session.SessionTracer`."""
+    tool_filler_delay: float | None = 1.5
+    """Watchdog: seconds a blocking tool round may keep the conversation silent before the
+    session says a filler ("One moment, let me check that."), once per round. ``None``
+    disables fillers. Not used with engines whose model keeps talking while tools run
+    (``tool_mode`` other than ``"blocking"``)."""
+    tool_fillers: Sequence[str] = DEFAULT_TOOL_FILLERS
+    """Fillers of tools without their own (``function_tool(filler=...)``), picked without
+    repeating until all were used."""
+    tool_filler_interruptible: bool = True
+    """``False``: fillers and spoken progress updates cannot be interrupted."""
 
     def __post_init__(self) -> None:
         if self.min_interruption_duration < 0:
@@ -141,6 +182,10 @@ class SessionOptions:
             raise ValueError("false_interruption_timeout must be >= 0 or None")
         if isinstance(self.backchannel_words, str):
             raise TypeError("backchannel_words must be a list of words, not a string")
+        if self.tool_filler_delay is not None and self.tool_filler_delay < 0:
+            raise ValueError("tool_filler_delay must be >= 0 or None")
+        if isinstance(self.tool_fillers, str):
+            raise TypeError("tool_fillers must be a list of phrases, not a string")
 
 
 @dataclass
@@ -157,7 +202,49 @@ class _Turn:
     closed: bool = False
 
 
-@dataclass
+@dataclass(eq=False)
+class _ToolRun:
+    """One execution of a tool call (or the immediate acknowledgement of a non-blocking
+    call, ``ack=True``)."""
+
+    call: FunctionCall
+    tool: FunctionTool | None
+    task: asyncio.Future[FunctionCallOutput]
+    started: float = field(default_factory=now)
+    ack: bool = False
+    cancelled: bool = False
+
+    def outcome(self) -> FunctionCallOutput | None:
+        """The output of the finished run; ``None`` if it was cancelled."""
+        if self.cancelled or self.task.cancelled():
+            return None
+        return self.task.result()
+
+
+class _PhrasePicker:
+    """Picks phrases from a list without repeating one before all were used."""
+
+    def __init__(self) -> None:
+        self._rng = random.Random()
+        self._used: dict[tuple[str, ...], set[str]] = {}
+        self._last: str | None = None
+
+    def pick(self, phrases: Sequence[str]) -> str | None:
+        options = tuple(dict.fromkeys(p for p in phrases if p.strip()))
+        if not options:
+            return None
+        used = self._used.setdefault(options, set())
+        fresh = [p for p in options if p not in used]
+        if not fresh:
+            used.clear()
+            fresh = [p for p in options if p != self._last] or list(options)
+        choice = self._rng.choice(fresh)
+        used.add(choice)
+        self._last = choice
+        return choice
+
+
+@dataclass(eq=False)
 class _Response:
     response_id: str
     started_at: float
@@ -166,7 +253,15 @@ class _Response:
     message: ChatMessage | None = None
     text: list[str] = field(default_factory=list)
     tool_calls: list[FunctionCall] = field(default_factory=list)
-    tool_tasks: list[asyncio.Task[tuple[FunctionCallOutput, float]]] = field(default_factory=list)
+    """Calls of this response's tool round (the model waits for their outputs)."""
+    tool_runs: list[_ToolRun] = field(default_factory=list)
+    watchdog: asyncio.Task[None] | None = None
+    """Says a filler if the tool round is slow."""
+    filler_said: bool = False
+    """The round already had its filler (or a spoken progress update)."""
+    aside: bool = False
+    """A filler or progress utterance: it neither belongs to nor ends the user's turn."""
+    say: _SayRequest | None = None
     done: bool = False
     status: ResponseStatus | None = None
     interrupted: bool = False
@@ -216,7 +311,10 @@ class _BargeIn:
 @dataclass(eq=False, slots=True)
 class _SayRequest:
     allow_interruptions: bool | None
+    aside: bool = False
     created: float = field(default_factory=now)
+    done: asyncio.Event = field(default_factory=asyncio.Event)
+    """Set once the engine finished generating the utterance."""
 
 
 class AgentSession(EventEmitter):
@@ -300,6 +398,9 @@ class AgentSession(EventEmitter):
         self._turn: _Turn | None = None
         self._user_speech_end: float | None = None
         self._tool_steps = 0
+        self._tool_runs: dict[str, _ToolRun] = {}  # running executions by call id
+        self._pending_rounds: set[_Response] = set()  # tool rounds the model waits for
+        self._fillers = _PhrasePicker()
         # interruption policy: the overlap awaiting a verdict and the playback pause state
         self._barge: _BargeIn | None = None
         self._barge_timer: asyncio.TimerHandle | None = None
@@ -474,14 +575,20 @@ class AgentSession(EventEmitter):
                 ``SessionOptions.discard_audio_if_uninterruptible``); ``None`` follows
                 ``SessionOptions.allow_interruptions``.
         """
+        await self._say(text, allow_interruptions)
+
+    async def _say(
+        self, text: str, allow_interruptions: bool | None, *, aside: bool = False
+    ) -> None:
         # the engine gives no handle for the response it starts: the next one is ours
-        request = _SayRequest(allow_interruptions)
+        request = _SayRequest(allow_interruptions, aside)
         self._say_requests.append(request)
         try:
             await self.connection.say(text)
         except BaseException:
             with contextlib.suppress(ValueError):
                 self._say_requests.remove(request)
+            request.done.set()
             raise
 
     async def generate_reply(
@@ -505,6 +612,85 @@ class AgentSession(EventEmitter):
     async def update_instructions(self, instructions: str) -> None:
         self.agent.instructions = instructions
         await self.connection.update(instructions=instructions)
+
+    def cancel_tool_call(self, call_id: str) -> bool:
+        """Cancel a running tool call (e.g. a non-blocking one the user no longer needs).
+
+        A cancelled call emits ``tool_cancelled`` and sends no output. Returns ``False`` if
+        no such call is running.
+        """
+        return self._cancel_run(call_id)
+
+    def delegate(
+        self,
+        work: Awaitable[Any] | Callable[[], Awaitable[Any]],
+        *,
+        name: str = "task",
+        scheduling: ToolScheduling = "when_idle",
+        timeout: float | None = None,
+    ) -> asyncio.Task[Any]:
+        """Run ``work`` in the background, independently of turns and interruptions
+        (talker/thinker): the conversation goes on, and when it finishes its result (or
+        error) is added to the conversation according to ``scheduling``.
+
+        Returns the task running ``work``; cancelling it withdraws the work (the model is
+        told silently).
+
+        Example:
+            >>> session.delegate(research(topic), name="research")
+        """
+        if scheduling not in ("interrupt", "when_idle", "silent"):
+            raise ValueError(f"unknown scheduling {scheduling!r}")
+        coro = work() if callable(work) else work
+
+        async def run() -> Any:
+            return await (asyncio.wait_for(coro, timeout) if timeout is not None else coro)
+
+        task: asyncio.Task[Any] = self._tasks.spawn(run(), name=f"delegate-{name}")
+        self._tasks.spawn(self._deliver_delegated(task, name, scheduling), name="delegate")
+        return task
+
+    async def _deliver_delegated(
+        self, task: asyncio.Task[Any], name: str, scheduling: ToolScheduling
+    ) -> None:
+        await asyncio.wait([task])
+        meta = {"delegated": name}
+        if task.cancelled():
+            await self._inject(f"The background task {name} was cancelled.", "silent", meta)
+            return
+        exc = task.exception()
+        if isinstance(exc, TimeoutError):
+            text = f"Result of the background task {name}: it timed out."
+        elif exc is not None:
+            text = f"Result of the background task {name}: it failed: {type(exc).__name__}: {exc}"
+        else:
+            text = f"Result of the background task {name}: {_stringify(task.result())}"
+        await self._inject(text, scheduling, meta)
+
+    async def report_tool_progress(
+        self, call: FunctionCall, message: str, *, speak: bool = True, to_model: bool = False
+    ) -> bool:
+        """Progress of a running tool call (usually via ``ToolContext.report_progress``).
+
+        Emits ``tool_progress``; with ``speak`` the agent says ``message`` unless someone is
+        talking (spoken progress replaces the round's filler); with ``to_model`` it is
+        added to the model's context without a response. Returns whether it is spoken.
+        """
+        spoken = speak and self._conn is not None and not self._agent_or_user_talking()
+        if spoken:
+            for resp in self._pending_rounds:
+                if any(r.call.call_id == call.call_id for r in resp.tool_runs):
+                    resp.filler_said = True  # the user heard something: no filler after it
+        self.emit("tool_progress", ToolProgress(call, message, spoken))
+        if spoken:
+            await self._say(message, self.options.tool_filler_interruptible, aside=True)
+        if to_model:
+            text = f"Progress of {call.name} (call {call.call_id}): {message}"
+            meta = {"tool_progress": True, "tool_call_id": call.call_id}
+            msg = self.history.add_message("user", text, metadata=meta)
+            self.emit("conversation_item", ConversationItemAdded(msg))
+            await self.connection.send_text(text, respond=False)
+        return spoken
 
     # ------------------------------------------------------------------- loops
     async def _input_loop(self) -> None:
@@ -618,8 +804,14 @@ class AgentSession(EventEmitter):
         elif isinstance(ev, ResponseStarted):
             await self._on_barge_in_superseded()
             turn = self._turn if self._turn is not None and not self._turn.closed else None
+            request = self._say_request_for(ev.timestamp)
+            if request is not None and request.aside:
+                turn = None  # a filler: the turn goes on with the tool round's answer
             started = _Response(ev.response_id, ev.timestamp, turn)
-            started.allow_interruptions = self._say_request_for(ev.timestamp)
+            if request is not None:
+                started.allow_interruptions = request.allow_interruptions
+                started.aside = request.aside
+                started.say = request
             self._responses[ev.response_id] = started
             self._current = started
             if self.agent_state != AgentState.SPEAKING:
@@ -638,22 +830,20 @@ class AgentSession(EventEmitter):
             await self._on_barge_in_response_done(ev)
             self._on_response_done(ev)
         elif isinstance(ev, ToolCallCancelled):
-            for task_owner in self._responses.values():
-                for call, task in zip(task_owner.tool_calls, task_owner.tool_tasks, strict=False):
-                    if call.call_id in ev.call_ids and not task.done():
-                        task.cancel()
+            for call_id in ev.call_ids:
+                self._cancel_run(call_id)
         elif isinstance(ev, EngineErrorEvent):
             self.emit("error", SessionError(ev.error, ev.recoverable))
             if not ev.recoverable:
                 self._schedule_close("engine_error")
 
-    def _say_request_for(self, started_at: float) -> bool | None:
-        """``allow_interruptions`` of the ``say()`` that started a response at ``started_at``."""
+    def _say_request_for(self, started_at: float) -> _SayRequest | None:
+        """The ``say()`` that started a response at ``started_at`` (if any)."""
         requests = self._say_requests
         while requests and started_at - requests[0].created > _SAY_REQUEST_TTL:
-            requests.popleft()  # the engine never started a response for it
+            requests.popleft().done.set()  # the engine never started a response for it
         if requests and started_at >= requests[0].created:
-            return requests.popleft().allow_interruptions
+            return requests.popleft()
         return None
 
     def _on_input_transcript(self, ev: InputTranscript) -> None:
@@ -685,23 +875,56 @@ class AgentSession(EventEmitter):
 
     def _on_tool_call(self, ev: ResponseToolCall) -> None:
         resp = self._responses.get(ev.response_id)
-        self.history.append(ev.call)
-        self.emit("conversation_item", ConversationItemAdded(ev.call))
-        self.emit("tool_call", ToolCalled(ev.call))
-        task = self._tasks.spawn(self._run_tool(ev.call), name=f"tool-{ev.call.name}")
+        call = ev.call
+        self.history.append(call)
+        self.emit("conversation_item", ConversationItemAdded(call))
+        self.emit("tool_call", ToolCalled(call))
+        tool = find_tool(self.agent.tools, call.name)
+        task = self._tasks.spawn(self._run_tool(call), name=f"tool-{call.name}")
+        run = _ToolRun(call, tool, task)
+        self._tool_runs[call.call_id] = run
+        task.add_done_callback(functools.partial(self._forget_run, run))
+        if tool is not None and not tool.blocking:
+            native = self.connection.capabilities.tool_mode != "blocking"
+            self._tasks.spawn(self._deliver_later(run, native=native), name=f"tool-{call.name}")
+            if native:  # the model does not wait: nothing to answer now
+                if resp is not None and resp.turn is not None:
+                    resp.turn.tool_calls += 1
+                return
+            # the model waits for an output: acknowledge now, deliver the result later
+            ack: asyncio.Future[FunctionCallOutput] = asyncio.get_running_loop().create_future()
+            text = tool.ack if tool.ack is not None else DEFAULT_TOOL_ACK
+            ack.set_result(FunctionCallOutput(call_id=call.call_id, name=call.name, output=text))
+            run = _ToolRun(call, tool, ack, ack=True)
         if resp is not None:
-            resp.tool_calls.append(ev.call)
-            resp.tool_tasks.append(task)
+            resp.tool_calls.append(call)
+            resp.tool_runs.append(run)
+            self._pending_rounds.add(resp)
+            if not run.ack:
+                self._start_watchdog(resp)
+        elif run.ack:  # no round to answer with: acknowledge on its own
+            output = run.task.result()
+            self._tasks.spawn(self.connection.send_tool_output(output, respond=False))
 
-    async def _run_tool(self, call: FunctionCall) -> tuple[FunctionCallOutput, float]:
-        t0 = now()
-        output = await execute_function_call(
+    def _forget_run(self, run: _ToolRun, _: object = None) -> None:
+        if self._tool_runs.get(run.call.call_id) is run:
+            del self._tool_runs[run.call.call_id]
+
+    def _cancel_run(self, call_id: str) -> bool:
+        run = self._tool_runs.get(call_id)
+        if run is None or run.task.done():
+            return False
+        run.cancelled = True
+        run.task.cancel()
+        return True
+
+    async def _run_tool(self, call: FunctionCall) -> FunctionCallOutput:
+        return await execute_function_call(
             call,
             self.agent.tools,
             ctx=ToolContext(call=call, session=self, userdata=self.userdata),
             timeout=self.options.tool_timeout,
         )
-        return output, now() - t0
 
     def _on_response_done(self, ev: ResponseDone) -> None:
         resp = self._responses.get(ev.response_id)
@@ -709,7 +932,9 @@ class AgentSession(EventEmitter):
             return
         resp.done = True
         resp.status = ev.status
-        if resp.tool_tasks:
+        if resp.say is not None:
+            resp.say.done.set()
+        if resp.tool_runs:
             self._tasks.spawn(self._complete_tools(resp))
         if resp.interrupted:
             return
@@ -720,14 +945,25 @@ class AgentSession(EventEmitter):
             self._out.send_nowait(_EndOfResponse(ev.response_id))
 
     async def _complete_tools(self, resp: _Response) -> None:
-        results = await asyncio.gather(*resp.tool_tasks)
-        for call, (output, duration) in zip(resp.tool_calls, results, strict=True):
+        await asyncio.wait([run.task for run in resp.tool_runs])
+        self._pending_rounds.discard(resp)
+        if resp.watchdog is not None and not resp.filler_said:
+            resp.watchdog.cancel()  # the round finished first: no filler
+        outputs: list[FunctionCallOutput] = []
+        for run in resp.tool_runs:
+            output = run.outcome()
+            if output is None:  # withdrawn by the engine: it expects no output
+                self.emit("tool_cancelled", ToolCancelled(run.call, now() - run.started))
+                continue
+            outputs.append(output)
             self.history.append(output)
             self.emit("conversation_item", ConversationItemAdded(output))
-            self.emit("tool_result", ToolResult(call, output, duration))
+            if not run.ack:
+                self.emit("tool_result", ToolResult(run.call, output, now() - run.started))
         self._tool_steps += 1
         respond = (
-            not resp.interrupted
+            bool(outputs)
+            and not resp.interrupted
             and resp.status == "completed"
             and self.user_state != UserState.SPEAKING
             and self._tool_steps <= self.options.max_tool_steps
@@ -737,10 +973,12 @@ class AgentSession(EventEmitter):
                 "max_tool_steps (%d) reached; not responding", self.options.max_tool_steps
             )
         if resp.turn is not None:
-            resp.turn.tool_calls += len(results)
-        for i, (output, _) in enumerate(results):
+            resp.turn.tool_calls += len(resp.tool_runs)
+        if respond:
+            await self._wait_asides()  # the follow-up response would cut a filler off
+        for i, output in enumerate(outputs):
             await self.connection.send_tool_output(
-                output, respond=respond and i == len(results) - 1
+                output, respond=respond and i == len(outputs) - 1
             )
         if not respond and not resp.interrupted:
             if resp.turn is not None:
@@ -748,6 +986,159 @@ class AgentSession(EventEmitter):
             if self._current is resp or self._current is None:
                 self._current = None
                 self._set_agent_state(AgentState.LISTENING)
+
+    async def _wait_asides(self) -> None:
+        """Wait until pending fillers/progress utterances have been generated."""
+        pending = [r.done for r in self._say_requests if r.aside and not r.done.is_set()]
+        pending += [
+            r.say.done
+            for r in self._responses.values()
+            if r.aside and r.say is not None and not r.say.done.is_set()
+        ]
+        if pending:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    asyncio.gather(*(done.wait() for done in pending)), _ASIDE_TIMEOUT
+                )
+
+    # ------------------------------------------------------------ tool fillers
+    def _start_watchdog(self, resp: _Response) -> None:
+        delay = self.options.tool_filler_delay
+        if (
+            resp.watchdog is not None
+            or delay is None
+            or self.connection.capabilities.tool_mode != "blocking"
+        ):
+            return
+        resp.watchdog = self._tasks.spawn(self._tool_watchdog(resp, delay), name="tool-watchdog")
+
+    async def _tool_watchdog(self, resp: _Response, delay: float) -> None:
+        """Say a filler once the round has kept the conversation silent for ``delay`` s."""
+        started = quiet_since = now()
+        while True:
+            wait = quiet_since + delay - now()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            if resp.filler_said or resp not in self._pending_rounds or self._closing:
+                return
+            if resp.interrupted or (resp.turn is not None and resp.turn is not self._turn):
+                return  # the user moved on
+            if self._agent_or_user_talking():
+                await asyncio.sleep(_IDLE_POLL)
+                quiet_since = now()  # a filler right after speech would be odd: start over
+                continue
+            running = [r for r in resp.tool_runs if not r.task.done()]
+            text = self._filler_for(running)
+            resp.filler_said = True
+            if text is None:
+                return
+            calls = [r.call for r in running]
+            self.emit("tool_filler", ToolFiller(text, calls, now() - started))
+            await self._say(text, self.options.tool_filler_interruptible, aside=True)
+            return
+
+    def _filler_for(self, runs: Sequence[_ToolRun]) -> str | None:
+        """The filler of the first running call whose tool has one."""
+        for run in runs:
+            spec = run.tool.filler if run.tool is not None else None
+            if spec is False:
+                continue
+            if spec is None or spec is True:
+                phrases: Sequence[str] = self.options.tool_fillers
+            elif isinstance(spec, str):
+                phrases = (spec,)
+            elif callable(spec):
+                try:
+                    text = spec(run.call)
+                except Exception:
+                    logger.exception("filler callable of tool %s failed", run.call.name)
+                    continue
+                if text and text.strip():
+                    return text
+                continue
+            else:
+                phrases = spec
+            choice = self._fillers.pick(phrases)
+            if choice is not None:
+                return choice
+        return None
+
+    def _agent_or_user_talking(self) -> bool:
+        return (
+            self.user_state == UserState.SPEAKING
+            or self._barge is not None
+            or self._is_responding()
+            or any(self._aside_pending(r) for r in self._say_requests)
+        )
+
+    @staticmethod
+    def _aside_pending(request: _SayRequest) -> bool:
+        """A filler/progress utterance was requested but its response has not started."""
+        return (
+            request.aside
+            and not request.done.is_set()
+            and now() - request.created < _SAY_REQUEST_TTL
+        )
+
+    # ------------------------------------------------- non-blocking tools/delegation
+    async def _deliver_later(self, run: _ToolRun, *, native: bool) -> None:
+        """Deliver the result of a non-blocking call once it is ready."""
+        await asyncio.wait([run.task])
+        tool = run.tool
+        scheduling: ToolScheduling = tool.scheduling if tool is not None else "when_idle"
+        output = run.outcome()
+        call = run.call
+        if output is None:
+            self.emit("tool_cancelled", ToolCancelled(call, now() - run.started))
+            if not native:  # the model was told a result would follow
+                note = f"The background task {call.name} (call {call.call_id}) was cancelled."
+                await self._inject(note, "silent", {"tool_call_id": call.call_id})
+            return
+        self.emit("tool_result", ToolResult(call, output, now() - run.started, blocking=False))
+        if native:
+            self.history.append(output)
+            self.emit("conversation_item", ConversationItemAdded(output))
+            await self.connection.send_async_tool_output(output, scheduling=scheduling)
+            return
+        what = f"the background task {call.name} (call {call.call_id})"
+        if output.is_error:
+            text = f"Result of {what}: it failed: {output.output}"
+        else:
+            text = f"Result of {what}: {output.output}"
+        await self._inject(text, scheduling, {"tool_call_id": call.call_id})
+
+    async def _inject(self, text: str, scheduling: ToolScheduling, meta: dict[str, Any]) -> None:
+        """Add a background result to the conversation at a moment that fits ``scheduling``."""
+        await self._wait_for_quiet(interrupt=scheduling == "interrupt")
+        if self._closing:
+            return
+        if scheduling == "interrupt" and self._is_responding():
+            if self._barge is not None:
+                self._end_barge_in(self._barge)
+            await self._interrupt()
+            await self._ensure_playback()
+        metadata = {"background_result": True, **meta}
+        msg = self.history.add_message("user", text, metadata=metadata)
+        self.emit("conversation_item", ConversationItemAdded(msg))
+        await self.connection.send_text(text, respond=scheduling != "silent")
+
+    async def _wait_for_quiet(self, *, interrupt: bool) -> None:
+        """Wait until nobody talks, no tool round is pending and no reply is on its way
+        (``interrupt``: the agent may be talking; only the user and tool rounds count)."""
+
+        def quiet() -> bool:
+            if self._pending_rounds or self.user_state == UserState.SPEAKING:
+                return False
+            if interrupt:
+                return True
+            return self.agent_state == AgentState.LISTENING and not self._agent_or_user_talking()
+
+        while not self._closing:
+            if quiet():
+                await asyncio.sleep(_IDLE_SETTLE)  # e.g. a reply about to start
+                if quiet():
+                    return
+            await asyncio.sleep(_IDLE_POLL)
 
     async def _finish_after(self, resp: _Response, delay: float) -> None:
         pauses = self._pause_seq
@@ -768,7 +1159,9 @@ class AgentSession(EventEmitter):
             self._close_turn(resp.turn)
         if self._current is resp and self.agent_state != AgentState.CLOSED:
             self._current = None
-            self._set_agent_state(AgentState.LISTENING)
+            # after a filler, the agent is still busy with the tool round
+            pending = any(not r.interrupted for r in self._pending_rounds)
+            self._set_agent_state(AgentState.THINKING if pending else AgentState.LISTENING)
 
     async def _wait_for_playout_slot(self) -> None:
         """Pace against the virtual playback clock; hold audio back while paused."""

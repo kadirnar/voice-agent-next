@@ -10,6 +10,9 @@ event name                    payload
 ``conversation_item``         :class:`ConversationItemAdded`
 ``tool_call``                 :class:`ToolCalled`
 ``tool_result``               :class:`ToolResult`
+``tool_filler``               :class:`ToolFiller`
+``tool_progress``             :class:`ToolProgress`
+``tool_cancelled``            :class:`ToolCancelled`
 ``interrupted``               :class:`Interrupted`
 ``agent_false_interruption``  :class:`AgentFalseInterruption`
 ``metrics``                   any :data:`~voice_agent_next.metrics.Metrics`
@@ -38,6 +41,9 @@ __all__ = [
     "SessionClosed",
     "SessionError",
     "ToolCalled",
+    "ToolCancelled",
+    "ToolFiller",
+    "ToolProgress",
     "ToolResult",
     "UserState",
     "UserStateChanged",
@@ -105,6 +111,43 @@ class ToolCalled:
 class ToolResult:
     call: FunctionCall
     output: FunctionCallOutput
+    duration: float
+    timestamp: float = field(default_factory=now)
+    blocking: bool = True
+    """``False`` for a non-blocking tool: the conversation went on while it ran and the
+    result is delivered according to its scheduling."""
+
+
+@dataclass(slots=True)
+class ToolFiller:
+    """The session said a filler because a tool round was slow (watchdog)."""
+
+    text: str
+    calls: list[FunctionCall]
+    """The calls still running when the filler started."""
+    waited: float
+    """Seconds since the round's tools started."""
+    timestamp: float = field(default_factory=now)
+
+
+@dataclass(slots=True)
+class ToolProgress:
+    """A running tool reported progress (``ToolContext.report_progress``)."""
+
+    call: FunctionCall
+    message: str
+    spoken: bool
+    """The session is saying ``message``."""
+    timestamp: float = field(default_factory=now)
+
+
+@dataclass(slots=True)
+class ToolCancelled:
+    """A tool call was cancelled before it finished: the engine withdrew it (the user
+    moved on, ``ToolCallCancelled``) or the app called ``AgentSession.cancel_tool_call``.
+    No output is sent for it."""
+
+    call: FunctionCall
     duration: float
     timestamp: float = field(default_factory=now)
 
