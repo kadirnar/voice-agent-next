@@ -8,10 +8,13 @@ registry can create can be benchmarked.
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 import yaml
@@ -58,6 +61,25 @@ def redact(value: Any) -> Any:
     return value
 
 
+def _read_config_file(path: Path) -> dict[str, Any]:
+    """Raw mapping of a YAML/TOML/JSON config file (validated later by ``load_config``)."""
+    if not path.exists():
+        raise ConfigurationError(f"config file not found: {path}")
+    text = path.read_text(encoding="utf-8")
+    suffix = path.suffix.lower()
+    if suffix in (".yaml", ".yml"):
+        data = yaml.safe_load(text) or {}
+    elif suffix == ".toml":
+        data = tomllib.loads(text)
+    elif suffix == ".json":
+        data = json.loads(text)
+    else:
+        raise ConfigurationError(f"unsupported config format: {suffix}")
+    if not isinstance(data, dict):
+        raise ConfigurationError(f"{path}: config root must be a mapping")
+    return data
+
+
 def _spec_name(spec: ComponentSpec | None) -> str:
     if spec is None:
         return "none"
@@ -91,33 +113,31 @@ class BenchSystem:
     ) -> BenchSystem:
         """Combine a config file/mapping with explicit specs (explicit specs win).
 
-        Without any engine or LLM configured, ``default_engine`` is used.
+        The file may hold only agent/session settings when the engine comes from the
+        arguments; without any engine or LLM configured, ``default_engine`` is used.
         """
         if isinstance(config, AppConfig):
-            cfg = config.model_copy(deep=True)
+            data: dict[str, Any] = config.model_dump()
         elif isinstance(config, Mapping):
-            cfg = load_config(dict(config))
+            data = dict(config)
         elif config is not None:
-            cfg = load_config(config)
+            data = _read_config_file(Path(config))
         else:
-            cfg = AppConfig()
+            data = {}
         cascade = {"stt": stt, "llm": llm, "tts": tts, "turn_detector": turn_detector}
         explicit_cascade = any(v is not None for v in cascade.values())
         if engine is not None and explicit_cascade:
             raise ConfigurationError("pass either an engine or cascade components, not both")
         if engine is not None:  # an explicit engine replaces a configured cascade
-            cfg.engine = engine
-            cfg.stt = cfg.llm = cfg.tts = cfg.turn_detector = None
+            data.update(engine=engine, stt=None, llm=None, tts=None, turn_detector=None)
         elif explicit_cascade:  # explicit components replace a configured engine
-            cfg.engine = None
-            for key, value in cascade.items():
-                if value is not None:
-                    setattr(cfg, key, value)
+            data["engine"] = None
+            data.update({k: v for k, v in cascade.items() if v is not None})
         if vad is not None:
-            cfg.vad = vad
-        if cfg.engine is None and cfg.llm is None and default_engine is not None:
-            cfg.engine = default_engine
-        cfg.validate_components()
+            data["vad"] = vad
+        if data.get("engine") is None and data.get("llm") is None and default_engine:
+            data["engine"] = default_engine
+        cfg = load_config(data)  # validated once, after merging
         return cls(cfg, label or cls.default_label(cfg))
 
     @staticmethod

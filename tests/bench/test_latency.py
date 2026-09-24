@@ -151,7 +151,7 @@ async def test_missed_replies_dead_air_and_greeting() -> None:
     assert summary.metrics["session_ready_ms"].n == 1
 
 
-def test_system_specs() -> None:
+def test_system_specs(tmp_path: Path) -> None:
     native = BenchSystem.from_options(engine="mock")
     assert native.kind == "native" and native.label == "mock"
     assert BenchSystem.from_options().label == "mock"  # default engine
@@ -164,6 +164,18 @@ def test_system_specs() -> None:
         BenchSystem.from_options(engine="mock", stt="mock")
     with pytest.raises(ConfigurationError):
         BenchSystem.from_options(stt="mock", default_engine=None)  # no llm/tts
+    agent_only = tmp_path / "agent.yaml"
+    agent_only.write_text("agent: {greeting: Hi}\nsession: {allow_interruptions: false}\n")
+    from_file = BenchSystem.from_options(config=agent_only, engine="mock")
+    assert from_file.config.agent.greeting == "Hi" and from_file.label == "mock"
+    assert not from_file.session_options().allow_interruptions
+    assert BenchSystem.from_options(config=agent_only).config.engine == "mock"  # default
+    toml = tmp_path / "cascade.toml"
+    toml.write_text('stt = "mock"\nllm = "mock"\ntts = "mock"\nvad = "energy"\n')
+    assert BenchSystem.from_options(config=toml).label == "cascade:mock+mock+mock"
+    assert BenchSystem.from_options(config=from_file.config).config == from_file.config
+    with pytest.raises(ConfigurationError, match="not found"):
+        BenchSystem.from_options(config=tmp_path / "missing.yaml")
     described = BenchSystem.from_options(
         engine={"provider": "mock", "api_key": "sk-secret"}
     ).describe()
