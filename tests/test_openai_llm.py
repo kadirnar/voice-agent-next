@@ -461,6 +461,10 @@ async def test_model_discovery_without_models_is_a_configuration_error() -> None
     llm = make_llm(FakeServer([SSEStream(TEXT_STREAM)], models_status=401), cls=VllmLLM)
     with pytest.raises(AuthenticationError):
         await llm.chat(user_ctx()).collect()
+    llm = make_llm(FakeServer([SSEStream(TEXT_STREAM)], models_status=503), cls=VllmLLM)
+    with pytest.raises(ProviderError) as info:  # e.g. still starting: retryable
+        await llm.chat(user_ctx()).collect()
+    assert info.value.retryable and info.value.status_code == 503
 
 
 async def test_warmup_tolerates_servers_without_a_model_list(
