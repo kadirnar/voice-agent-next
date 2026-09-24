@@ -29,11 +29,12 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ..tools import FunctionTool, function_tool
+from ..tools import FunctionTool, _build_tool, function_tool
 from .agent import Agent
 from .handoff import Handoff, HistoryMode
 
@@ -53,11 +54,11 @@ class Transition:
             the handler's docstring, else "Move the conversation to the <to> step."
         name: tool name (default: the handler's name, else ``go_to_<to>``).
         handler: optional function (sync or async, or a ``@function_tool``) run before
-            moving on. Its parameters
-            are the tool's arguments (collect data with them; declare a ``ToolContext``
-            parameter for ``userdata``). Raise :class:`~voice_agent_next.errors.ToolError`
-            to stay on the current node (the model gets the error). A returned string
-            becomes the tool output.
+            moving on. Its parameters are the tool's arguments (collect data with them;
+            declare a ``ToolContext`` parameter for ``userdata``). Raise
+            :class:`~voice_agent_next.errors.ToolError` to stay on the current node (the
+            model gets the error). A returned string becomes the tool output. A plain
+            function is turned into a :class:`FunctionTool` here.
         message: tool output when the handler returns none (default "Transferred to
             <to>.").
     """
@@ -65,8 +66,15 @@ class Transition:
     to: str
     description: str = ""
     name: str | None = None
-    handler: Callable[..., Any] | None = None
+    handler: FunctionTool | Callable[..., Any] | None = None
     message: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.handler is not None and not isinstance(self.handler, FunctionTool):
+            # the caller's scope (dataclass __init__ -> __post_init__): types defined next
+            # to the handler resolve in its schema, as with @function_tool
+            localns = dict(sys._getframe(2).f_locals)
+            self.handler = _build_tool(self.handler, None, None, None, localns)
 
     @property
     def tool_name(self) -> str:
@@ -74,8 +82,6 @@ class Transition:
             return self.name
         if isinstance(self.handler, FunctionTool):
             return self.handler.name
-        if self.handler is not None:
-            return str(getattr(self.handler, "__name__", f"go_to_{self.to}"))
         return f"go_to_{self.to}"
 
 
@@ -201,18 +207,14 @@ class Flow:
             default = f"Move the conversation to the {transition.to} step."
             base = function_tool(name=transition.tool_name, description=description or default)(go)
             handler: Callable[..., Any] | None = None
-        elif isinstance(transition.handler, FunctionTool):  # already a tool: keep its schema
+        else:
+            assert isinstance(transition.handler, FunctionTool)  # see Transition.__post_init__
             base = dataclasses.replace(
                 transition.handler,
                 name=transition.tool_name,
                 description=description or transition.handler.description,
             )
             handler = transition.handler.fn
-        else:
-            base = function_tool(name=transition.tool_name, description=description)(
-                transition.handler
-            )
-            handler = transition.handler
 
         async def run(**kwargs: Any) -> Handoff:
             result: Any = None
