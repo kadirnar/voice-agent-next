@@ -117,6 +117,7 @@ nav:
       - The cascade: concepts/cascade.md
       - Turn-taking: concepts/turn-taking.md
       - Endpointing: concepts/endpointing.md
+      - Session rotation: concepts/session-rotation.md
       - Interruptions: concepts/interruptions.md
       - Preemptive generation: concepts/preemptive-generation.md
       - Tools: concepts/tools.md

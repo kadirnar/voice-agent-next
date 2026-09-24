@@ -419,8 +419,22 @@ def _image_part(image: ImageContent) -> dict[str, Any]:
         return {"inline_data": {"mime_type": media_type, "data": data}}
     if url.startswith(("https://", "http://", "gs://")):
         path = urllib.parse.urlsplit(url).path
-        mime = image.mime_type or mimetypes.guess_type(path)[0] or "image/jpeg"
+        mime = image.mime_type or _guess_image_mime(path)
         return {"file_data": {"file_uri": url, "mime_type": mime}}
     raise ConfigurationError(
         f"unsupported image URL for Gemini (expected https://, gs:// or data:): {url[:40]!r}"
     )
+
+
+_IMAGE_MIME = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif",
+    ".webp": "image/webp", ".heic": "image/heic", ".heif": "image/heif",
+}  # fmt: skip
+
+
+def _guess_image_mime(path: str) -> str:
+    """MIME type from the file extension; the platform's ``mimetypes`` database varies
+    (Windows 3.12 doesn't know ``.webp``), so common image types are listed explicitly."""
+    suffix = path.rsplit("?", 1)[0].rsplit("#", 1)[0]
+    ext = "." + suffix.rsplit(".", 1)[-1].lower() if "." in suffix.rsplit("/", 1)[-1] else ""
+    return _IMAGE_MIME.get(ext) or mimetypes.guess_type(path)[0] or "image/jpeg"
