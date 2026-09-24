@@ -13,19 +13,16 @@ session drives it and handles pausing, truncation and events.
 
 ## What happens
 
-```
-               user speech starts                speech >= min_interruption_duration
-  agent  ───────────────────────────►  OVERLAP  ──and words >= min_interruption_words──►  INTERRUPTED
- SPEAKING       pause playback         (paused)   or the engine commits the user's turn    stop, cancel,
-     ▲                                  │    ▲     or the engine cancels the response       truncate to
-     │                                  │    │                                              what was heard
-     │                      user quiet  ▼    │ user speaks again
-     │                              AGENT_PAUSED ──── quiet for false_interruption_timeout ──► INTERRUPTED
-     │                                  │           with meaningful words
-     └──── resume + agent_false_interruption(resumed=True) ◄──┘
-           · the transcript is only backchannels (right away), or
-           · quiet for false_interruption_timeout without meaningful words
-```
+| From | When | To | What the session does |
+|---|---|---|---|
+| agent speaking | the user starts speaking | overlap | pause playback |
+| overlap | speech ≥ `min_interruption_duration` and ≥ `min_interruption_words` non-backchannel words | interrupted | stop, cancel the response, truncate it to what was heard |
+| overlap | the user goes quiet | paused | start the `false_interruption_timeout` timer |
+| paused | the user speaks again | overlap | the timer stops; speech time keeps adding up |
+| paused | the transcript has only backchannels | agent speaking | resume at once; emit `agent_false_interruption(resumed=True)` |
+| paused | quiet for `false_interruption_timeout`, no meaningful words | agent speaking | resume; emit `agent_false_interruption(resumed=True)` |
+| paused | quiet for `false_interruption_timeout`, meaningful words | interrupted | stop, cancel, truncate |
+| overlap / paused | the engine commits the user's turn or cancels the response itself | interrupted | truncate to what was heard (no cancel: the engine has moved on) |
 
 1. **Overlap.** The engine reports `InputSpeechStarted` while a response is generating or
    playing. The session pauses playback. Queued audio is kept, and so is the
