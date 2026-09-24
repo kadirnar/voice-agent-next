@@ -9,9 +9,10 @@ full-duplex — and measures turn-taking on the recording (research note 06, §8
 ("Where is my order? · I placed it last week.").
 
 * ``premature_rate`` — share of those turns in which the agent started speaking before
-  the user finished (the agent onset, reference VAD on the agent channel, lies before the
-  end of the user's last part). The same rule on plain questions is
-  ``premature_rate_questions``.
+  the user finished: the agent onset (reference VAD on the agent channel) lies before the
+  end of the user's last part, or at least 30 ms of agent speech fall between the first
+  pause and that end (a reply the session cut when the user went on can be too short for
+  an onset). The onset rule on plain questions is ``premature_rate_questions``.
 
 **Barge-in** (turns with ``barge_in``: spoken that many seconds after the agent's reply
 started, over it). ``overlapped`` turns are those where the agent was still speaking when
@@ -95,6 +96,8 @@ DEFAULT_MOCK_ENGINE: dict[str, Any] = {
 }
 """The battery's default system: the mock engine with ~4 s replies (room for barge-ins)."""
 BARGE_IN_CATEGORIES = ("interruption", "backchannel", "noise")
+_MIN_PREMATURE_FRAMES = 3
+"""Agent speech (10 ms frames) inside a pause that makes a reply premature."""
 
 
 @dataclass
@@ -217,7 +220,17 @@ def _analyze_battery(
             pauses_s=[[round(start + a, 6), round(start + b, 6)] for a, b in stim.pauses],
             barge_in_s=stim.barge_in,
         )
+        if stim.pauses and not item.premature:
+            # a reply cut short when the user went on may be shorter than an onset needs:
+            # any agent speech inside the pauses / before the user finished is premature
+            f0 = int((start + stim.pauses[0][0]) / fd)
+            f1 = min(len(mask), math.ceil(uoff / fd))
+            if int(mask[f0:f1].sum()) >= _MIN_PREMATURE_FRAMES:
+                data.update(premature=True)
         if stim.barge_in is not None:
+            # the onset-based T1 fields describe the reply that was talked over; the
+            # battery's own fields below replace them
+            data.update(premature=False, dead_air=False, v2v_ms=None, residual_ms=None)
             f_on = min(len(mask) - 1, max(0, int(uon / fd)))
             lo, hi = max(0, f_on - 5), min(len(mask), f_on + 6)
             overlapped = bool(mask[lo:hi].any()) if len(mask) else False
@@ -230,6 +243,8 @@ def _analyze_battery(
             yielded = stop is not None and stop <= uoff + options.yield_window
             resumed = bool(yielded and not session_int and after)
             talk = float(mask[int(uon / fd) : math.ceil(uoff / fd)].sum() * fd * 1000.0)
+            if cat == "interruption":
+                data.update(missed=not after)
             data.update(
                 overlapped=overlapped,
                 agent_stop_s=None if stop is None else round(stop, 6),

@@ -366,9 +366,9 @@ one.
 
 | Metric | Definition |
 | --- | --- |
-| `premature_rate` | pause turns in which the agent started before the user finished (agent onset before the end of the last part) |
+| `premature_rate` | pause turns in which the agent started before the user finished: its onset lies before the end of the last part, or ≥ 30 ms of agent speech fall between the first pause and that end (a reply cut short when the user went on can be too short for an onset) |
 | `premature_rate_questions` | the same on plain questions |
-| `missed_rate`, `dead_air_rate`, `v2v_ms` | as in T1 (`v2v_ms` over questions and pause turns that were not premature) |
+| `missed_rate`, `dead_air_rate`, `v2v_ms` | as in T1 (`v2v_ms` over questions and pause turns that were not premature; an interruption without an answer counts as missed) |
 | `barge_in_stop_ms` | interruptions: start of the first ≥ 300 ms silence on the agent channel − the user's onset; `stop_within_500ms_rate` |
 | `interrupted_rate` | interruptions after which the session cut the reply for good |
 | `post_interrupt_response_ms` | next agent onset − end of the interruption |
