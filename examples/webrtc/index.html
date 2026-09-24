@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>voice-agent-next WebRTC demo</title>
+<!--
+  Single-file browser client for the voice-agent-next WebRTC transport (see
+  docs/transports/webrtc.md). No build step and no dependencies:
+
+    python examples/webrtc/webrtc_agent.py serve     # then open http://127.0.0.1:8080/
+
+  Or open this file from any web server and pass the agent's signalling URL:
+  ?server=https://agent.example.com/ (that server must allow this page's origin: --cors).
+  Browsers only allow microphone access on https:// pages and on http://localhost.
+  ?autoconnect=1 connects on load (for kiosks and automated tests).
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #677084; --border: #dde1e8;
+    --accent: #3b6fd8; --user: #e8effd; --agent: #f1f2f5; --ok: #1e8a5a; --warn: #b7791f;
+    --bad: #c53030;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1a1e26; --text: #e6e9ef; --muted: #98a1b3; --border: #2b313d;
+      --accent: #7aa2f7; --user: #22314f; --agent: #242933; --ok: #48bb78; --warn: #ecc94b;
+      --bad: #fc8181;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 40px; }
+  h1 { font-size: 20px; margin: 0; }
+  header p { margin: 2px 0 16px; color: var(--muted); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input[type=text] {
+    flex: 1; min-width: 0; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font: inherit;
+  }
+  button {
+    padding: 8px 14px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent);
+    color: #fff; font: inherit; cursor: pointer;
+  }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  .status { margin: 12px 0; gap: 6px; }
+  .pill {
+    font-size: 13px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border);
+    color: var(--muted); white-space: nowrap;
+  }
+  .pill.on { color: var(--ok); border-color: var(--ok); }
+  .pill.busy { color: var(--warn); border-color: var(--warn); }
+  .pill.speaking { color: var(--accent); border-color: var(--accent); }
+  .meter { width: 90px; height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
+  .meter > div { height: 100%; width: 0; background: var(--ok); transition: width 60ms linear; }
+  #log { height: 52vh; min-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+  .msg { max-width: 85%; padding: 8px 12px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg .who { display: block; font-size: 12px; color: var(--muted); }
+  .msg.user { align-self: flex-end; background: var(--user); }
+  .msg.assistant { align-self: flex-start; background: var(--agent); }
+  .msg.partial .text { color: var(--muted); font-style: italic; }
+  .msg .note { font-size: 12px; color: var(--warn); }
+  .system { align-self: center; font-size: 12px; color: var(--muted); text-align: center; }
+  .system.error { color: var(--bad); }
+  form { margin-top: 12px; }
+  details { margin-top: 16px; color: var(--muted); font-size: 14px; }
+  code { font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>voice-agent-next</h1>
+    <p>Talk to a voice agent over WebRTC (Opus audio, data channel for events). Chrome, Edge and Safari have the best echo cancellation.</p>
+  </header>
+
+  <div class="card">
+    <div class="row">
+      <input id="server" type="text" aria-label="Agent signalling URL" spellcheck="false">
+      <button id="connect">Connect</button>
+      <button id="mute" class="secondary" disabled>Mute mic</button>
+    </div>
+    <div class="row status">
+      <span id="conn" class="pill">disconnected</span>
+      <span id="agent" class="pill">agent: -</span>
+      <span id="user" class="pill">you: -</span>
+      <span id="latency" class="pill" title="user stops speaking -> first agent audio (measured by the server)">voice-to-voice: -</span>
+      <span id="playout" class="pill" title="network + jitter buffer delay of the agent's audio (reported to the server)">playout: -</span>
+      <span class="meter" title="microphone level"><div id="level"></div></span>
+    </div>
+    <div id="log" aria-live="polite"></div>
+    <form id="text-form" class="row">
+      <input id="text" type="text" placeholder="...or type a message" autocomplete="off" disabled>
+      <button id="send" disabled>Send</button>
+    </form>
+  </div>
+  <audio id="remote" autoplay></audio>
+
+  <details>
+    <summary>How it works</summary>
+    <p>The microphone is captured with <code>getUserMedia</code> (echo cancellation, noise suppression and
+    auto gain on) and sent to the agent as the Opus track of an <code>RTCPeerConnection</code>. The page fetches
+    the ICE configuration from <code>/config</code>, gathers its candidates, and POSTs the SDP offer to
+    <code>/offer</code>. The agent's voice comes back on the same connection and plays through an
+    <code>&lt;audio&gt;</code> element, smoothed by the browser's adaptive jitter buffer. Transcripts, agent state
+    and latency metrics arrive on a data channel. Once a second the page reports its playout delay (jitter buffer
+    plus half the round trip), so the agent knows how much of its answer you actually heard when you
+    interrupt it.</p>
+  </details>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+let pc = null, channel = null, micStream = null, meterCtx = null, statsTimer = null, meterFrame = 0;
+let ready = false, muted = false, lastJitter = null;
+const bubbles = new Map();
+
+$("server").value = params.get("server") || (location.protocol.startsWith("http")
+  ? `${location.origin}/` : "http://127.0.0.1:8080/");
+
+function endpoint(path) {
+  return new URL(path, $("server").value.trim()).toString();
+}
+
+function send(message) {
+  if (channel && channel.readyState === "open") channel.send(JSON.stringify(message));
+}
+
+function setPill(id, text, cls) {
+  const el = $(id);
+  el.textContent = text;
+  el.className = `pill ${cls || ""}`;
+}
+
+function logLine(text, cls = "") {
+  const div = document.createElement("div");
+  div.className = `system ${cls}`;
+  div.textContent = text;
+  appendToLog(div);
+}
+
+function appendToLog(el) {
+  const log = $("log");
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  log.appendChild(el);
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+function bubble(role, key) {
+  let el = bubbles.get(key);
+  if (!el) {
+    el = document.createElement("div");
+    el.className = `msg ${role}`;
+    el.innerHTML = '<span class="who"></span><span class="text"></span><span class="note"></span>';
+    el.querySelector(".who").textContent = role === "user" ? "You" : "Agent";
+    bubbles.set(key, el);
+    appendToLog(el);
+  }
+  return el;
+}
+
+function onTranscript(msg) {
+  const el = bubble(msg.role, `${msg.role}:${msg.item_id}`);
+  el.querySelector(".text").textContent = msg.text;
+  el.classList.toggle("partial", !msg.final);
+  if (msg.interrupted) el.querySelector(".note").textContent = `\ninterrupted after ${(msg.played_ms / 1000).toFixed(1)} s`;
+  const log = $("log");
+  if (log.scrollHeight - log.scrollTop - log.clientHeight < 120) log.scrollTop = log.scrollHeight;
+}
+
+function onMessage(msg) {
+  switch (msg.type) {
+    case "ready":
+      ready = true;
+      logLine(`connected (session ${msg.session_id})`);
+      $("text").disabled = $("send").disabled = false;
+      break;
+    case "transcript":
+      onTranscript(msg);
+      break;
+    case "state":
+      setPill("agent", `agent: ${msg.agent}`, { listening: "on", thinking: "busy", speaking: "speaking" }[msg.agent]);
+      setPill("user", `you: ${msg.user}`, msg.user === "speaking" ? "speaking" : "");
+      break;
+    case "metrics":
+      if (msg.kind === "turn" && msg.data.voice_to_voice != null) {
+        setPill("latency", `voice-to-voice: ${Math.round(msg.data.voice_to_voice * 1000)} ms`, "on");
+      }
+      break;
+    case "error":
+      logLine(`error: ${msg.message}`, "error");
+      break;
+    case "clear":  // barge-in: the server stopped sending at once; nothing is queued here
+      break;
+    default:
+      break;  // ignore unknown messages (forward compatibility)
+  }
+}
+
+// Playout delay of the agent's audio: jitter buffer (average over the last interval) plus
+// half the round trip. The server adds it to what it still has queued to know what you heard.
+async function reportPlayout() {
+  if (!pc) return;
+  let jitter = null, rtt = null;
+  (await pc.getStats()).forEach((r) => {
+    if (r.type === "inbound-rtp" && r.kind === "audio" && r.jitterBufferEmittedCount) {
+      if (lastJitter && r.jitterBufferEmittedCount > lastJitter.count) {
+        jitter = (r.jitterBufferDelay - lastJitter.delay) / (r.jitterBufferEmittedCount - lastJitter.count);
+      }
+      lastJitter = { delay: r.jitterBufferDelay, count: r.jitterBufferEmittedCount };
+    } else if (r.type === "candidate-pair" && r.nominated && r.currentRoundTripTime != null) {
+      rtt = r.currentRoundTripTime;
+    }
+  });
+  if (jitter == null) return;
+  const delayMs = Math.round((jitter + (rtt || 0) / 2) * 1000) + 20;  // + ~20 ms output device
+  send({ type: "playout", delay_ms: delayMs });
+  setPill("playout", `playout: ${delayMs} ms`, "on");
+}
+
+function startMeter(stream) {
+  meterCtx = new AudioContext();
+  const analyser = meterCtx.createAnalyser();
+  analyser.fftSize = 512;
+  meterCtx.createMediaStreamSource(stream).connect(analyser);
+  const buf = new Float32Array(analyser.fftSize);
+  const tick = () => {
+    analyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (const x of buf) sum += x * x;
+    const rms = muted ? 0 : Math.sqrt(sum / buf.length);
+    $("level").style.width = `${Math.min(100, rms * 400)}%`;
+    meterFrame = requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+function waitForIceGathering(peer, timeoutMs) {
+  if (peer.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      if (peer.iceGatheringState !== "complete") return;
+      peer.removeEventListener("icegatheringstatechange", done);
+      resolve();
+    };
+    peer.addEventListener("icegatheringstatechange", done);
+    setTimeout(resolve, timeoutMs);  // send what we have (host candidates suffice on a LAN)
+  });
+}
+
+async function connect() {
+  $("connect").disabled = true;
+  setPill("conn", "connecting...", "busy");
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    startMeter(micStream);
+    const config = await (await fetch(endpoint("config"))).json();
+    pc = new RTCPeerConnection(config);
+    const [micTrack] = micStream.getAudioTracks();
+    pc.addTrack(micTrack, micStream);  // sendrecv: the agent answers on the same transceiver
+    channel = pc.createDataChannel("van", { negotiated: true, id: 0 });
+    channel.onmessage = (e) => {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch { return; }
+      onMessage(msg);
+    };
+    pc.ontrack = (e) => {
+      $("remote").srcObject = e.streams[0] || new MediaStream([e.track]);
+      $("remote").play().catch(() => logLine("click anywhere on the page to enable audio"));
+    };
+    pc.onconnectionstatechange = () => {
+      const state = pc && pc.connectionState;
+      if (state === "connected") {
+        setPill("conn", "connected", "on");
+        $("mute").disabled = false;
+      } else if (state === "failed" || state === "closed") {
+        logLine(`connection ${state}`, state === "failed" ? "error" : "");
+        teardown();
+      } else if (state) {
+        setPill("conn", state, "busy");
+      }
+    };
+    await pc.setLocalDescription(await pc.createOffer());
+    await waitForIceGathering(pc, 2000);
+    const response = await fetch(endpoint("offer"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp, metadata: { client: "van-webrtc-demo" } }),
+    });
+    const answer = await response.json();
+    if (!response.ok) throw new Error(answer.error || `HTTP ${response.status}`);
+    await pc.setRemoteDescription({ type: answer.type, sdp: answer.sdp });
+    statsTimer = setInterval(() => reportPlayout().catch(() => {}), 1000);
+    $("connect").textContent = "Hang up";
+    $("connect").disabled = false;
+  } catch (err) {
+    logLine(`could not connect: ${err.message || err}`, "error");
+    teardown();
+  }
+}
+
+function teardown() {
+  ready = false;
+  if (statsTimer) clearInterval(statsTimer);
+  statsTimer = null;
+  lastJitter = null;
+  if (pc) {
+    pc.onconnectionstatechange = pc.ontrack = null;  // a late event must not hit a new session
+    pc.close();
+  }
+  pc = channel = null;
+  if (micStream) micStream.getTracks().forEach((t) => t.stop());
+  micStream = null;
+  cancelAnimationFrame(meterFrame);
+  if (meterCtx) meterCtx.close();
+  meterCtx = null;
+  $("remote").srcObject = null;
+  bubbles.clear();
+  muted = false;
+  $("mute").textContent = "Mute mic";
+  $("level").style.width = "0";
+  $("connect").textContent = "Connect";
+  $("connect").disabled = false;
+  $("text").disabled = $("send").disabled = $("mute").disabled = true;
+  setPill("conn", "disconnected");
+  setPill("agent", "agent: -");
+  setPill("user", "you: -");
+  setPill("playout", "playout: -");
+}
+
+$("connect").addEventListener("click", () => {
+  if (!pc) return connect();
+  send({ type: "bye" });  // tells the server at once; the DTLS close follows
+  logLine("hung up");
+  $("connect").disabled = true;
+  setTimeout(teardown, 100);
+});
+document.addEventListener("click", () => {
+  const audio = $("remote");
+  if (audio.srcObject && audio.paused) audio.play().catch(() => {});
+  if (meterCtx && meterCtx.state === "suspended") meterCtx.resume().catch(() => {});
+});
+$("mute").addEventListener("click", () => {
+  muted = !muted;
+  micStream.getAudioTracks().forEach((t) => { t.enabled = !muted; });  // sends silence
+  $("mute").textContent = muted ? "Unmute mic" : "Mute mic";
+});
+$("text-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = $("text").value.trim();
+  if (!text || !ready) return;
+  send({ type: "text", text });
+  const el = bubble("user", `typed:${Date.now()}`);
+  el.querySelector(".text").textContent = text;
+  $("text").value = "";
+});
+if (params.get("autoconnect") === "1") connect();
+</script>
+</body>
+</html>

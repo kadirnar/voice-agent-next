@@ -36,6 +36,55 @@ residual ≈ 100 ms.
 * Streaming STT (sherpa-onnx / NeMo cache-aware models, #9) to cut the ~360 ms final-transcript wait.
 * Speculative LLM generation on eager end-of-turn (#27).
 
+## T1 · Streaming STT and GPU on the same desktop (2026-09-24)
+
+These runs use the same scenario (`latency-local*.yaml`) and the same LLM and TTS (Ollama LFM2.5-1.2B, Kokoro on CPU); only the speech recognizer changes. Each pair of configurations was run back to back. Other agents were running tests on the same machine at the time, so compare numbers within a table, not across tables.
+
+**sherpa-onnx streaming STT, CPU (#9):** 24 measured turns per configuration.
+
+| STT | v2v p50 / p90 | end-of-turn delay p50 | final transcript after flush |
+|---|---:|---:|---:|
+| faster-whisper `base` (CPU int8) | 1,284 / 1,878 ms | 633 ms | 373 ms |
+| sherpa-onnx NeMo streaming 80 ms | 1,209 / 1,872 ms | 401 ms | 94 ms |
+| sherpa-onnx Kroko streaming | **1,126 / 1,620 ms** | **400 ms** | **100 ms** |
+
+**faster-whisper on the RTX 5070 Ti (#49):** Blackwell works with CTranslate2 4.8.2 and pip's cuBLAS 12.9 (`[cuda]` extra). 10 turns each.
+
+| faster-whisper `base` | STT p50 | end-of-turn delay p50 | v2v p50 | v2v p90 |
+|---|---:|---:|---:|---:|
+| CPU int8 | 391 ms | 652 ms | 1,523 ms | 1,750 ms |
+| CUDA float16 | **51 ms** | **401 ms** | **969 ms** | 2,975 ms* |
+
+\* In the GPU run the LLM answered the refund question with a long first clause, and Kokoro (still on CPU) took 2.3–3.5 s to render it. The high p90 is TTS, not STT.
+
+**Kyutai Pocket TTS vs Kokoro, both on CPU (#76):** 12 turns each, two back-to-back pairs.
+
+| TTS | v2v p50 | v2v p90 | TTS first audio p50 |
+|---|---:|---:|---:|
+| Kokoro v1.0 (sentence-level) | 1,279–1,429 ms | 1,829–2,824 ms | 442–536 ms |
+| Pocket TTS (80 ms audio streaming) | **880–891 ms** | **991–1,184 ms** | **95–101 ms** |
+
+Audio-streaming TTS removes the clause-rendering wait. It is the largest single CPU improvement measured so far.
+
+**What this shows:** with a streaming or GPU recognizer, the end-of-turn delay reaches the cascade's fixed 0.4 s minimum endpointing delay. The next levers are:
+- a lower minimum delay for streaming STT;
+- speculative generation (#27, merged; it saves 190–290 ms on mock stacks with cloud-like LLM latencies, and is off by default);
+- GPU TTS (#79);
+- an omni model that replaces STT + LLM + TTS (#75).
+
+## T2 · ASR on CPU (2026-09-24, `van bench asr`)
+
+LibriSpeech test-clean smoke subset (50 utterances, 10 speakers), Ryzen 5 5600 CPU, Whisper-style normalization. `TTFS` is the time from the end of the audio to the final transcript: in streaming mode it is measured from `flush()`, in batch mode it is the whole transcription time.
+
+| system | mode | WER | RTFx | TTFS p50 |
+| :--- | :--- | ---: | ---: | ---: |
+| faster-whisper `base` (int8) | batch | 4.75 % | 18 | 410 ms |
+| sherpa-onnx `nemo-fastconformer-en-80ms` | streaming, real time | **2.29 %** | – | **63 ms** |
+| sherpa-onnx `nemo-fastconformer-en-80ms` | batch | 2.29 % | 7.7 | 996 ms |
+| Moonshine `tiny` | batch | 5.19 % | 69 | 102 ms |
+
+On this subset the streaming NeMo model is both the most accurate and the fastest to finalize. Scores for FLEURS (en/es/de/tr/zh) are in PR #99.
+
 ## T7 · Framework overhead (mock components)
 
 `van bench latency --engine mock` (energy VAD 0.4 s silence, no model latency): v2v p50 ≈ 402 ms

@@ -54,6 +54,7 @@ from ..audio.resample import resample
 from ..chat import AudioContent, ChatContext, ChatMessage
 from ..errors import ConfigurationError, ProviderConnectionError, ProviderError
 from ..llm import LLM, ChatChunk, CompletionUsage, LLMCapabilities, LLMStream, ToolChoice
+from ..models import ModelFile, register_model
 from ..registry import register_provider
 from ..tools import FunctionTool
 from ..utils.download import cache_dir, download, download_archive
@@ -206,6 +207,58 @@ def download_runner() -> Path:
     if not exe.is_file():
         raise ProviderError(f"{PROVIDER}: {_SERVER_EXE} not found in {root}", provider=PROVIDER)
     return exe
+
+
+_RUNNER_SIZES = {
+    "llama-liquid-audio-ubuntu-x64.zip": 13_241_089,
+    "llama-liquid-audio-ubuntu-arm64.zip": 8_931_308,
+    "llama-liquid-audio-macos-arm64.zip": 7_026_180,
+}
+
+
+def _register_models() -> None:
+    """Declare the GGUF sets (and this platform's runner) to ``van models``."""
+    sizes = {
+        "Q4_0": (695_750_880, 219_511_136, 108_986_560, 50_546_112),
+        "Q8_0": (1_246_253_280, 293_443_936, 205_742_272, 76_957_632),
+        "F16": (2_343_325_920, 458_806_624, 387_159_232, 142_699_392),
+    }
+    runner = _RUNNERS.get(_runner_key())
+    subdir = f"liquid-audio/{HF_REPO.split('/')[-1]}"
+    for quant in QUANTS:
+        files = [
+            ModelFile.from_url(
+                _hf_url(f"{prefix}LFM2.5-Audio-1.5B-{quant}.gguf"),
+                subdir=subdir,
+                sha256=_MODEL_SHA256[quant, role],
+                size=size,
+            )
+            for (role, prefix), size in zip(_ROLES.items(), sizes[quant], strict=True)
+        ]
+        if runner is not None:
+            files.append(
+                ModelFile.from_archive(
+                    _hf_url(f"runners/{runner[0]}"),
+                    subdir="liquid-audio/runners",
+                    sha256=runner[1],
+                    size=_RUNNER_SIZES.get(runner[0]),
+                    required=(_SERVER_EXE,),
+                )
+            )
+        default = quant == "Q4_0"
+        register_model(
+            PROVIDER,
+            "lfm2.5-audio-1.5b" if default else f"lfm2.5-audio-1.5b-{quant.lower()}",
+            kind="llm",
+            files=files,
+            license="LFM Open License v1.0",
+            languages="en",
+            description=f"LFM2.5-Audio-1.5B {quant} GGUF + llama-liquid-audio-server runner "
+            "(omni: audio in, speech out)",
+        )
+
+
+_register_models()
 
 
 # --------------------------------------------------------------------------- server

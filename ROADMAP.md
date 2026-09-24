@@ -26,13 +26,13 @@ Fully offline agent with local audio, VAD/turn detection, STT, LLM and TTS on al
 - [x] #5 faster-whisper STT provider (local CPU/CUDA) `P0`
 - [x] #6 Kokoro TTS provider (kokoro-onnx, local) `P0`
 - [x] #7 OpenAI & OpenAI-compatible LLM provider (Ollama, llama.cpp, vLLM, LM Studio, Groq, Cerebras, Together, OpenRouter…) `P0`
-- [ ] #8 Presets and `van run` UX (local-cpu, local-gpu, apple, cloud-fast, openai-realtime, gemini-live) `P1`
-- [ ] #9 sherpa-onnx providers: streaming STT (Zipformer / Parakeet / Moonshine), TTS and VAD `P1` — 🚧 wave 2
+- [x] #8 Presets and `van run` UX (local-cpu, local-gpu, apple, cloud-fast, openai-realtime, gemini-live) `P1`
+- [x] #9 sherpa-onnx providers: streaming STT (Zipformer / Parakeet / Moonshine), TTS and VAD `P1`
 - [ ] #10 Apple Silicon providers via MLX (parakeet-mlx / mlx-whisper STT, mlx-audio TTS, mlx-lm) `P2`
-- [ ] #76 Kyutai Pocket TTS: audio-streaming local TTS on CPU with voice cloning `P1`
-- [ ] #77 Moonshine Streaming STT (moonshine-voice): low-latency local STT for CPUs and edge devices `P1`
+- [x] #76 Kyutai Pocket TTS: audio-streaming local TTS on CPU with voice cloning `P1`
+- [x] #77 Moonshine Streaming STT (moonshine-voice): low-latency local STT for CPUs and edge devices `P1`
 - [ ] #78 NeMo-Speech.cpp server: Nemotron cache-aware streaming STT, Parakeet, Magpie TTS `P1`
-- [ ] #79 Local GPU TTS: Chatterbox (Turbo/Nano/Multilingual), Qwen3-TTS, CosyVoice 3 `P2`
+- [ ] #79 Local GPU TTS: Chatterbox (Turbo/Nano/Multilingual), Qwen3-TTS, CosyVoice 3 `P2` — 🚧 wave 3
 
 ## M2 · Native speech-to-speech engines
 
@@ -40,12 +40,12 @@ Native speech-to-speech engines, cloud and local.
 
 - [x] #11 OpenAI Realtime engine (WebSocket) with compatibility profiles (Azure, xAI, Qwen-Omni, vLLM, Speaches…) `P0`
 - [x] #12 Gemini Live engine (BidiGenerateContent) with session resumption and non-blocking tools `P0`
-- [ ] #13 Moshi / PersonaPlex full-duplex engine (local moshi-server protocol) `P1`
+- [ ] #13 Moshi / PersonaPlex full-duplex engine (local moshi-server protocol) `P1` — 🚧 wave 3
 - [ ] #14 Audio-input LLMs for half-cascades (gpt-audio, Qwen-Omni, vLLM-Omni, llama.cpp audio) `P1`
 - [ ] #15 OpenAI GPT-Live engine (Live protocol, full-duplex, delegation) `P1`
 - [ ] #16 Amazon Nova 2 Sonic engine (Bedrock bidirectional stream, 8-min rotation) `P2`
-- [ ] #17 Engine session rotation & reconnect with context carry-over `P1`
-- [ ] #75 Omni models in the cascade: audio-output LLMs (LFM2.5-Audio via llama-liquid-audio-server, gpt-audio, Qwen-Omni) — fully local native S2S on CPU `P1`
+- [ ] #17 Engine session rotation & reconnect with context carry-over `P1` — 🚧 wave 3
+- [ ] #75 Omni models in the cascade: audio-output LLMs (LFM2.5-Audio via llama-liquid-audio-server, gpt-audio, Qwen-Omni) — fully local native S2S on CPU `P1` — 🚧 wave 3
 
 ## M3 · Cloud cascade providers
 
@@ -53,11 +53,11 @@ Cloud providers for cascades.
 
 - [x] #18 Deepgram: Nova-3 & Flux streaming STT (turn events) + Aura-2 TTS `P0`
 - [x] #19 Cartesia: Sonic TTS (WebSocket continuations, word timestamps) + Ink STT `P0`
-- [ ] #20 AssemblyAI Universal-Streaming v3 STT (neural turn detection, ForceEndpoint) `P1`
-- [ ] #21 ElevenLabs: Flash v2.5 / v3 TTS (stream-input, alignment) + Scribe v2 Realtime STT `P1` — 🚧 wave 2
+- [x] #20 AssemblyAI Universal-Streaming v3 STT (neural turn detection, ForceEndpoint) `P1`
+- [x] #21 ElevenLabs: Flash v2.5 / v3 TTS (stream-input, alignment) + Scribe v2 Realtime STT `P1`
 - [x] #22 Anthropic Claude LLM provider (streaming tool use, prompt caching) `P0`
-- [ ] #23 Google Gemini LLM + Gemini TTS providers (google-genai) `P1` — 🚧 wave 2
-- [ ] #24 OpenAI STT (realtime transcription) and TTS (gpt-4o-mini-tts) providers `P1` — 🚧 wave 2
+- [x] #23 Google Gemini LLM + Gemini TTS providers (google-genai) `P1`
+- [x] #24 OpenAI STT (realtime transcription) and TTS (gpt-4o-mini-tts) providers `P1`
 - [ ] #25 Soniox and Speechmatics streaming STT providers `P2`
 
 ## M4 · Turn-taking & session intelligence
@@ -65,11 +65,11 @@ Cloud providers for cascades.
 What makes conversations feel natural and robust.
 
 - [x] #26 Interruption policy: min duration/words, backchannel filter, false-interruption pause & resume `P0`
-- [ ] #27 Speculative (preemptive) LLM generation in the cascade on eager end-of-turn `P1` — 🚧 wave 2
-- [ ] #28 Tool-call watchdog fillers, non-blocking tools and delegation `P1`
-- [ ] #29 Session recording (stereo WAV + JSONL timeline) and OpenTelemetry tracing `P1`
-- [ ] #30 Provider failover chains (FallbackSTT / FallbackLLM / FallbackTTS) `P1`
-- [ ] #31 Dynamic endpointing and dictation mode `P2`
+- [x] #27 Speculative (preemptive) LLM generation in the cascade on eager end-of-turn `P1`
+- [x] #28 Tool-call watchdog fillers, non-blocking tools and delegation `P1`
+- [x] #29 Session recording (stereo WAV + JSONL timeline) and OpenTelemetry tracing `P1`
+- [x] #30 Provider failover chains (FallbackSTT / FallbackLLM / FallbackTTS) `P1`
+- [ ] #31 Dynamic endpointing and dictation mode `P2` — 🚧 wave 3
 - [ ] #32 Multi-agent handoffs and conversation flows `P2`
 
 ## M5 · Transports & serving
@@ -77,9 +77,9 @@ What makes conversations feel natural and robust.
 Getting audio in and out: browsers, phones, servers.
 
 - [x] #33 WebSocket server transport + browser client demo `P0`
-- [ ] #34 WebRTC transport (aiortc peer-to-peer) + browser demo `P1`
-- [ ] #35 Telephony serializers: Twilio Media Streams, Telnyx, Vonage, Plivo `P1`
-- [ ] #36 OpenAI-Realtime-compatible server: serve any engine at /v1/realtime `P1` — 🚧 wave 2
+- [x] #34 WebRTC transport (aiortc peer-to-peer) + browser demo `P1`
+- [x] #35 Telephony serializers: Twilio Media Streams, Telnyx, Vonage, Plivo `P1`
+- [x] #36 OpenAI-Realtime-compatible server: serve any engine at /v1/realtime `P1`
 - [ ] #37 `van serve`: worker pool with prewarm, health checks and concurrency limits `P2`
 - [ ] #38 Docker images (CPU / CUDA) and compose files for fully local stacks `P2`
 
@@ -88,9 +88,9 @@ Getting audio in and out: browsers, phones, servers.
 Seven tracks x three tiers, measured at the audio boundary.
 
 - [x] #39 Benchmark harness core + T1 latency track (`van bench`) `P0`
-- [ ] #40 T7 framework-overhead track + CI benchmark regression gate `P1` — 🚧 wave 2
-- [ ] #41 T2 ASR track: WER/CER, RTFx, TTFS (LibriSpeech / FLEURS smoke subsets) `P1`
-- [ ] #42 T3 TTS track: TTFA, RTF, round-trip WER, MOS predictors `P1`
+- [x] #40 T7 framework-overhead track + CI benchmark regression gate `P1`
+- [ ] #41 T2 ASR track: WER/CER, RTFx, TTFS (LibriSpeech / FLEURS smoke subsets) `P1` — 🚧 wave 3
+- [ ] #42 T3 TTS track: TTFA, RTF, round-trip WER, MOS predictors `P1` — 🚧 wave 3
 - [ ] #43 T4 VAD & turn-taking track (eot-bench adapter, VAD frame metrics, barge-in battery) `P1`
 - [ ] #44 T5 speech-to-speech quality track (Big Bench Audio, VoiceBench subsets) `P2`
 - [ ] #45 T6 tool-use track (scripted scenarios with deterministic mock tools; τ-Voice adapter) `P2`
@@ -100,9 +100,9 @@ Seven tracks x three tiers, measured at the audio boundary.
 Docs, examples, tooling, releases.
 
 - [ ] #46 Documentation site (mkdocs-material) with guides and API reference `P1`
-- [ ] #47 Example gallery (offline local agent, OpenAI Realtime, Gemini Live, telephony, tools, benchmarks) `P1`
-- [ ] #48 Model manager: `van models` (list/download/verify/prune cached models) `P1`
-- [ ] #49 Hardware-aware backend auto-selection (CUDA / TensorRT / CoreML / DirectML / MLX / CPU) `P2` — 🚧 wave 2
+- [ ] #47 Example gallery (offline local agent, OpenAI Realtime, Gemini Live, telephony, tools, benchmarks) `P1` — 🚧 wave 3
+- [x] #48 Model manager: `van models` (list/download/verify/prune cached models) `P1`
+- [x] #49 Hardware-aware backend auto-selection (CUDA / TensorRT / CoreML / DirectML / MLX / CPU) `P2`
 - [ ] #50 `van doctor` deep diagnostics (PortAudio host APIs, echo test, mic level meter, latency probe) `P2`
 - [ ] #51 Release automation: PyPI trusted publishing, changelog, versioning `P2`
 
@@ -111,5 +111,6 @@ Docs, examples, tooling, releases.
 Work proceeds in **waves**: every wave takes the highest-priority issues whose dependencies are merged, and runs them in parallel (one agent per issue, each in its own git worktree and branch). After each wave the maintainer reviews and merges the PRs, re-runs the full test suite and the benchmark smoke tier, analyses gaps, and files follow-up issues for the next wave.
 
 - **Wave 1 (done, PRs #53–#68):** local audio + echo cancellation, Silero VAD, Smart Turn, faster-whisper, Kokoro, OpenAI-compatible LLMs (11 servers/clouds), OpenAI Realtime (+ Azure, xAI, Qwen-Omni, vLLM, Speaches, LocalAI profiles), Gemini Live, Deepgram, Cartesia, Anthropic, interruption policy, WebSocket transport, benchmark harness + latency track. Integration follow-ups: #62 (session pre-warm and history ordering landed in #69).
-- **Wave 2 (in progress):** sherpa-onnx streaming STT/TTS (#9), ElevenLabs (#21), Gemini LLM/TTS (#23), OpenAI STT/TTS (#24), speculative generation (#27), OpenAI-Realtime-compatible server (#36), framework-overhead track + CI gate (#40), hardware-aware backends + GPU (#49); then omni models (#75), AssemblyAI, failover, recording/tracing, WebRTC, telephony, presets, model manager, remaining benchmark tracks, docs site.
+- **Wave 2 (done):** sherpa-onnx streaming STT/TTS (#9), AssemblyAI (#20), ElevenLabs (#21), Gemini LLM/TTS (#23), OpenAI STT/TTS (#24), speculative generation (#27), recording + tracing (#29), failover (#30), telephony (#35), OpenAI-Realtime-compatible server (#36), overhead track + CI gate (#40), GPU/hardware backends (#49).
+- **Wave 3 (in progress):** done: presets (#8), async tools (#28), WebRTC (#34), model manager (#48), Pocket TTS (#76), Moonshine (#77); running: omni models / LFM2.5-Audio (#75), Moshi (#13), session rotation (#17), dynamic endpointing (#31), ASR + TTS tracks (#41, #42), examples (#47), GPU TTS (#79).
 - **Lessons that shaped the process:** agents commit and push work in progress (an API limit once killed half a wave; the recovered agents resumed from their pushed branches), Windows CI runs on every PR (two merged PRs had Windows-only test races), and the benchmark drives the backlog (the first local run found a 0.9 s win in how the first sentence is split for TTS).

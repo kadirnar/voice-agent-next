@@ -28,7 +28,7 @@ from .audio.frame import AudioFrame
 from .audio.resample import StreamResampler
 from .chat import ChatContext, FunctionCallOutput
 from .events import EngineEvent
-from .tools import FunctionTool
+from .tools import FunctionTool, ToolScheduling
 from .utils.aio import Chan
 from .utils.clock import now
 from .utils.emitter import EventEmitter
@@ -224,6 +224,14 @@ class EngineConnection(ABC):
     @abstractmethod
     async def send_tool_output(self, output: FunctionCallOutput, *, respond: bool = True) -> None:
         """Return a tool result; trigger a response if ``respond``."""
+
+    async def send_async_tool_output(
+        self, output: FunctionCallOutput, *, scheduling: ToolScheduling = "when_idle"
+    ) -> None:
+        """Return the result of a call the model did not wait for (engines whose
+        ``tool_mode`` is not ``"blocking"``). Engines with result scheduling (Gemini Live)
+        override this; the default responds unless ``scheduling`` is ``"silent"``."""
+        await self.send_tool_output(output, respond=scheduling != "silent")
 
     @abstractmethod
     async def update(

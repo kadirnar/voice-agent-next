@@ -43,6 +43,7 @@ import numpy as np
 from ..audio.frame import SAMPLE_WIDTH, AudioFrame
 from ..errors import ConfigurationError, ProviderError
 from ..hardware import select_onnx_backend
+from ..models import ModelFile, register_model
 from ..registry import register_provider
 from ..text.sentences import SentenceSegmenter
 from ..tts import TTS, ChunkedStream
@@ -574,3 +575,22 @@ class _KokoroChunkedStream(ChunkedStream):
             pcm = await tts._submit(tts._synthesize_segment, segment, voice)
             for start in range(0, len(pcm), step):
                 self._push_audio(pcm[start : start + step])
+
+
+def _model_file(asset: KokoroAsset) -> ModelFile:
+    return ModelFile.from_url(
+        asset.url, subdir=f"kokoro/{_RELEASE}", sha256=asset.sha256, size=asset.size
+    )
+
+
+for _name, _variant in KOKORO_MODELS.items():
+    _zh = _name.startswith("v1.1-zh")
+    register_model(
+        "kokoro",
+        _name,
+        kind="tts",
+        files=[_model_file(_variant.onnx), _model_file(_variant.voices)],
+        license="Apache-2.0",
+        languages="zh, en" if _zh else "en, es, fr, hi, it, ja, pt, zh",
+        description=f"Kokoro-82M {_name} ONNX + voice pack ({_variant.voices.filename})",
+    )

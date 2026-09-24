@@ -14,6 +14,9 @@ from .events import (
     SessionClosed,
     SessionError,
     ToolCalled,
+    ToolCancelled,
+    ToolFiller,
+    ToolProgress,
     ToolResult,
     UserState,
     UserStateChanged,
@@ -21,12 +24,13 @@ from .events import (
 )
 from .interruptions import InterruptionPolicy, backchannel_words_for
 from .recording import SessionRecorder
-from .session import AgentSession, SessionOptions
+from .session import DEFAULT_TOOL_FILLERS, AgentSession, SessionOptions
 from .taps import SessionTap
 from .tracing import SessionTracer
 
 __all__ = [
     "DEFAULT_INSTRUCTIONS",
+    "DEFAULT_TOOL_FILLERS",
     "Agent",
     "AgentFalseInterruption",
     "AgentSession",
@@ -44,6 +48,9 @@ __all__ = [
     "SessionTap",
     "SessionTracer",
     "ToolCalled",
+    "ToolCancelled",
+    "ToolFiller",
+    "ToolProgress",
     "ToolResult",
     "UserState",
     "UserStateChanged",

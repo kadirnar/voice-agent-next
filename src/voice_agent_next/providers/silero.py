@@ -27,6 +27,7 @@ import numpy as np
 import numpy.typing as npt
 
 from ..errors import ConfigurationError, ProviderError
+from ..models import ModelFile, register_model
 from ..registry import register_provider
 from ..utils.clock import now
 from ..utils.deps import require
@@ -248,3 +249,24 @@ class SileroVAD(VAD):
             providers,
         )
         return session
+
+
+_SIZES = {"v6.2": 2_327_524}
+for _name, _file in _MODELS.items():
+    register_model(
+        "silero",
+        _name,
+        kind="vad",
+        files=[
+            ModelFile.from_url(
+                _file.url,
+                subdir="silero",
+                filename=_file.filename,
+                sha256=_file.sha256,
+                size=_SIZES.get(_name),
+            )
+        ],
+        license="MIT",
+        languages="any",
+        description=f"Silero VAD {_name} (ONNX, 8/16 kHz)",
+    )
