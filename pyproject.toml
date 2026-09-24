@@ -63,7 +63,7 @@ silero = ["onnxruntime>=1.19"]
 smart-turn = ["onnxruntime>=1.19"]
 # --- local STT / TTS / LLM ------------------------------------------------------
 faster-whisper = ["faster-whisper>=1.1"]
-kokoro = ["kokoro-onnx>=0.4"]
+kokoro = ["kokoro-onnx>=0.6.1; python_version < '3.14'"]  # upstream caps Requires-Python <3.14
 sherpa-onnx = ["sherpa-onnx>=1.10"]
 # --- cloud providers (Deepgram, Cartesia, AssemblyAI, ElevenLabs... use raw WS/HTTP) --
 anthropic = ["anthropic>=0.60"]
