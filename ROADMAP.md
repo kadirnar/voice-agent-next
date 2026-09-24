@@ -41,6 +41,7 @@ Native speech-to-speech engines, cloud and local.
 - [ ] #15 OpenAI GPT-Live engine (Live protocol, full-duplex, delegation) `P1`
 - [ ] #16 Amazon Nova 2 Sonic engine (Bedrock bidirectional stream, 8-min rotation) `P2`
 - [ ] #17 Engine session rotation & reconnect with context carry-over `P1`
+- [ ] #75 Omni models in the cascade: audio-output LLMs (LFM2.5-Audio via llama-liquid-audio-server, gpt-audio, Qwen-Omni) — fully local native S2S on CPU `P1`
 
 ## M3 · Cloud cascade providers
 
@@ -51,7 +52,7 @@ Cloud providers for cascades.
 - [ ] #20 AssemblyAI Universal-Streaming v3 STT (neural turn detection, ForceEndpoint) `P1`
 - [ ] #21 ElevenLabs: Flash v2.5 / v3 TTS (stream-input, alignment) + Scribe v2 Realtime STT `P1` — 🚧 wave 2
 - [x] #22 Anthropic Claude LLM provider (streaming tool use, prompt caching) `P0`
-- [ ] #23 Google Gemini LLM + Gemini TTS providers (google-genai) `P1`
+- [ ] #23 Google Gemini LLM + Gemini TTS providers (google-genai) `P1` — 🚧 wave 2
 - [ ] #24 OpenAI STT (realtime transcription) and TTS (gpt-4o-mini-tts) providers `P1` — 🚧 wave 2
 - [ ] #25 Soniox and Speechmatics streaming STT providers `P2`
 
@@ -97,7 +98,7 @@ Docs, examples, tooling, releases.
 - [ ] #46 Documentation site (mkdocs-material) with guides and API reference `P1`
 - [ ] #47 Example gallery (offline local agent, OpenAI Realtime, Gemini Live, telephony, tools, benchmarks) `P1`
 - [ ] #48 Model manager: `van models` (list/download/verify/prune cached models) `P1`
-- [ ] #49 Hardware-aware backend auto-selection (CUDA / TensorRT / CoreML / DirectML / MLX / CPU) `P2`
+- [ ] #49 Hardware-aware backend auto-selection (CUDA / TensorRT / CoreML / DirectML / MLX / CPU) `P2` — 🚧 wave 2
 - [ ] #50 `van doctor` deep diagnostics (PortAudio host APIs, echo test, mic level meter, latency probe) `P2`
 - [ ] #51 Release automation: PyPI trusted publishing, changelog, versioning `P2`
 
@@ -106,5 +107,5 @@ Docs, examples, tooling, releases.
 Work proceeds in **waves**: every wave takes the highest-priority issues whose dependencies are merged, and runs them in parallel (one agent per issue, each in its own git worktree and branch). After each wave the maintainer reviews and merges the PRs, re-runs the full test suite and the benchmark smoke tier, analyses gaps, and files follow-up issues for the next wave.
 
 - **Wave 1 (done, PRs #53–#68):** local audio + echo cancellation, Silero VAD, Smart Turn, faster-whisper, Kokoro, OpenAI-compatible LLMs (11 servers/clouds), OpenAI Realtime (+ Azure, xAI, Qwen-Omni, vLLM, Speaches, LocalAI profiles), Gemini Live, Deepgram, Cartesia, Anthropic, interruption policy, WebSocket transport, benchmark harness + latency track. Integration follow-ups: #62 (session pre-warm and history ordering landed in #69).
-- **Wave 2 (in progress):** sherpa-onnx streaming STT/TTS (#9), ElevenLabs (#21), OpenAI STT/TTS (#24), speculative generation (#27), OpenAI-Realtime-compatible server (#36), framework-overhead track + CI gate (#40); then Gemini LLM/TTS, AssemblyAI, failover, recording/tracing, WebRTC, telephony, presets, model manager, hardware-aware backends, remaining benchmark tracks, docs site.
+- **Wave 2 (in progress):** sherpa-onnx streaming STT/TTS (#9), ElevenLabs (#21), Gemini LLM/TTS (#23), OpenAI STT/TTS (#24), speculative generation (#27), OpenAI-Realtime-compatible server (#36), framework-overhead track + CI gate (#40), hardware-aware backends + GPU (#49); then omni models (#75), AssemblyAI, failover, recording/tracing, WebRTC, telephony, presets, model manager, remaining benchmark tracks, docs site.
 - **Lessons that shaped the process:** agents commit and push work in progress (an API limit once killed half a wave; the recovered agents resumed from their pushed branches), Windows CI runs on every PR (two merged PRs had Windows-only test races), and the benchmark drives the backlog (the first local run found a 0.9 s win in how the first sentence is split for TTS).
