@@ -224,7 +224,7 @@ BUILTIN_SCENARIOS: dict[str, dict[str, Any]] = {
         "lead_in": 0.5,
         "stimuli": "synthetic",
         "reply_timeout": 8.0,
-        "gap_after_reply": 0.3,
+        "gap_after_reply": 0.25,
         "turns": [
             {"id": "time", "text": "What time is it?", "duration": 0.6},
             {"id": "weather", "text": "How is the weather today?", "duration": 0.8},

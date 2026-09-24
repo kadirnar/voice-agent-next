@@ -9,7 +9,7 @@ extra sections (e.g. metric definitions).
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,7 +25,7 @@ def fmt(value: Any, digits: int = 0, *, unit: str = "") -> str:
     if isinstance(value, bool):
         return "yes" if value else "no"
     if isinstance(value, float):
-        return f"{value:,.{digits}f}{unit}"
+        return f"{round(value, digits) + 0.0:,.{digits}f}{unit}"  # + 0.0: no "-0"
     if isinstance(value, int):
         return f"{value:,}{unit}"
     return f"{value}{unit}"
@@ -63,6 +63,13 @@ class ReportSpec:
     """Extra ``(heading, markdown)`` sections appended after the results."""
     max_items: int = 200
     digits: int = 0
+
+
+def _numeric(values: Iterable[Any]) -> bool:
+    present = [v for v in values if v is not None]
+    return bool(present) and all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) for v in present
+    )
 
 
 def _dist_row(label: str, d: Distribution, digits: int) -> list[str]:
@@ -127,7 +134,7 @@ def render_report(results: RunResults, spec: ReportSpec) -> str:
         ["software", _version_line(m.environment)],
         ["machine", _environment_line(m.environment)],
     ]
-    out += [markdown_table(["", ""], info), ""]
+    out += [markdown_table(["field", "value"], info), ""]
 
     out += ["## Results", ""]
     labels = dict(spec.metric_labels) or {k: k for k in s.metrics}
@@ -158,7 +165,11 @@ def render_report(results: RunResults, spec: ReportSpec) -> str:
         item_rows = [
             [fmt(item.get(key), spec.digits) for key, _ in spec.item_columns] for item in shown
         ]
-        out += [markdown_table(headers, item_rows), ""]
+        align = [
+            "r" if _numeric(item.get(key) for item in shown) else "l"
+            for key, _ in spec.item_columns
+        ]
+        out += [markdown_table(headers, item_rows, align), ""]
         if len(results.items) > len(shown):
             out += [f"_{len(results.items) - len(shown)} more items in `items.jsonl`._", ""]
     for note in m.notes:

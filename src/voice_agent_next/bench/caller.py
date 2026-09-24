@@ -102,6 +102,7 @@ class CallerEmulator:
             be true before the caller speaks again; guards against talking into pauses
             between reply sentences.
         should_stop: optional probe that aborts the call (e.g. the session closed).
+        on_turn: called with each :class:`TurnTiming` once the caller moves on.
         tail: silence streamed after the last turn (s).
     """
 
@@ -113,6 +114,7 @@ class CallerEmulator:
         origin: float | None = None,
         agent_idle: Callable[[], bool] | None = None,
         should_stop: Callable[[], bool] | None = None,
+        on_turn: Callable[[TurnTiming], None] | None = None,
         tail: float = 0.2,
     ) -> None:
         if not transport.realtime_playout:
@@ -124,6 +126,7 @@ class CallerEmulator:
         self.origin = origin
         self.agent_idle = agent_idle
         self.should_stop = should_stop
+        self.on_turn = on_turn
         self.tail = tail
         self._rate = transport.input_format.sample_rate
         self._chunk_samples = max(1, round(chunk * self._rate))
@@ -164,6 +167,8 @@ class CallerEmulator:
                 if not await self._send(audio.data[k : k + step]):
                     break
             await self._after_turn(turn, reply_timeout, gap_after_reply, max_reply)
+            if self.on_turn is not None:
+                self.on_turn(turn)
         if not self._aborted:
             await self._stream_silence(self.tail)
         stream_end = self._t_stream + self._sent * self._chunk_dur

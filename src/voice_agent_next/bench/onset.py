@@ -13,7 +13,9 @@ The reference VAD is pluggable because it slightly biases every latency number:
   ``"energy"``...) through its public streaming API and thresholds its probabilities.
 
 Frames are laid out on exact 10 ms boundaries for any sample rate (frame ``i`` starts at
-``round(i * 0.01 * rate)``), so onset times never drift over long recordings.
+``round(i * 0.01 * rate)``), so onset times never drift over long recordings. By default
+the onset is refined inside its frame to the first 1 ms block above the level threshold
+(see :class:`OnsetDetector`), which removes up to one frame of quantization bias.
 """
 
 from __future__ import annotations
@@ -221,13 +223,22 @@ def first_onset_between(
 
 @dataclass(slots=True)
 class OnsetDetector:
-    """Finds speech onsets/segments in one channel with a :class:`ReferenceVAD`."""
+    """Finds speech onsets/segments in one channel with a :class:`ReferenceVAD`.
+
+    The frame rule decides *which* speech counts (a run of >= ``min_speech``); with
+    ``refine`` (default) the onset is then moved from the start of its 10 ms frame to the
+    first 1 ms block inside that frame whose RMS level reaches ``refine_threshold_db``
+    (default: the RMS reference threshold, -40 dBFS). This removes the up-to-one-frame
+    quantization bias without changing which frame is chosen.
+    """
 
     vad: ReferenceVAD = field(default_factory=RMSReferenceVAD)
     frame_duration: float = DEFAULT_FRAME_DURATION
     min_speech: float = DEFAULT_MIN_SPEECH
     max_gap: float = 0.0
     """Dips shorter than this inside speech are bridged (0 = the strict definition)."""
+    refine: bool = True
+    refine_threshold_db: float | None = None
 
     def speech_mask(self, audio: AudioFrame) -> BoolArray:
         probs = self.vad.frame_probabilities(audio, self.frame_duration)
@@ -236,9 +247,29 @@ class OnsetDetector:
     def onsets(self, audio: AudioFrame, mask: BoolArray | None = None) -> list[float]:
         """Onset times (s from the start of ``audio``)."""
         m = self.speech_mask(audio) if mask is None else mask
-        return find_onsets(
+        coarse = find_onsets(
             m, frame_duration=self.frame_duration, min_speech=self.min_speech, max_gap=self.max_gap
         )
+        if not self.refine or not coarse:
+            return coarse
+        x = audio.to_mono().to_numpy().astype(np.float64) / 32768.0
+        return [self._refine(x, audio.sample_rate, t) for t in coarse]
+
+    def _refine_threshold(self) -> float:
+        if self.refine_threshold_db is not None:
+            return self.refine_threshold_db
+        return float(getattr(self.vad, "threshold_db", -40.0))
+
+    def _refine(self, x: FloatArray, rate: int, onset: float) -> float:
+        start = round(onset * rate)
+        end = min(round((onset + self.frame_duration) * rate), len(x))
+        block = max(1, round(0.001 * rate))
+        power = 10.0 ** (self._refine_threshold() / 10.0)
+        for i in range(start, end, block):
+            seg = x[i : min(i + block, end)]
+            if seg.size and float(np.mean(np.square(seg))) >= power:
+                return i / rate
+        return onset
 
     def segments(
         self, audio: AudioFrame, mask: BoolArray | None = None
@@ -259,4 +290,6 @@ class OnsetDetector:
             "frame_ms": round(self.frame_duration * 1000, 3),
             "min_speech_ms": round(self.min_speech * 1000, 3),
             "max_gap_ms": round(self.max_gap * 1000, 3),
+            "refine": self.refine,
+            "refine_threshold_db": self._refine_threshold() if self.refine else None,
         }
