@@ -187,12 +187,17 @@ _LIMIT_HINTS = ("quota", "rate limit", "rate_limit", "too many", "too_many", "co
                 "busy", "credits", "throttl", "queue_overflow", "resource_exhausted")  # fmt: skip
 
 
-def _hint(text: str) -> type[ProviderError] | None:
-    lowered = text.lower()
+def _hinted_error(text: str, hints: str, *, status_code: int | None) -> ProviderError | None:
+    """An authentication / rate-limit error when ``hints`` (an error name or a close
+    reason) says so; quota and credit problems are not worth retrying."""
+    lowered = hints.lower()
     if any(h in lowered for h in _AUTH_HINTS):
-        return AuthenticationError
+        return AuthenticationError(text, provider=_PROVIDER, status_code=status_code)
     if any(h in lowered for h in _LIMIT_HINTS):
-        return RateLimitError
+        retryable = not any(h in lowered for h in ("quota", "credits"))
+        return RateLimitError(
+            text, provider=_PROVIDER, status_code=status_code, retryable=retryable
+        )
     return None
 
 
@@ -268,12 +273,8 @@ def _ws_error(msg: Mapping[str, Any], what: str) -> ProviderError:
         text += f" (code {code})"
     if code is not None and 400 <= code < 600:  # an HTTP status
         return _error_for_status(code, text, code=name)
-    kind = _hint(f"{name} {message or ''}")
-    if kind is AuthenticationError:
-        return AuthenticationError(text, provider=_PROVIDER, status_code=code)
-    if kind is RateLimitError:
-        return RateLimitError(text, provider=_PROVIDER, status_code=code)
-    return ProviderError(text, provider=_PROVIDER, status_code=code)
+    hinted = _hinted_error(text, f"{name} {message or ''}", status_code=code)
+    return hinted or ProviderError(text, provider=_PROVIDER, status_code=code)
 
 
 def _close_error(code: int | None, reason: str, what: str) -> ProviderError:
@@ -282,11 +283,9 @@ def _close_error(code: int | None, reason: str, what: str) -> ProviderError:
     if reason:
         detail += f": {reason}"
     text = f"ElevenLabs {what} WebSocket closed ({detail})"
-    kind = _hint(reason)
-    if kind is AuthenticationError:
-        return AuthenticationError(text, provider=_PROVIDER, status_code=code)
-    if kind is RateLimitError:
-        return RateLimitError(text, provider=_PROVIDER, status_code=code)
+    hinted = _hinted_error(text, reason, status_code=code)
+    if hinted is not None:
+        return hinted
     if code in (1003, 1007, 1008, 1009):  # rejected input / policy violation / too big
         return ProviderError(text, provider=_PROVIDER, status_code=code)
     return ProviderConnectionError(text, provider=_PROVIDER, status_code=code)
@@ -1070,9 +1069,10 @@ class _Connection:
             error = _ws_error(msg, "TTS")
             if ctx is not None:
                 ctx.deliver(error)
-            elif ctx_id is None:  # not tied to a context: fail every open one
+            elif ctx_id is None:  # not tied to a context: fail every open one...
                 logger.warning("%s", error)
                 self._failure = error
+                self.closed = True  # ...and let the next stream reconnect
                 for c in list(self._contexts.values()):
                     c.deliver(error)
             return
@@ -1822,7 +1822,6 @@ class _ScribeStream(STTStream):
             # the commit was dropped and its audio stays uncommitted: no transcript will
             # answer it, so the next flush has to commit again
             logger.warning("ElevenLabs Scribe throttled a commit: %s", msg.get("error", ""))
-            self._server_error = _scribe_error(kind, msg)
             self._pending_commits = max(0, self._pending_commits - 1)
             self._audio_since_commit = True
             self._check_settled()

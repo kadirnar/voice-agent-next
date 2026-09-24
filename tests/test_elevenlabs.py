@@ -737,6 +737,14 @@ async def test_error_messages_are_mapped(
     assert info.value.status_code == status and info.value.retryable is retryable
     assert info.value.provider == "elevenlabs" and payload["message"] in str(info.value)
     await stream.aclose()
+
+    # a context error leaves the socket usable; an error without a context retires it
+    tts_server.error = None
+    stream = tts.stream()
+    stream.push_text("Hi. ")
+    stream.end_input()
+    assert audio_of(await collect_tts(stream)).duration == pytest.approx(WORD)
+    assert tts_server.handshakes == (1 if with_context else 2)
     await tts.aclose()
 
 
