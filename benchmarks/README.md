@@ -13,7 +13,7 @@ local or cloud — that measures what the user *hears*. Design rationale:
 | T4 VAD / turn-taking | eot-bench, barge-in battery | planned (#43) |
 | T5 S2S quality | Big Bench Audio, VoiceBench | planned (#44) |
 | T6 tool use | scripted tool scenarios, τ-Voice | planned (#45) |
-| T7 framework overhead | `v2v − Σ injected delays`, CI regression gate | planned (#40) |
+| **T7 framework overhead** | `v2v − Σ injected delays`, flush, jitter, loop lag, capacity, hot paths; CI regression gate | `van bench overhead` |
 
 ## Quick start
 
@@ -32,6 +32,10 @@ van bench latency --config agent.yaml --scenario benchmarks/scenarios/latency-co
     --turns 40 --sessions 3
 
 van bench report bench-results/<run-id>   # re-render report.md from the result files
+
+# T7: what the runtime itself adds (mocks with known delays, offline, ~2 min)
+van bench overhead
+van bench overhead --baseline benchmarks/baselines/overhead-ci.json   # the CI gate
 ```
 
 `van bench latency --help` lists every option (`--warmup-turns`, `--dead-air`,
@@ -161,6 +165,122 @@ frame). Quote text containing `?`, `:` or `,` inside `{...}` flow mappings.
 * Check `summary.json → extra.sessions[].push_lag_max_ms`: the caller notes in the report
   when audio was delivered > 50 ms late (event-loop stalls inflate latencies).
 
+## T7: framework overhead (`van bench overhead`)
+
+The library claims its runtime adds (almost) nothing to the latency of its components.
+T7 measures that claim with mock components whose delays are known, so whatever is left
+is the framework. Four sections run in one process, one after the other:
+
+| Section | What runs | Headline |
+| --- | --- | --- |
+| `micro` | hot paths in a tight loop: resampling (soxr and the numpy fallback), `AudioFrame` helpers, energy VAD, `SilenceTrimmer`, G.711, sentence segmentation, the pre-TTS text filter, `EventEmitter.emit`, `Chan` | µs per operation |
+| `e2e` | the T1 harness (real-time caller, loopback, recording, reference VAD) on four mock systems | `overhead_ms`, `frame_jitter_ms`, event-loop lag, CPU |
+| `flush` | the app calls `session.interrupt()` 200 ms into every (long) reply | `flush_ms`, leaked frames |
+| `capacity` | N concurrent sessions on one engine in one process, N = 1, 2, 4… | `sessions_per_core` |
+
+**Conditions** (`e2e`; `flush` uses `engine` and `cascade`, `capacity` uses `engine`).
+`injected_ms` is the latency the configuration prescribes on the critical path from the
+end of user speech to the first agent audio:
+
+| Condition | System | `injected_ms` |
+| --- | --- | --- |
+| `engine` | `MockEngine` (native S2S; energy VAD, 0.4 s silence) | VAD silence = **400** |
+| `engine-delay` | `MockEngine`, `response_delay: 0.25` | 400 + 250 = **650** |
+| `cascade` | mock STT + LLM + TTS, energy VAD (0.25 s silence), VAD-only endpointing | `max(600, 260 + 0)` = **600** |
+| `cascade-delay` | STT latency 0.1 s, LLM TTFT 0.15 s, TTS TTFB 0.1 s, `min_endpointing_delay: 0.2` | `max(200, 260 + 100)` + 150 + 100 = **610** |
+
+The VAD confirms the end of speech in whole windows, so 0.25 s of 20 ms windows is 0.26 s.
+The budget (`injected_budget()`) reads these values from the engine the run builds. The
+built-in scenario (`overhead-smoke`) uses utterances whose durations are whole 20 ms
+chunks, so speech always ends on a VAD window boundary.
+
+### T7 metrics
+
+| Metric | Definition |
+| --- | --- |
+| `overhead_ms` | `v2v_ms − injected_ms` per turn; `v2v_ms` is measured on the recording exactly as in T1. Reported per condition and pooled (`e2e.overhead_ms`, the headline) |
+| `frame_jitter_ms` | standard deviation of `start[i+1] − end[i]` over consecutive agent frames of one reply, as played by the loopback transport (0 = seamless); `frame_gap_max_ms` is the largest gap |
+| `loop_lag_ms` | event-loop lag: a probe sleeps 10 ms and records how late it wakes (callbacks that hold the loop + timer granularity). p99 is reported |
+| `delivery_lag_ms` | how late the simulated caller delivered its 20 ms chunks (harness, included in `v2v_ms`) |
+| `cpu_pct` | process CPU time / wall time while a session ran (100 % = one core; the simulated caller is included) |
+| `flush_ms` | interrupt decision (just before `await session.interrupt()`) → end of the last agent audio played; audio playing when the transport clears playback is cut there. Frames that start after the clear are counted as **leaked** |
+| `interrupt_call_ms` | duration of the `session.interrupt()` call (engine cancel included) |
+| `sessions_per_core` | the largest N whose step passed: overhead p95 ≤ 50 ms, loop lag p99 ≤ 50 ms and no missed turn. One asyncio process is one core. `extra.capacity` also has the CPU share per session and the memory per session (slope of the peak RSS over the steps) |
+| `micro.<name>_us` | median over timed batches (garbage collector off) of µs per operation; `% of real time` = cost / audio covered by one operation |
+
+Memory is the resident set size: current on Linux (`/proc/self/statm`) and Windows
+(`GetProcessMemoryInfo`), peak (`getrusage`) on macOS. No extra dependencies.
+
+**What remains in `overhead_ms`.** On Linux it is about 1.5–2 ms for the zero-delay
+conditions and up to ~5 ms with injected delays. Most of it is asyncio timer lateness:
+`epoll` timeouts are rounded up to whole milliseconds, so every mock `sleep()` and every
+chunk the caller delivers ends up to 1 ms late (`delivery_lag_ms`). Session, transport
+and engine plumbing take well under a millisecond. On Windows with Python < 3.13, asyncio
+timers are ~16 ms coarse, so expect larger lag and jitter numbers there. A timer can also
+fire up to one tick early, so a mock delay can come in short and a single turn's
+`overhead_ms` can be slightly negative. That is why the gate keeps one baseline per OS.
+
+### Tiers
+
+| Tier | e2e | flush | capacity | micro | Wall time |
+| --- | --- | --- | --- | --- | --- |
+| `smoke` (default, CI) | 4 conditions × 7 turns (1 warm-up) | 2 × 6 interrupts | N ≤ 32, 3 turns per session | 9 batches | ~2 min |
+| `full` | 4 conditions × 3 sessions × 36 turns (105 measured) | 2 × 21 interrupts | N ≤ 512 + 3 bisection steps, 5 turns per session | 25 batches | ~15 min |
+
+`--sections`, `--conditions`, `--turns`, `--sessions` and `--max-sessions` override a
+tier. A run directory has the usual files. `items.jsonl` holds one line per `turn`,
+`session`, `interrupt`, `capacity_step` and `micro` benchmark (see the `kind` field).
+
+## CI regression gate
+
+The `bench overhead gate` job in `.github/workflows/ci.yml` runs the smoke tier on
+`ubuntu-latest` and `windows-latest` for every pull request:
+
+```bash
+van bench overhead --tier smoke --baseline benchmarks/baselines/overhead-ci.json \
+    --retries 1 --summary "$GITHUB_STEP_SUMMARY"
+```
+
+`benchmarks/baselines/overhead-ci.json` holds one **entry per runner OS** (`linux`,
+`windows`, `darwin`). An entry has the gated statistic of each metric, its 95 % CI, and
+the run, commit and machine it came from. A run is judged only against the entry of its
+own OS. Without an entry, the job reports and does not gate.
+
+| Rule | Metrics (statistic) | A metric fails when it got worse by |
+| --- | --- | --- |
+| `latency` | `e2e.overhead_ms`, `e2e.<condition>.overhead_ms`, `e2e.<condition>.v2v_ms`, `e2e.frame_jitter_ms`, `flush.flush_ms` (p50); `e2e.loop_lag_ms` (p99) | more than **10 %** and more than **30 ms**, with non-overlapping 95 % CIs |
+| `micro` | `micro.*_us` (median) | more than **200 %** (3×) and more than **5 µs**: runner hardware varies |
+
+Everything else (CPU, memory, capacity, spans) is reported but not gated. A gated metric
+that a section should have produced but did not (e.g. every turn missed) fails as
+`missing`. Medians over many turns and batches keep a slow turn on a shared runner from
+failing the job. With `--retries 1`, a failure also re-runs the failing section: a
+metric fails only if it regresses again. Rules live in the baseline file and can be
+tuned there.
+
+**Reading the result.** The job summary shows the verdict and a table (baseline, this
+run, change, threshold, status: `regressed`, `missing`, `improved`, `new` or `ok`),
+followed by the run's tables. The full run (`manifest.json`, `summary.json`,
+`items.jsonl`, `report.md`, `gate.json`, `gate.md`) is uploaded as the
+`bench-overhead-<OS>` artifact. `improved` means the metric got much better: refresh the
+baseline so later regressions are measured from there.
+
+**Updating the baseline.** Only when a change is intended (faster runtime, different
+mocks or scenario), or when the runner image changes. Record it on the kind of machine the
+entry is for, preferably straight from the CI artifact of the pull request:
+
+```bash
+gh run download <run-id> -n bench-overhead-Linux -D ci-linux
+van bench overhead --from-run ci-linux/overhead-Linux --update-baseline   # entry `linux`
+gh run download <run-id> -n bench-overhead-Windows -D ci-windows
+van bench overhead --from-run ci-windows/overhead-Windows --update-baseline   # `windows`
+git add benchmarks/baselines/overhead-ci.json   # explain why in the PR description
+```
+
+`van bench overhead --update-baseline` on its own runs the smoke tier and records the
+entry for the machine you are on. `--platform <key>` picks another entry, and `--baseline
+<file>` another file. Other entries and the rules are kept.
+
 ## Python API
 
 ```python
@@ -176,6 +296,19 @@ results = asyncio.run(
 print(results.summary.metrics["v2v_ms"].p50, results.directory)
 ```
 
+```python
+from voice_agent_next.bench import OverheadOptions, compare_to_baseline, load_baseline
+from voice_agent_next.bench import run_overhead_benchmark
+
+results = asyncio.run(run_overhead_benchmark(OverheadOptions.for_tier("smoke", sections=("e2e",))))
+print(results.summary.metrics["e2e.overhead_ms"].p50)
+gate = compare_to_baseline(load_baseline("benchmarks/baselines/overhead-ci.json"), results)
+print(gate.passed, gate.to_markdown())
+```
+
 Building blocks for other tracks: `CallerEmulator` (caller), `DuplexRecording` (stereo
 recording + labels), `OnsetDetector` / `ProviderReferenceVAD` (onsets), `Distribution` /
-`RunManifest` / `RunSummary` / `write_run` / `load_run` (results), `render_report`.
+`RunManifest` / `RunSummary` / `write_run` / `load_run` (results), `render_report`,
+`LoopLagProbe` / `cpu_seconds` / `rss_bytes` (`bench.probes`), `run_micro_benchmarks`
+(`bench.microbench`) and the gate (`bench.gate`: `compare_to_baseline`,
+`update_baseline`).

@@ -35,7 +35,7 @@ import hashlib
 import json
 import math
 import os
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
@@ -240,6 +240,8 @@ class _SessionRun:
     ready: float
     call: CallResult
     probe: _SessionProbe
+    transport: LoopbackTransport | None = None
+    """The session's transport (playout log, playback clears), for other tracks."""
 
 
 @dataclass
@@ -272,7 +274,12 @@ async def _run_session(
     scenario: Scenario,
     options: LatencyOptions,
     on_turn: Callable[[TurnTiming], None] | None,
+    *,
+    on_start: Callable[[AgentSession, LoopbackTransport], None] | None = None,
+    sleep_until: Callable[[float], Awaitable[None]] | None = None,
 ) -> _SessionRun:
+    """One simulated call (also used by the overhead track: ``on_start`` sees the started
+    session before the caller speaks; ``sleep_until`` paces the caller)."""
     session = AgentSession(engine, options=system.session_options())
     probe = _SessionProbe(session)
     transport = LoopbackTransport(
@@ -296,9 +303,12 @@ async def _run_session(
         agent_idle=lambda: session.agent_state in (AgentState.LISTENING, AgentState.CLOSED),
         should_stop=lambda: session.closed,
         on_turn=on_turn,
+        sleep_until=sleep_until,
     )
     reply_timeout, gap = options.timing(scenario)
     try:
+        if on_start is not None:
+            on_start(session, transport)
         call = await caller.run(
             stimuli,
             lead_in=scenario.lead_in,
@@ -309,7 +319,7 @@ async def _run_session(
     finally:
         await session.aclose()
         probe.detach()
-    return _SessionRun(index, origin, ready, call, probe)
+    return _SessionRun(index, origin, ready, call, probe, transport)
 
 
 def _analyze_session(

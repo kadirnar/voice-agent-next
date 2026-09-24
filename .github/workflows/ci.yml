@@ -94,6 +94,46 @@ jobs:
       - name: echo cancellation with the native livekit wheel (extra `aec`)
         run: uv run --extra aec pytest -q -m model tests/test_aec.py
 
+  # T7 framework-overhead smoke tier (~2 min, offline, mocks) compared with the committed
+  # baseline, which has one entry per runner OS (benchmarks/baselines/overhead-ci.json).
+  # It fails only on latency regressions > 10 % and > 30 ms with non-overlapping CIs, or
+  # hot paths more than 3x slower, and only if a re-run of the failing section confirms
+  # it. The job summary shows the comparison. Refresh the baseline from the
+  # `bench-overhead-<OS>` artifact (see benchmarks/README.md).
+  bench-overhead:
+    name: bench overhead gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      COLUMNS: "160" # wide enough for the result tables in the log
+      PYTHONUTF8: "1" # the tables use −, µ and · (the Windows console defaults to cp1252)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - run: uv sync
+      - name: T7 overhead smoke tier vs baseline
+        shell: bash
+        run: >-
+          uv run van bench overhead --tier smoke
+          --baseline benchmarks/baselines/overhead-ci.json --retries 1
+          --out bench-results --run-id "overhead-${{ runner.os }}"
+          --summary "$GITHUB_STEP_SUMMARY"
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-overhead-${{ runner.os }}
+          path: bench-results/
+          if-no-files-found: ignore
+          retention-days: 30
+
   # macOS minutes cost 10x on private repos: run on main, weekly, manually, or on pull
   # requests labelled `ci:full`.
   test-macos:
