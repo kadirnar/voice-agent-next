@@ -1028,10 +1028,12 @@ class GeminiLiveConnection(EngineConnection):
         if not self._manual:
             await self._send({"realtimeInput": {"audioStreamEnd": True}}, replayable=False)
             return
+        user = self._user if self._user is not None and not self._user.committed else None
+        if not self._activity_open and user is None:
+            return  # nothing was said since the last commit
         if self._activity_open:
             self._activity_open = False
             await self._send({"realtimeInput": {"activityEnd": {}}}, replayable=True)
-        user = self._user if self._user is not None and not self._user.committed else None
         if user is not None and user.speech_end is None:
             user.speech_end = self.input_audio_time
         self._commit_user(user)
@@ -1045,6 +1047,8 @@ class GeminiLiveConnection(EngineConnection):
         self.chat_ctx.add_message("user", text)
         if respond:
             await self._prepare_request()
+        elif self._server_turn_open:
+            self._self_interrupt = True  # if the server stops talking, it was not the user
         content = {"turns": [{"role": "user", "parts": [{"text": text}]}], "turnComplete": respond}
         await self._send({"clientContent": content}, replayable=True)
 
@@ -1197,8 +1201,12 @@ class GeminiLiveConnection(EngineConnection):
     def _on_output_text(self, text: str) -> None:
         gen = self._gen
         if gen is None:
-            last = self._turn_gens[-1] if self._turn_gens else None
-            if last is not None and last.server_complete and last.status == "completed":
+            last = self._last_gen
+            if (
+                last is not None
+                and last.server_complete
+                and now() - (last.ended_at or 0.0) < _LATE_TRANSCRIPT_GRACE
+            ):
                 gen = last  # a transcript straggler of a finished generation
             else:
                 gen = self._open_generation()
@@ -1378,6 +1386,9 @@ class GeminiLiveConnection(EngineConnection):
             self._server_turn_open = True
             self._begin_server_turn()
             trigger = self._turn_trigger
+        elif self._requested_at is not None and self._e.tool_behavior == "blocking":
+            # the model resumes the paused turn with the tool results we sent
+            trigger, self._requested_at = self._requested_at, None
         gen = _Generation(
             response_id=new_id("resp_"), item_id=new_id("item_"), started_at=t, trigger_at=trigger
         )
