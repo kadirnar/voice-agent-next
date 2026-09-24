@@ -94,6 +94,8 @@ jobs:
       - run: uv run van providers --json
       - name: echo cancellation with the native livekit wheel (extra `aec`)
         run: uv run --extra aec pytest -q -m model tests/test_aec.py
+      - name: WebRTC transport with aiortc (extra `webrtc`)
+        run: uv run --extra webrtc pytest -q tests/test_webrtc_transport.py
 
   # T7 framework-overhead smoke tier (~2 min, offline, mocks) compared with the committed
   # baseline, which has one entry per runner OS (benchmarks/baselines/overhead-ci.json).
@@ -155,3 +157,5 @@ jobs:
       - run: uv run van providers --json
       - name: echo cancellation with the native livekit wheel (extra `aec`)
         run: uv run --extra aec pytest -q -m model tests/test_aec.py
+      - name: WebRTC transport with aiortc (extra `webrtc`)
+        run: uv run --extra webrtc pytest -q tests/test_webrtc_transport.py
