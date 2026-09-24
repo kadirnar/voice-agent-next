@@ -1,6 +1,5 @@
 """TEMP (remove before merge): why does Kokoro's warm-up fail on macOS CI?"""
 
-import hashlib
 import platform
 import sys
 
@@ -30,18 +29,14 @@ for step in order:
     elif step == "kokoro":
         tts = KokoroTTS(model="v1.0-int8")
         eng = tts._get_engine()
-        for f in (tts._model_file(), tts._voices_file()) if hasattr(tts, "_model_file") else ():
-            print(f, hashlib.sha256(open(f, "rb").read()).hexdigest())
         print("session providers", eng.sess.get_providers())
         for text in ["Hello.", "Hello! This is Kokoro."]:
             print(repr(text), "phonemes", repr(eng.tokenizer.phonemize(text, "en-us")))
             for trim in (False, True):
                 try:
                     a, sr, sp = eng.create_timed(text, "af_heart", trim=trim)
-                    print(
-                        f"  trim={trim} len={len(a)} absmax={float(np.nanmax(np.abs(a))) if len(a) else None} "
-                        f"nan={int(np.isnan(a).sum())} timings={len(sp)}"
-                    )
+                    peak = float(np.nanmax(np.abs(a))) if len(a) else None
+                    print(f"  trim={trim} len={len(a)} absmax={peak} nan={int(np.isnan(a).sum())}")
                 except Exception as e:
                     print(f"  trim={trim} ERROR {e!r}")
             tokens = eng.tokenizer.tokenize(eng.tokenizer.phonemize(text, "en-us"))
