@@ -1,0 +1,40 @@
+# T1 latency of the fully local cascade with faster-whisper on an NVIDIA GPU: the same
+# stimuli as latency-local.yaml (same text, voice and pacing, so the numbers compare
+# directly), for runs made back to back with a CPU and a CUDA agent config.
+#
+#   uv sync --extra local --extra cuda --extra openai --extra bench
+#   van doctor                       # "faster-whisper device=auto" must say cuda float16
+#   van bench latency -c agent-gpu.yaml -s benchmarks/scenarios/latency-local-gpu.yaml \
+#       --turns 6 --sessions 2 --label gpu
+#
+# agent-gpu.yaml (device: cpu for the CPU baseline; "auto" picks CUDA when it works):
+#
+#   stt: {provider: faster_whisper/base, language: en, device: cuda}
+#   llm: {provider: ollama/LiquidAI/lfm2.5-1.2b-instruct, temperature: 0}
+#   tts: kokoro/v1.0-fp16
+#   vad: silero
+#   turn_detector: smart_turn
+#   agent:
+#     instructions: You are a helpful customer-service agent on a phone call. Answer in
+#       two or three full sentences, in plain spoken English.
+#
+# See docs/hardware.md for the results and for enabling the GPU.
+name: latency-local-gpu
+version: 1
+description: >-
+  latency-local stimuli (Kokoro am_adam) for comparing the local cascade with
+  faster-whisper on CPU and on an NVIDIA GPU.
+sample_rate: 16000
+loudness_dbfs: -20.0
+lead_in: 0.5
+stimuli: tts
+tts: {provider: kokoro/v1.0-fp16, voice: am_adam}
+reply_timeout: 15.0
+gap_after_reply: 0.5
+turns:
+  - {id: "time", text: "What time does the store open tomorrow?"}
+  - {id: "table", text: "Can you book a table for two people tonight?"}
+  - {id: "order", text: "Where is my order? I placed it last week."}
+  - {id: "sunday", text: "Are you open on Sunday afternoon?"}
+  - {id: "flight", text: "Please change my flight to Friday morning."}
+  - {id: "refund", text: "How long does a refund usually take?"}

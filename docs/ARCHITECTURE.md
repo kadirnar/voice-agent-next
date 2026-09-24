@@ -23,6 +23,7 @@ voice-agent-next is organized around one idea: **every way of building a voice a
 |---|---|---|
 | Audio primitives | `audio/` | `AudioFrame` (s16le + sample rate + channels + capture timestamp), buffers, fixed-size chunking, streaming resampling (soxr or numpy polyphase), bit-exact G.711, WAV I/O, `AudioProcessor` hooks |
 | Components | `stt.py`, `tts.py`, `llm.py`, `vad.py`, `turn.py` | provider-neutral interfaces + streaming base classes that handle resampling, error propagation and metrics |
+| Failover | `fallback.py` | `FallbackSTT` / `FallbackLLM` / `FallbackTTS` provider chains with health, cooldown and replay (see `docs/concepts/failover.md`) |
 | Engine | `engine.py`, `events.py` | `S2SEngine` factory, `EngineConnection` live session, `EngineCapabilities`, the event protocol |
 | Engines | `engines/cascade.py`, `providers/*` | the cascade; native engines live with their provider |
 | Session | `session/` | `Agent` (instructions, tools, hooks), `AgentSession` runtime |
@@ -65,6 +66,7 @@ Rules every engine follows:
 * Audio streams continuously into the STT stream and the VAD (Silero/energy/...). VAD start → `InputSpeechStarted`; VAD end (a *candidate* pause, 0.25 s by default) → endpointing.
 * **Endpointing:** flush (force-finalize) the STT, wait briefly for the final transcript, score the turn with the turn detector (audio and/or text), then commit after `min_endpointing_delay` (0.4 s with a detector, 0.6 s without) or `max_endpointing_delay` (2.5 s) when the user is probably not done — all measured from the end of speech. Speech resuming cancels the pending commit and the turn continues. STT-provided `END_OF_TURN` events commit immediately.
 * **Response:** the LLM streams text; a `SentenceSegmenter` releases complete sentences (short first chunk for fast first audio), each is cleaned (`tts_clean`: markdown/emoji) and pushed into a TTS stream. With non-streaming TTS the `SentenceStreamAdapter` synthesizes sentence by sentence with one-ahead prefetch and reports per-sentence text, which gives exact text/audio alignment for truncation.
+* **Preemptive generation** (`CascadeOptions.preemptive_generation`, off by default): once the final transcript of a pause is known and only the endpointing silence is left (turn detector p ≥ `preemptive_threshold`), or on an STT `EAGER_END_OF_TURN`, the response starts speculatively with its events, history changes and tool calls held back (TTS too, unless `preemptive_tts`). The commit releases it if the transcript and context match; speech resuming, `TURN_RESUMED`, a changed transcript/context, `clear_input` or `cancel_response` discard it. Budget: ≤ 3 attempts per turn, none for turns > 10 s or while the agent is talking; `SpeculationMetrics` reports hits and waste. See `docs/concepts/preemptive-generation.md`.
 * **Half-cascade:** without STT, an audio-input LLM receives the user's audio as `AudioContent`.
 
 ## Providers and the registry

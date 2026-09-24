@@ -34,6 +34,7 @@ from ..errors import (
     RateLimitError,
     VoiceAgentError,
 )
+from ..hardware import ctranslate2_compute_type, select_ctranslate2_backend
 from ..registry import register_provider
 from ..stt import STT, STTCapabilities, Transcript, WordTiming
 from ..utils.clock import now
@@ -46,8 +47,6 @@ _PROVIDER = "faster_whisper"
 _EXTRA = "faster-whisper"
 _SAMPLE_RATE = 16_000  # Whisper's native input rate
 _DEVICES = ("auto", "cpu", "cuda")
-# compute_type="auto": the first type CTranslate2 supports on the device wins
-_COMPUTE_PREFERENCE = {"cuda": ("float16", "int8", "float32"), "cpu": ("int8", "float32")}
 _MODELS = (
     "large-v3-turbo",
     "large-v3",
@@ -83,8 +82,10 @@ class FasterWhisperSTT(STT):
             repository on the Hugging Face Hub, or a local model directory.
         language: language code such as ``"en"`` or ``"de"`` (region suffixes like
             ``"en-US"`` are dropped); ``None`` detects the language of every utterance.
-        device: ``"auto"`` uses CUDA when CTranslate2 sees a GPU *and* a warm-up inference
-            succeeds on it (otherwise CPU); ``"cpu"`` or ``"cuda"`` force a device.
+        device: ``"auto"`` uses CUDA when CTranslate2 sees a GPU, the CUDA libraries it
+            opens load (from the ``cuda`` extra's pip wheels or the system) *and* a warm-up
+            inference succeeds on it; otherwise CPU, with a log line naming the fix (see
+            ``docs/hardware.md``). ``"cpu"`` or ``"cuda"`` force a device.
         device_index: CUDA device id (or ids, to spread concurrent requests over GPUs).
         compute_type: ``"auto"`` picks ``float16`` on CUDA and ``int8`` on CPU (falling
             back to what the device supports); any CTranslate2 compute type
@@ -194,20 +195,39 @@ class FasterWhisperSTT(STT):
         ct2 = require("ctranslate2", extra=_EXTRA)
         t0 = now()
         path = self._model_path(fw)
-        if self.device == "auto":
-            if _cuda_device_count(ct2) > 0:
-                try:
-                    return self._load_on(fw, ct2, path, "cuda", t0)
-                except Exception as exc:
-                    # Typical cause: the GPU is visible but CTranslate2 cannot run on it
-                    # (cuBLAS 12 / cuDNN 9 missing, unsupported GPU, out of memory).
-                    logger.warning(
-                        "faster-whisper: CUDA is not usable (%s); falling back to CPU. "
-                        "See docs/providers/faster_whisper.md to enable the GPU.",
-                        exc.__cause__ or exc,
-                    )
-            return self._load_on(fw, ct2, path, "cpu", t0)
-        return self._load_on(fw, ct2, path, self.device, t0)
+        # Also loads cuBLAS from the `cuda` extra's pip wheels, for "cuda" and "auto".
+        backend = select_ctranslate2_backend(
+            self.device, self.compute_type, ct2=ct2, device_index=self._first_device_index
+        )
+        if self.device != "auto":
+            return self._load_on(fw, path, self.device, backend.compute_type, t0)
+        if backend.device == "cuda":
+            try:
+                return self._load_on(fw, path, "cuda", backend.compute_type, t0)
+            except Exception as exc:
+                # The GPU is visible and its libraries load, but CTranslate2 cannot run on
+                # it (no kernels for this GPU, out of memory, a broken driver...).
+                logger.warning(
+                    "faster-whisper: CUDA is not usable (%s); falling back to CPU. "
+                    "See docs/hardware.md to enable the GPU.",
+                    exc.__cause__ or exc,
+                )
+            cpu_type = ctranslate2_compute_type(ct2, "cpu", self.compute_type)
+            return self._load_on(fw, path, "cpu", cpu_type, t0)
+        if backend.fix:
+            logger.info(
+                "faster-whisper: running on CPU: %s. To use the GPU: %s",
+                backend.reason,
+                backend.fix,
+            )
+        else:
+            logger.debug("faster-whisper: running on CPU: %s", backend.reason)
+        return self._load_on(fw, path, "cpu", backend.compute_type, t0)
+
+    @property
+    def _first_device_index(self) -> int:
+        index = self.device_index
+        return index if isinstance(index, int) else (index[0] if index else 0)
 
     def _model_path(self, fw: Any) -> str:
         if os.path.isdir(self.model):
@@ -224,8 +244,8 @@ class FasterWhisperSTT(STT):
         except Exception as exc:
             raise _map_error(exc, f"downloading model {self.model!r}") from exc
 
-    def _load_on(self, fw: Any, ct2: Any, path: str, device: str, t0: float) -> Any:
-        compute_type = _resolve_compute_type(ct2, device, self.compute_type)
+    def _load_on(self, fw: Any, path: str, device: str, compute: str | None, t0: float) -> Any:
+        compute_type = compute or "default"
         try:
             model = fw.WhisperModel(
                 path,
@@ -289,23 +309,6 @@ def _whisper_language(language: str | None) -> str | None:
 def _english_only(model: str) -> bool:
     name = os.path.basename(model.rstrip("/\\")).lower()
     return name.endswith(".en") or "distil" in name
-
-
-def _cuda_device_count(ct2: Any) -> int:
-    try:
-        return int(ct2.get_cuda_device_count())
-    except Exception:  # CPU-only builds (macOS wheels), broken drivers
-        return 0
-
-
-def _resolve_compute_type(ct2: Any, device: str, requested: str) -> str:
-    if requested != "auto":
-        return requested
-    try:
-        supported = set(ct2.get_supported_compute_types(device))
-    except Exception:
-        supported = set()
-    return next((ct for ct in _COMPUTE_PREFERENCE[device] if ct in supported), "default")
 
 
 def _warm_up(model: Any) -> None:

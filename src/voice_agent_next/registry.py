@@ -20,6 +20,10 @@ Spec formats accepted by :func:`create`:
   may contain ``/`` and ``:``, e.g. ``"together/meta-llama/Llama-3.3-70B"``);
 * ``{"provider": "deepgram/nova-3", "language": "en"}`` or
   ``{"provider": "deepgram", "model": "nova-3", ...}`` — extra keys become kwargs;
+* a list of specs (STT, LLM and TTS only) — a failover chain, tried in order
+  (:mod:`voice_agent_next.fallback`), e.g. ``["groq/llama-3.3-70b-versatile",
+  "openai/gpt-4.1-mini"]``; ``{"fallback": [...], "cooldown": 60}`` also passes options
+  to the chain;
 * an already-built component instance (returned unchanged).
 """
 
@@ -222,6 +226,11 @@ def create(kind: ComponentKind, spec: Any, **kwargs: Any) -> Any:
     """Instantiate a component from a spec string/mapping (instances pass through)."""
     if spec is None:
         raise ConfigurationError(f"no {kind} configured")
+    if isinstance(spec, (list, tuple)):
+        return _create_fallback(kind, spec, {}, kwargs)
+    if isinstance(spec, Mapping) and "fallback" in spec:
+        opts = dict(spec)
+        return _create_fallback(kind, opts.pop("fallback"), opts, kwargs)
     if not isinstance(spec, (str, Mapping)):
         return spec  # already a component instance
     if isinstance(spec, Mapping):
@@ -239,6 +248,25 @@ def create(kind: ComponentKind, spec: Any, **kwargs: Any) -> Any:
     if model is not None and "model" not in kwargs:
         kwargs["model"] = model
     return provider.factory(**kwargs)
+
+
+def _create_fallback(
+    kind: ComponentKind, specs: Any, options: dict[str, Any], kwargs: dict[str, Any]
+) -> Any:
+    """A failover chain over ``specs``: ``kwargs`` go to each provider, ``options`` to the chain."""
+    from . import fallback
+
+    wrappers: dict[str, Any] = {
+        "stt": fallback.FallbackSTT,
+        "llm": fallback.FallbackLLM,
+        "tts": fallback.FallbackTTS,
+    }
+    if kind not in wrappers:
+        raise ConfigurationError(f"failover lists are supported for stt, llm and tts, not {kind}")
+    if not isinstance(specs, (list, tuple)) or not specs:
+        raise ConfigurationError(f"{kind} fallback needs a non-empty list of providers")
+    providers = [create(kind, s, **kwargs) for s in specs]
+    return wrappers[kind](providers, **options)
 
 
 def list_providers(
