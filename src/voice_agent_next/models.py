@@ -71,6 +71,7 @@ __all__ = [
     "models_for_spec",
     "plan_prune",
     "register_model",
+    "resolve_models",
     "verify_model",
 ]
 
@@ -333,12 +334,11 @@ def find_models(name: str, *, kind: str | None = None) -> list[ModelInfo]:
     if sep:
         wanted = _resolve_provider(provider)
         return [
-            m
-            for m in catalog(provider=wanted, kind=kind, load=False)
-            if _matches(m, model.strip())
+            m for m in catalog(provider=wanted, kind=kind, load=False) if _matches(m, model.strip())
         ]
     by_model = [m for m in catalog(kind=kind, load=False) if _matches(m, name.strip())]
-    return by_model or catalog(provider=name, kind=kind, load=False)
+    by_provider = catalog(provider=name, kind=kind, load=False)
+    return by_model + [m for m in by_provider if m not in by_model]
 
 
 def get_model(name: str, *, kind: str | None = None) -> ModelInfo:
@@ -352,6 +352,18 @@ def get_model(name: str, *, kind: str | None = None) -> ModelInfo:
         )
     names = ", ".join(m.name for m in found)
     raise ConfigurationError(f"{name!r} is ambiguous: {names} (use <provider>/<model>)")
+
+
+def resolve_models(name: str) -> list[ModelInfo]:
+    """Catalog models for a CLI argument: one model (``provider/model`` or an unambiguous
+    model id), else the default model(s) of a provider or spec (``silero``, ``kokoro``)."""
+    try:
+        return [get_model(name)]
+    except ConfigurationError as exc:
+        req = models_for(name)
+        if not req.models:
+            raise exc from None
+        return req.models
 
 
 def is_offline() -> bool:
@@ -673,11 +685,13 @@ def _verify_file(f: ModelFile) -> FileCheck:
     # hf-repo: LFS blobs are stored under their sha256 in the HF cache
     checked = 0
     for p in _snapshot_files(path):
-        blob = p.resolve()
-        if _HEX64.match(blob.name):
+        # snapshots/<commit>/<file> links to blobs/<sha256> for LFS files (the blob may
+        # itself link elsewhere, e.g. into a deduplicating store: hash the final target)
+        name = Path(os.readlink(p)).name if p.is_symlink() else p.name
+        if _HEX64.match(name):
             checked += 1
-            digest = _sha256(blob)
-            if digest != blob.name:
+            digest = _sha256(p.resolve())
+            if digest != name:
                 rel = p.relative_to(path).as_posix()
                 return FileCheck(f, path, "corrupt", f"{rel}: sha256 does not match its blob")
     if checked:
@@ -822,7 +836,7 @@ def plan_prune(
             if reason == "unused" and older_than is not None and now - last < older_than:
                 continue
             items.append(PruneItem(path, reason, _tree_size(path)))
-    selected = [get_model(m) if isinstance(m, str) else m for m in models]
+    selected = [x for m in models for x in (resolve_models(m) if isinstance(m, str) else [m])]
     if all_models:
         selected = everything
     seen: set[Path] = set()
@@ -843,9 +857,7 @@ def plan_prune(
                 continue
             seen.add(path)
             items.append(
-                PruneItem(
-                    path, "model", _tree_size(path), info.name, in_hf_cache=fs.in_hf_cache
-                )
+                PruneItem(path, "model", _tree_size(path), info.name, in_hf_cache=fs.in_hf_cache)
             )
     return items
 
