@@ -110,6 +110,7 @@ nav:
       - Your first agent: getting-started/first-agent.md
       - Presets: presets.md
       - The van CLI: getting-started/cli.md
+      - Examples: examples.md
   - Concepts:
       - Architecture: ARCHITECTURE.md
       - Engines and events: concepts/engines.md

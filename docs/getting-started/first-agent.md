@@ -107,4 +107,5 @@ asyncio.run(main())
 * [Turn-taking](../concepts/turn-taking.md) and [endpointing](../concepts/endpointing.md):
   when the agent answers.
 * [Deploy](../deploy/index.md): serve agents to browsers and phones.
+* [Examples](../examples.md): runnable scripts, most of them testable offline.
 * [Benchmarks](../benchmarks/methodology.md): measure voice-to-voice latency of your stack.

@@ -5,8 +5,9 @@
   ``status`` column of the CLI is replaced by what a reader needs to make a provider ready:
   its extra and its environment variables.
 * ``<!-- include: path/in/repo.md -->`` inlines a Markdown file from outside ``docs/``
-  (``CONTRIBUTING.md``, ``benchmarks/README.md``) with its relative links rewritten: links
-  into ``docs/`` become links between pages, anything else points at the file on GitHub.
+  (``CONTRIBUTING.md``, ``benchmarks/README.md``, ``examples/README.md``) with its relative
+  links rewritten: links into ``docs/`` become links between pages, anything else points
+  at the file on GitHub.
   Links from pages to repository files outside ``docs/`` are rewritten the same way, so
   they work both on GitHub and on the site.
 * Numeric citations written back to back (``[7][8]``, the research notes) would parse as
@@ -153,6 +154,7 @@ _LINK = re.compile(r"(!?\[[^\]]*\])\(([^)\s]+)\)")
 INCLUDED_AS = {
     "CONTRIBUTING.md": "docs/contributing.md",
     "benchmarks/README.md": "docs/benchmarks/methodology.md",
+    "examples/README.md": "docs/examples.md",
 }
 
 
