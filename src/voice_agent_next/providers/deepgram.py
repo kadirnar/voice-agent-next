@@ -554,7 +554,7 @@ class _NovaStream(_DeepgramStream):
 
     def __init__(self, stt: DeepgramSTT, *, language: str | None) -> None:
         self._in_speech = False
-        self._pending_interim = False
+        self._finalized = False  # Deepgram ended the utterance itself, no speech since
         super().__init__(stt, language=language)
 
     def _keepalive_interval(self) -> float | None:
@@ -562,10 +562,10 @@ class _NovaStream(_DeepgramStream):
 
     async def _send_flush(self, ws: ClientConnection) -> None:
         await ws.send(_MSG_FINALIZE)
-        if self._dg.vad_events and not self._in_speech and not self._pending_interim:
-            # Deepgram already finalized all it heard (speech_final / UtteranceEnd and no
-            # interim since) and "may not" answer a Finalize with nothing buffered:
-            # acknowledge the flush now so callers waiting for a final do not stall.
+        if self._dg.vad_events and self._finalized:
+            # Deepgram already ended the utterance (speech_final / UtteranceEnd) and nothing
+            # was heard since, so everything is final; Deepgram "may not" answer a Finalize
+            # with nothing buffered: acknowledge the flush now so waiters do not stall.
             self._empty_final()
 
     def _on_message(self, message: dict[str, Any]) -> None:
@@ -601,25 +601,23 @@ class _NovaStream(_DeepgramStream):
         if text:
             self._speech_started()
         if message.get("is_final"):
-            self._pending_interim = False
             # an empty final only matters as the answer to our Finalize (flush)
             if text or message.get("from_finalize"):
                 self._event(STTEventType.FINAL_TRANSCRIPT, transcript)
             if message.get("speech_final"):
                 self._speech_ended(words[-1].end if words else transcript.end_time)
         elif text:
-            self._pending_interim = True
             self._event(STTEventType.INTERIM_TRANSCRIPT, transcript)
 
     def _speech_started(self) -> None:
         if not self._in_speech:
-            self._in_speech = True
+            self._in_speech, self._finalized = True, False
             self._segment_id = new_id("seg_")
             self._event(STTEventType.START_OF_SPEECH)
 
     def _speech_ended(self, end_time: float | None) -> None:
         if self._in_speech:
-            self._in_speech = False
+            self._in_speech, self._finalized = False, True
             self._event(
                 STTEventType.END_OF_SPEECH, Transcript("", self._language, end_time=end_time)
             )
