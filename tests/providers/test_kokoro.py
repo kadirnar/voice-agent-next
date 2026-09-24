@@ -8,6 +8,7 @@ and only runs with ``-m model``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 import threading
@@ -20,7 +21,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from voice_agent_next import create
+from voice_agent_next import create, hardware
 from voice_agent_next.audio import AudioFrame
 from voice_agent_next.errors import ConfigurationError, MissingDependencyError, ProviderError
 from voice_agent_next.metrics import TTSMetrics
@@ -182,6 +183,7 @@ def backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeBackend:
     monkeypatch.setitem(sys.modules, "kokoro_onnx", kokoro_onnx)
     monkeypatch.setitem(sys.modules, "espeakng_loader", loader)
     monkeypatch.setenv("VAN_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(hardware, "detect_nvidia", lambda: hardware.NvidiaInfo())
 
     def fake_download(url: str, *, subdir: str = "", sha256: str | None = None, **_: Any) -> Path:
         fake.downloads.append((url, subdir, sha256))
@@ -439,6 +441,37 @@ async def test_session_prefers_accelerator_and_falls_back_to_cpu(backend: FakeBa
     explicit = KokoroTTS(providers="CUDAExecutionProvider")  # explicit choices are kept
     with pytest.raises(ProviderError, match="CUDAExecutionProvider is not usable"):
         await explicit.warmup()
+
+
+async def test_cpu_only_onnxruntime_on_an_nvidia_machine_says_how_to_use_the_gpu(
+    backend: FakeBackend, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    gpu = hardware.GPU(0, "NVIDIA GeForce RTX 5070 Ti", 16303, (12, 0))
+    monkeypatch.setattr(hardware, "detect_nvidia", lambda: hardware.NvidiaInfo((gpu,)))
+    backend.available = [CPU]
+    with caplog.at_level(logging.INFO, logger="voice_agent_next"):
+        await KokoroTTS().warmup()
+    assert backend.sessions[0].providers == [CPU]
+    (message,) = [r.getMessage() for r in caplog.records if "running on CPU" in r.getMessage()]
+    assert "RTX 5070 Ti" in message and hardware.ONNXRUNTIME_GPU_HINT in message
+
+
+async def test_cuda_is_skipped_when_its_libraries_are_missing(
+    backend: FakeBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A GPU build of ONNX Runtime without cuDNN & co. would fail: stay on CPU instead."""
+    backend.available = ["CUDAExecutionProvider", CPU]
+    sys.modules["onnxruntime"].cuda_version = "12.8"  # type: ignore[attr-defined]
+    requested: list[tuple[tuple[str, ...], int]] = []
+
+    def load(components: Any, cuda_major: int) -> tuple[hardware.CudaLibrary, ...]:
+        requested.append((tuple(components), cuda_major))
+        return hardware.find_cuda_libraries(components, cuda_major, search_path=[])
+
+    monkeypatch.setattr(hardware, "load_cuda_libraries", load)
+    await KokoroTTS().warmup()
+    assert [s.providers for s in backend.sessions] == [[CPU]]
+    assert requested == [(hardware.ONNXRUNTIME_CUDA_LIBRARIES, 12)]
 
 
 async def test_unknown_voice_is_a_configuration_error(backend: FakeBackend) -> None:
