@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from collections import deque
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -70,9 +71,12 @@ from .events import (
     UserTranscript,
 )
 from .interruptions import InterruptionPolicy, Overlap, Verdict
+from .taps import SessionTap
 
 if TYPE_CHECKING:
     from ..engines.cascade import CascadeOptions
+    from .recording import SessionRecorder
+    from .tracing import SessionTracer
 
 __all__ = ["AgentSession", "SessionOptions"]
 
@@ -121,6 +125,12 @@ class SessionOptions:
     discard_audio_if_uninterruptible: bool = True
     """While uninterruptible speech plays, the engine receives silence instead of the
     user's audio (so it can neither barge in nor queue a turn)."""
+    record: str | os.PathLike[str] | None = None
+    """Record the call: a directory (a new ``<time>-<id>.wav`` + ``.jsonl`` pair per
+    session) or a ``.wav`` path. See :class:`~voice_agent_next.session.SessionRecorder`."""
+    trace: bool = False
+    """Export OpenTelemetry spans (needs the ``otel`` extra and an SDK configured by the
+    app). See :class:`~voice_agent_next.session.SessionTracer`."""
 
     def __post_init__(self) -> None:
         if self.min_interruption_duration < 0:
@@ -237,7 +247,19 @@ class AgentSession(EventEmitter):
         options: SessionOptions | None = None,
         processors: Sequence[AudioProcessor] = (),
         userdata: Any = None,
+        record: str | os.PathLike[str] | SessionRecorder | None = None,
+        trace: bool | SessionTracer | None = None,
     ) -> None:
+        """
+        Args:
+            record: record the call to a stereo WAV (user left, agent right) and a JSONL
+                event timeline: a directory, a ``.wav`` path or a
+                :class:`~voice_agent_next.session.SessionRecorder`. Overrides
+                ``SessionOptions.record``.
+            trace: export OpenTelemetry spans (``True`` or a
+                :class:`~voice_agent_next.session.SessionTracer`). Overrides
+                ``SessionOptions.trace``.
+        """
         super().__init__()
         if engine is not None:
             if any(c is not None for c in (stt, llm, tts, turn_detector)):
@@ -291,7 +313,50 @@ class AgentSession(EventEmitter):
         self._transport_paused = False
         self._pause_seq = 0  # bumped whenever the playback timeline pauses or moves
         self._engine_events: AsyncIterator[EngineEvent] | None = None
+        self._taps: list[SessionTap] = []
+        self.recorder: SessionRecorder | None = None
+        """The call recorder (``record=...``), if any."""
         self.engine.on("metrics", self._on_metrics)
+        self._setup_observability(
+            record if record is not None else self.options.record,
+            trace if trace is not None else self.options.trace,
+        )
+
+    def _setup_observability(
+        self, record: str | os.PathLike[str] | SessionRecorder | None, trace: Any
+    ) -> None:
+        if record is not None:
+            from .recording import SessionRecorder
+
+            recorder = record if isinstance(record, SessionRecorder) else SessionRecorder(record)
+            recorder.attach(self)
+            self.recorder = recorder
+        if trace:
+            from .tracing import SessionTracer
+
+            if isinstance(trace, SessionTracer):
+                trace.attach(self)
+            elif SessionTracer.available():
+                SessionTracer().attach(self)
+            else:
+                logger.warning(
+                    "tracing requested but opentelemetry-api is not installed "
+                    "(pip install 'voice-agent-next[otel]'): spans are not exported"
+                )
+
+    def add_tap(self, tap: SessionTap) -> None:
+        """Attach a low-level observer (see :mod:`voice_agent_next.session.taps`) before
+        the session starts."""
+        if self._agent is not None:
+            raise RuntimeError("attach taps before the session starts")
+        self._taps.append(tap)
+
+    def _notify(self, hook: str, *args: Any) -> None:
+        for tap in self._taps:
+            try:
+                getattr(tap, hook)(*args)
+            except Exception:
+                logger.exception("session tap %s.%s failed", type(tap).__name__, hook)
 
     # ---------------------------------------------------------------- properties
     @property
@@ -329,6 +394,8 @@ class AgentSession(EventEmitter):
             except Exception as exc:
                 logger.warning("engine warmup failed (continuing without it): %s", exc)
         await transport.start()
+        if self._taps:
+            self._notify("session_started", self, now())
         self._conn = await self.engine.connect(
             EngineOptions(
                 instructions=agent.instructions,
@@ -386,6 +453,8 @@ class AgentSession(EventEmitter):
         if self._agent is not None:
             with contextlib.suppress(Exception):
                 await self._agent.on_exit(self)
+        if self._taps and self._agent is not None:
+            self._notify("session_closing", self, reason, now())
         self._closed.set()
         self.emit("close", SessionClosed(reason))
 
@@ -443,6 +512,8 @@ class AgentSession(EventEmitter):
         discarding = False
         try:
             async for frame in transport.audio_input():
+                if self._taps:
+                    self._notify("user_audio", frame, now())
                 if self._processors is not None:
                     frame = self._processors.process_capture(frame)
                 discard = self._discard_input()
@@ -470,6 +541,8 @@ class AgentSession(EventEmitter):
     async def _event_loop(self) -> None:
         self._engine_events = events = self.connection.events()
         async for ev in events:
+            if self._taps:
+                self._notify("engine_event", ev)
             try:
                 await self._handle(ev)
             except Exception as exc:
@@ -509,6 +582,8 @@ class AgentSession(EventEmitter):
                 self._set_agent_state(AgentState.SPEAKING)
             if self._processors is not None:
                 self._processors.process_render(frame)
+            if self._taps:
+                self._notify("agent_audio", frame, start)
             await transport.write_audio(frame)
 
     # ------------------------------------------------------------ event handling
@@ -1026,15 +1101,22 @@ class AgentSession(EventEmitter):
     def _freeze_clock(self, t: float) -> None:
         self._clock_paused_at = t
         self._clock_running.clear()
+        if self._taps:
+            self._notify("playback_paused", t)
 
     def _unfreeze_clock(self) -> None:
+        was_paused = self._clock_paused_at is not None
         self._clock_paused_at = None
         self._clock_running.set()
+        if self._taps and was_paused:
+            self._notify("playback_resumed")
 
     def _shift_timeline(self, paused_at: float, delta: float) -> None:
         """Playback stood still from ``paused_at`` for ``delta`` s: unheard audio moves later."""
         if delta <= 0:
             return
+        if self._taps:
+            self._notify("playback_shifted", paused_at, delta)
         for resp in self._responses.values():
             if resp.finished or resp.interrupted or resp.end <= paused_at:
                 continue
@@ -1066,6 +1148,8 @@ class AgentSession(EventEmitter):
             barge.paused_at = None
         paused_at = self._clock_paused_at
         played = resp.played(self._listener_time(paused_at if paused_at is not None else now()))
+        if self._taps:  # audio after the pause (or after now) is never heard
+            self._notify("playback_cleared", paused_at if paused_at is not None else now())
         self._out.clear()
         self._virtual_end = now()
         self._unfreeze_clock()  # paused audio is dropped, not resumed
