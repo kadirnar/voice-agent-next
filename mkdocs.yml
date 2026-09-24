@@ -1,0 +1,184 @@
+# Documentation site: `uv sync --group docs && uv run mkdocs serve`
+# CI (.github/workflows/docs.yml) builds with `mkdocs build --strict`: broken links fail it.
+site_name: voice-agent-next
+site_description: >-
+  Real-time speech-to-speech voice agents in Python: native S2S models and streaming
+  cascades, local and cloud, on Linux, macOS and Windows, with a built-in benchmark suite.
+site_url: https://kadirnar.github.io/voice-agent-next/
+repo_url: https://github.com/kadirnar/voice-agent-next
+repo_name: kadirnar/voice-agent-next
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; Kadir Nar — Apache-2.0
+
+exclude_docs: |
+  hooks/
+
+hooks:
+  - docs/hooks/generated.py
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search
+  - autorefs
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [src]
+          options:
+            extensions:
+              - docs/hooks/griffe_rst.py:RstToMarkdown
+            docstring_style: google
+            docstring_options:
+              warn_unknown_params: false
+              warn_missing_types: false
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            members_order: source
+            group_by_category: true
+            filters: ["!^_"]
+            merge_init_into_class: true
+            separate_signature: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+            summary: true
+            show_if_no_docstring: false
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - Your first agent: getting-started/first-agent.md
+      - Presets: presets.md
+      - The van CLI: getting-started/cli.md
+      - Examples: examples.md
+  - Concepts:
+      - Architecture: ARCHITECTURE.md
+      - Engines and events: concepts/engines.md
+      - The cascade: concepts/cascade.md
+      - Turn-taking: concepts/turn-taking.md
+      - Endpointing: concepts/endpointing.md
+      - Interruptions: concepts/interruptions.md
+      - Preemptive generation: concepts/preemptive-generation.md
+      - Tools: concepts/tools.md
+      - Failover: concepts/failover.md
+      - Observability: concepts/observability.md
+      - Audio processing: audio-processing.md
+  - Providers:
+      - providers/index.md
+      - Speech-to-speech engines:
+          - OpenAI Realtime (+ compatible): providers/openai-realtime.md
+          - Gemini Live: providers/gemini-live.md
+          - Moshi and PersonaPlex: providers/moshi.md
+      - Cloud:
+          - OpenAI: providers/openai.md
+          - Anthropic: providers/anthropic.md
+          - Google Gemini: providers/google.md
+          - OpenAI-compatible LLMs: providers/openai-compatible.md
+          - Deepgram: providers/deepgram.md
+          - AssemblyAI: providers/assemblyai.md
+          - Cartesia: providers/cartesia.md
+          - ElevenLabs: providers/elevenlabs.md
+      - Local:
+          - sherpa-onnx: providers/sherpa-onnx.md
+          - Moonshine: providers/moonshine.md
+          - faster-whisper: providers/faster_whisper.md
+          - Kokoro: providers/kokoro.md
+          - Pocket TTS: providers/pocket-tts.md
+          - Silero VAD: providers/silero.md
+          - Smart Turn: providers/smart_turn.md
+  - Transports:
+      - transports/index.md
+      - Local audio: transports/local.md
+      - WebSocket: transports/websocket.md
+  - Deploy:
+      - deploy/index.md
+      - Realtime server: deploy/realtime-server.md
+      - Telephony: transports/telephony.md
+      - WebRTC: transports/webrtc.md
+  - Benchmarks:
+      - Methodology: benchmarks/methodology.md
+      - Results: benchmarks/results.md
+  - Operations:
+      - Hardware: hardware.md
+      - Models: models.md
+  - Research:
+      - research/REPORT.md
+      - 1 · Architectures and frameworks: research/01-architectures-and-frameworks.md
+      - 2 · Speech-to-speech models: research/02-speech-to-speech-models.md
+      - 3 · STT, TTS and LLM landscape: research/03-stt-tts-llm-landscape.md
+      - 4 · Turn-taking, VAD, interruptions: research/04-turn-taking-vad-interruptions.md
+      - 5 · Latency, transports, production: research/05-latency-transports-production.md
+      - 6 · Evaluation and benchmarks: research/06-evaluation-and-benchmarks.md
+  - API reference:
+      - reference/index.md
+      - voice_agent_next: reference/package.md
+      - Session: reference/session.md
+      - Engine and events: reference/engine.md
+      - Components: reference/components.md
+      - Transports: reference/transports.md
+      - Registry: reference/registry.md
+      - Failover: reference/fallback.md
+      - Presets: reference/presets.md
+      - Models: reference/models.md
+      - Benchmarks: reference/bench.md
+  - Contributing: contributing.md
