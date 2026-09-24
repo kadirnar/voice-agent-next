@@ -143,7 +143,7 @@ class OpenAITTS(TTS):
         resolved_model = model or self.DEFAULT_MODEL
         if speed is not None and not 0.25 <= speed <= 4.0:
             raise ConfigurationError(f"speed must be within [0.25, 4.0], got {speed}")
-        rate = sample_rate or self.PCM_SAMPLE_RATE
+        rate = self.PCM_SAMPLE_RATE if sample_rate is None else sample_rate
         if rate <= 0:
             raise ConfigurationError(f"sample_rate must be > 0, got {rate}")
         fmt = (response_format or self.RESPONSE_FORMAT).lower()

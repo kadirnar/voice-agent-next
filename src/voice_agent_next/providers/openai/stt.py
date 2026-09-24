@@ -336,7 +336,11 @@ class OpenAISTT(STT):
             )
         if td is not None and not use_realtime:
             raise ConfigurationError("turn_detection needs realtime=True")
-        rate = sample_rate or (REALTIME_SAMPLE_RATE if use_realtime else self.DEFAULT_SAMPLE_RATE)
+        rate = sample_rate
+        if rate is None:
+            rate = REALTIME_SAMPLE_RATE if use_realtime else self.DEFAULT_SAMPLE_RATE
+        if rate <= 0:
+            raise ConfigurationError(f"sample_rate must be > 0, got {rate}")
         if use_realtime and rate != REALTIME_SAMPLE_RATE:
             raise ConfigurationError(
                 f"realtime transcription takes 24 kHz audio (input is resampled), got {rate}"
