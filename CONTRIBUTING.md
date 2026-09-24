@@ -18,7 +18,7 @@ Optional provider dependencies are installed with extras, e.g. `uv sync --extra 
 1. Every change starts from an issue. Branch from `main`: `feat/<issue>-<slug>`, `fix/<issue>-<slug>`, `docs/<issue>-<slug>`.
 2. Commit with [Conventional Commits](https://www.conventionalcommits.org/) (`feat(stt): add Deepgram streaming STT`).
 3. Open a PR whose description contains `Closes #<issue>`, a summary, and how it was tested.
-4. CI must be green (ruff, ruff format, mypy, pytest on Linux; macOS/Windows run on `main` and on PRs labelled `ci:full` — add that label for anything platform-specific: audio devices, paths, subprocesses, native wheels).
+4. CI must be green (ruff, ruff format, mypy, pytest on Linux and Windows; macOS runs on `main` and on PRs labelled `ci:full` — add that label for anything platform-specific: audio devices, paths, subprocesses, native wheels).
 5. Keep PRs focused: one issue per PR. Don't reformat unrelated code.
 
 ## Architecture in one paragraph

@@ -76,19 +76,33 @@ jobs:
       - run: uv run pytest -q
       - run: uv run van providers --json > /dev/null
 
-  # macOS / Windows minutes are expensive on private repos: run them on main, weekly,
-  # manually, or on pull requests labelled `ci:full`.
-  test-cross-platform:
-    name: test (${{ matrix.os }}, py3.12)
+  # Windows runs on every pull request: asyncio networking (Proactor loop, TCP connect
+  # behaviour, timer resolution) differs most there. Its minutes cost 2x on private repos.
+  test-windows:
+    name: test (windows-latest, py3.12)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv run pytest -q
+      - run: uv run van providers --json
+      - name: echo cancellation with the native livekit wheel (extra `aec`)
+        run: uv run --extra aec pytest -q -m model tests/test_aec.py
+
+  # macOS minutes cost 10x on private repos: run on main, weekly, manually, or on pull
+  # requests labelled `ci:full`.
+  test-macos:
+    name: test (macos-latest, py3.12)
     if: >-
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'ci:full')
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
