@@ -236,6 +236,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       this.offset = 0;
       this.queued = 0;
       this.resampler = new Resampler(this.inRate, sampleRate);
+      this.playing = false;  // report once here, not again as "drained"
       this.report();
     }
   }
@@ -399,8 +400,8 @@ async function connect() {
     playback.port.onmessage = (e) => {
       if (ready) send({ type: "playback", position_ms: Math.round(e.data.positionMs) });
     };
-    if (audioCtx.state !== "running") {  // autoplay policy: needs a user gesture
-      audioCtx.resume().catch(() => {});
+    if (audioCtx.state !== "running") {  // may need a user gesture (autoplay policy)
+      await Promise.race([audioCtx.resume().catch(() => {}), new Promise((r) => setTimeout(r, 500))]);
       if (audioCtx.state !== "running") logLine("click anywhere on the page to enable audio");
     }
     openSocket($("url").value.trim());
