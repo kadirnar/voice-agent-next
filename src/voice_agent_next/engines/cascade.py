@@ -13,6 +13,12 @@ Pipeline per user turn:
 4. the LLM streams text; complete sentences are cleaned and pushed into a TTS stream,
    whose audio is emitted as ``ResponseAudio`` with text aligned per sentence.
 
+Preemptive generation (``CascadeOptions.preemptive_generation``): once the turn has
+*probably* ended — step 3 knows the final transcript and only the endpointing delay is
+left, or the STT sends ``EAGER_END_OF_TURN`` — step 4 starts speculatively. Its output is
+held back and released when the turn is committed with the same transcript and context,
+or discarded when the user resumes (see ``docs/concepts/preemptive-generation.md``).
+
 Half-cascade: with ``stt=None`` and an LLM whose ``capabilities.audio_input`` is True
 (Ultravox, Qwen-Omni, Gemini, gpt-4o-audio...), the user's audio is passed to the LLM
 directly as :class:`~voice_agent_next.chat.AudioContent`.
@@ -28,11 +34,19 @@ from typing import Any
 
 from ..audio.buffer import AudioBuffer
 from ..audio.frame import AudioFrame
-from ..chat import AudioContent, ChatContext, ChatMessage, FunctionCall, FunctionCallOutput
+from ..chat import (
+    AudioContent,
+    ChatContext,
+    ChatItem,
+    ChatMessage,
+    FunctionCall,
+    FunctionCallOutput,
+)
 from ..engine import EngineCapabilities, EngineConnection, EngineOptions, S2SEngine
 from ..errors import ConfigurationError
 from ..events import (
     EngineErrorEvent,
+    EngineEvent,
     InputCommitted,
     InputSpeechStarted,
     InputSpeechStopped,
@@ -44,8 +58,8 @@ from ..events import (
     ResponseText,
     ResponseToolCall,
 )
-from ..llm import LLM
-from ..metrics import EngineMetrics, Metrics
+from ..llm import LLM, ChatChunk, CompletionUsage, LLMStream
+from ..metrics import EngineMetrics, Metrics, SpeculationMetrics, SpeculationReason
 from ..registry import create
 from ..stt import STT, StreamAdapter, STTEventType, WordTiming
 from ..text.filters import tts_clean
@@ -53,7 +67,7 @@ from ..text.sentences import SentenceSegmenter
 from ..tools import FunctionTool
 from ..tts import TTS
 from ..turn import TurnDetector
-from ..utils.aio import BackgroundTasks, cancel_and_wait
+from ..utils.aio import BackgroundTasks, Chan, ChanClosed, cancel_and_wait
 from ..utils.clock import now
 from ..utils.ids import new_id
 from ..utils.log import logger
@@ -83,6 +97,26 @@ class CascadeOptions:
     """Truncate the LLM context to this many items (system prompt always kept)."""
     turn_audio_prefix: float = 0.5
     """Seconds of audio kept before speech start for the turn detector / audio LLM."""
+    preemptive_generation: bool = False
+    """Start the reply speculatively once the turn has *probably* ended: the final
+    transcript of a pause is known and only the endpointing delay is left (with a turn
+    detector: its probability is at least ``preemptive_threshold``), or the STT sends
+    ``EAGER_END_OF_TURN``. Nothing speculative reaches the TTS (unless ``preemptive_tts``),
+    the speaker, the session or the chat context: the reply is released when the turn is
+    committed with the same transcript and context, and discarded when the user resumes.
+    Hides up to the LLM's time to first token; costs an LLM call per discarded attempt.
+    Needs an STT (the transcript is what is compared)."""
+    preemptive_tts: bool = False
+    """Also synthesize the speculative reply before the commit: hides the TTS time to first
+    audio too, but the synthesis is wasted whenever the speculation is discarded."""
+    preemptive_threshold: float | None = None
+    """Minimum turn-detector probability to speculate at a pause. ``None`` = the detector's
+    own ``threshold`` (only pauses that end the turn after ``min_endpointing_delay``);
+    lower it to also speculate on pauses that wait ``max_endpointing_delay``."""
+    preemptive_max_speech: float = 10.0
+    """No speculation on user turns longer than this (seconds)."""
+    preemptive_max_attempts: int = 3
+    """Maximum speculative LLM calls per user turn."""
 
 
 @dataclass
@@ -93,6 +127,149 @@ class _Spoken:
     """Word timings reported by the TTS (relative to the start of the item's audio)."""
     audio_duration: float = 0.0
     text: list[str] = field(default_factory=list)
+
+
+class _Output:
+    """Where a response's events go: straight to the session, or — while the response is
+    speculative — held back until the user's turn is committed."""
+
+    def __init__(self, conn: CascadeConnection, *, held: bool = False) -> None:
+        self._conn = conn
+        self._held: list[EngineEvent] | None = [] if held else None
+        self._on_release: list[Callable[[], None]] = []
+        self._released = asyncio.Event()
+        self.released_at = now()
+        """When the response was triggered (the commit, for a speculative one)."""
+        self.first_audio: float | None = None
+        """When its first audio was delivered."""
+        if not held:
+            self._released.set()
+
+    @property
+    def released(self) -> bool:
+        return self._held is None
+
+    def emit(self, event: EngineEvent) -> None:
+        if self._held is not None:
+            self._held.append(event)
+        else:
+            self._send(event)
+
+    def on_release(self, callback: Callable[[], None]) -> None:
+        """Run ``callback`` when the response is released (at once if it already is)."""
+        if self._held is None:
+            callback()
+        else:
+            self._on_release.append(callback)
+
+    def release(self) -> None:
+        """The turn was committed: deliver what was held back, stamped now, and stop holding."""
+        held, self._held = self._held, None
+        if held is None:
+            return
+        self.released_at = t = now()
+        for callback in self._on_release:
+            callback()
+        self._on_release.clear()
+        for event in held:
+            event.timestamp = t
+            self._send(event)
+        self._released.set()
+
+    async def wait_released(self) -> None:
+        await self._released.wait()
+
+    def _send(self, event: EngineEvent) -> None:
+        if isinstance(event, ResponseAudio):
+            if self.first_audio is None:
+                self.first_audio = now()
+            self._conn._on_agent_audio(event.frame.duration)
+        self._conn._emit(event)
+
+
+class _Prefetch:
+    """Reads a speculative LLM stream as it arrives, so its output can be measured and
+    replayed once the turn is committed. Iterates like the :class:`LLMStream` it wraps."""
+
+    def __init__(self, stream: LLMStream) -> None:
+        self.stream = stream
+        self._chunks: Chan[ChatChunk] = Chan()
+        self._streamed = 0
+        self._usage: CompletionUsage | None = None
+        self._error: BaseException | None = None
+        self._task = asyncio.create_task(self._pump(), name=f"cascade-prefetch-{stream.request_id}")
+
+    async def _pump(self) -> None:
+        try:
+            async for chunk in self.stream:
+                if chunk.delta or chunk.tool_calls:
+                    self._streamed += 1
+                if chunk.usage is not None:
+                    self._usage = chunk.usage
+                self._chunks.send_nowait(chunk)
+        except Exception as exc:
+            self._error = exc
+        finally:
+            self._chunks.close()
+
+    @property
+    def failed(self) -> bool:
+        return self._error is not None
+
+    @property
+    def output_tokens(self) -> int:
+        """Tokens generated so far (usage once reported, else the streamed chunks)."""
+        return self._usage.completion_tokens if self._usage is not None else self._streamed
+
+    def __aiter__(self) -> AsyncIterator[ChatChunk]:
+        return self
+
+    async def __anext__(self) -> ChatChunk:
+        try:
+            return await self._chunks.recv()
+        except ChanClosed:
+            if self._error is not None:
+                err, self._error = self._error, None
+                raise err from None
+            raise StopAsyncIteration from None
+
+    async def aclose(self) -> None:
+        await cancel_and_wait(self._task)
+        await self.stream.aclose()
+        self._chunks.close()
+
+
+@dataclass(eq=False)
+class _Speculation:
+    """A reply generated for the pending user turn before the turn is committed."""
+
+    item_id: str
+    """The user item it answers."""
+    text: str
+    """The transcript it answers."""
+    key: tuple[Any, ...]
+    """Everything else it depends on (see :meth:`CascadeConnection._context_key`)."""
+    response_id: str
+    reply: _Prefetch
+    output: _Output
+    task: asyncio.Task[None]
+    started: float = field(default_factory=now)
+
+    def mismatch(self, item_id: str, text: str, key: tuple[Any, ...]) -> SpeculationReason | None:
+        """Why this reply cannot answer the turn ``item_id``/``text`` (``None``: it can)."""
+        if item_id != self.item_id or _normalize(text) != _normalize(self.text):
+            return "transcript"
+        if key != self.key:
+            return "context"
+        if self.reply.failed or self.task.done():
+            return "failed"
+        return None
+
+    async def aclose(self) -> None:
+        try:
+            await cancel_and_wait(self.task)
+        finally:  # (a task cancelled before it ever ran never closed its reply)
+            await self.reply.aclose()
 
 
 class CascadeEngine(S2SEngine):
@@ -200,6 +377,9 @@ class CascadeConnection(EngineConnection):
         self._last_final_end: float | None = None
         self._response_task: asyncio.Task[None] | None = None
         self._spoken: dict[str, _Spoken] = {}
+        self._spec: _Speculation | None = None
+        self._agent_audio_end = 0.0
+        """When the audio delivered so far (probably) stops playing."""
 
     # ---------------------------------------------------------------- user turn
     def _reset_turn(self) -> None:
@@ -208,6 +388,7 @@ class CascadeConnection(EngineConnection):
         self._turn_interim = ""
         self._turn_audio.clear()
         self._turn_has_speech = False
+        self._spec_attempts = 0
 
     def _turn_text(self) -> str:
         return " ".join(t.strip() for t in self._turn_finals if t.strip())
@@ -235,6 +416,7 @@ class CascadeConnection(EngineConnection):
     def _on_speech_started(self, audio_time: float | None) -> None:
         if self._endpoint_task is not None and not self._endpoint_task.done():
             self._endpoint_task.cancel()  # the user kept talking: same turn continues
+        self._discard_speculation("resumed")
         if not self._user_speaking:
             self._user_speaking = True
             if not self._turn_has_speech:
@@ -285,6 +467,7 @@ class CascadeConnection(EngineConnection):
         try:
             await self._wait_final_transcript()
             delay = self._min_delay()
+            prob: float | None = None
             if detector is not None:
                 if early is not None:
                     prob = await early
@@ -301,6 +484,8 @@ class CascadeConnection(EngineConnection):
                     delay = self._opts.max_endpointing_delay
             remaining = delay - (now() - t_end)
             if remaining > 0:
+                # only the silence is left to wait for: the reply can start meanwhile
+                self._speculate(prob)
                 await asyncio.sleep(remaining)
         finally:
             if early is not None and not early.done():
@@ -343,6 +528,11 @@ class CascadeConnection(EngineConnection):
                     if self._endpoint_task is not None and not self._endpoint_task.done():
                         self._endpoint_task.cancel()
                     self._tasks.spawn(self._commit_turn())
+                elif ev.type == STTEventType.EAGER_END_OF_TURN:
+                    eager = " ".join(p for p in (self._turn_text(), ev.text.strip()) if p)
+                    self._speculate(text=eager)
+                elif ev.type == STTEventType.TURN_RESUMED:
+                    self._discard_speculation("resumed")
         except Exception as exc:
             logger.exception("STT stream failed")
             self._emit(EngineErrorEvent(error=exc, recoverable=False))
@@ -352,15 +542,116 @@ class CascadeConnection(EngineConnection):
         audio = self._turn_audio.to_frame() if self._turn_audio else None
         use_audio = self._e.stt is None and audio is not None
         if not text and not use_audio:
+            self._discard_speculation("transcript")
             self._reset_turn()
             return
         item_id = self._turn_item_id
+        spec, self._spec = self._spec, None
+        # checked before the user message joins the context the speculation started from
+        mismatch = spec.mismatch(item_id, text, self._context_key()) if spec else None
         content: str | AudioContent = AudioContent(audio, None) if use_audio and audio else text
         self.chat_ctx.add_message("user", content, id=item_id)
         self._emit(InputCommitted(item_id=item_id))
         self._emit(InputTranscript(item_id=item_id, text=text, is_final=True))
         self._reset_turn()
+        if spec is not None:
+            if mismatch is None:
+                await self._start_response(speculation=spec)
+                return
+            self._drop_speculation(spec, mismatch)
         await self._start_response()
+
+    # --------------------------------------------------------------- speculation
+    def _speculate(self, probability: float | None = None, *, text: str | None = None) -> None:
+        """The pending turn has probably ended: start its reply now, held back until the
+        commit. ``probability`` is the turn detector's verdict on this pause, if any."""
+        opts, engine = self._opts, self._e
+        if not opts.preemptive_generation or engine.stt is None or not self.options.turn_detection:
+            return
+        text = self._turn_text() if text is None else text.strip()
+        if not text:
+            return
+        detector = engine.turn_detector
+        if probability is not None and detector is not None:
+            threshold = opts.preemptive_threshold
+            if probability < (detector.threshold if threshold is None else threshold):
+                return
+        item_id, key = self._turn_item_id, self._context_key()
+        spec = self._spec
+        if spec is not None:
+            reason = spec.mismatch(item_id, text, key)
+            if reason is None:
+                return  # already answering exactly this
+            self._discard_speculation(reason)
+        if (
+            self._spec_attempts >= opts.preemptive_max_attempts
+            or self._turn_audio.duration > opts.preemptive_max_speech
+            or self._agent_busy()
+        ):
+            return
+        self._spec_attempts += 1
+        pending = ChatMessage(role="user", content=[text], id=item_id)
+        tools = self.tools if engine.llm.capabilities.tool_calling else []
+        reply = _Prefetch(engine.llm.chat(self._llm_context(None, pending), tools=tools))
+        output = _Output(self, held=True)
+        rid = new_id("resp_")
+        task = asyncio.create_task(
+            self._respond(rid, None, None, output, reply), name=f"cascade-{rid}"
+        )
+        self._spec = _Speculation(item_id, text, key, rid, reply, output, task)
+        logger.debug("speculative reply %s started for %r", rid, text)
+
+    def _agent_busy(self) -> bool:
+        """A reply is being generated or (probably) still playing: speech that ends now
+        overlapped the agent, and the session's interruption policy decides about it."""
+        task = self._response_task
+        return (task is not None and not task.done()) or now() < self._agent_audio_end
+
+    def _on_agent_audio(self, duration: float) -> None:
+        self._agent_audio_end = max(self._agent_audio_end, now()) + duration
+
+    def _context_key(self) -> tuple[Any, ...]:
+        """Everything besides the user's words that the next reply depends on."""
+        items = tuple(_item_key(item) for item in self.chat_ctx.items)
+        return (self.instructions, tuple(self.tools), items)
+
+    def _check_speculation(self) -> None:
+        """Discard the pending speculation if the conversation it started from changed."""
+        if self._spec is not None and self._spec.key != self._context_key():
+            self._discard_speculation("context")
+
+    def _discard_speculation(self, reason: SpeculationReason) -> None:
+        spec, self._spec = self._spec, None
+        if spec is not None:
+            self._drop_speculation(spec, reason)
+
+    def _drop_speculation(self, spec: _Speculation, reason: SpeculationReason) -> None:
+        self._report_speculation(spec, reason)
+        spec.task.cancel()
+        self._tasks.spawn(spec.aclose(), name=f"cascade-drop-{spec.response_id}")
+
+    def _report_speculation(self, spec: _Speculation, reason: SpeculationReason | None) -> None:
+        engine = self._e
+        lead = now() - spec.started
+        logger.debug(
+            "speculative reply %s %s after %.0f ms",
+            spec.response_id,
+            "kept" if reason is None else f"discarded ({reason})",
+            lead * 1000,
+        )
+        engine.emit(
+            "metrics",
+            SpeculationMetrics(
+                provider=engine.provider,
+                model=engine.model,
+                request_id=spec.reply.stream.request_id,
+                hit=reason is None,
+                reason=reason,
+                response_id=spec.response_id if reason is None else None,
+                lead=lead,
+                output_tokens=spec.reply.output_tokens,
+            ),
+        )
 
     async def commit_input(self) -> None:
         if self._endpoint_task is not None and not self._endpoint_task.done():
@@ -374,6 +665,7 @@ class CascadeConnection(EngineConnection):
     async def clear_input(self) -> None:
         if self._endpoint_task is not None and not self._endpoint_task.done():
             self._endpoint_task.cancel()
+        self._discard_speculation("cleared")
         self._user_speaking = False
         if self._vad is not None:
             self._vad.reset()
@@ -382,6 +674,7 @@ class CascadeConnection(EngineConnection):
     # ------------------------------------------------------------------ control
     async def send_text(self, text: str, *, respond: bool = True) -> None:
         self.chat_ctx.add_message("user", text)
+        self._check_speculation()
         if respond:
             await self._start_response()
 
@@ -392,12 +685,14 @@ class CascadeConnection(EngineConnection):
         await self._start_response(verbatim=text)
 
     async def cancel_response(self) -> None:
+        self._discard_speculation("cancelled")
         task = self._response_task
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
     async def truncate(self, item_id: str, audio_end_ms: int) -> str | None:
+        self._agent_audio_end = min(self._agent_audio_end, now())  # playback was cut
         msg = self.chat_ctx.get(item_id)
         spoken = self._spoken.get(item_id)
         if not isinstance(msg, ChatMessage) or msg.role != "assistant":
@@ -414,10 +709,12 @@ class CascadeConnection(EngineConnection):
             heard = ""
         msg.content = [heard.strip()]
         msg.interrupted = True
+        self._check_speculation()
         return heard.strip()
 
     async def send_tool_output(self, output: FunctionCallOutput, *, respond: bool = True) -> None:
         self.chat_ctx.append(output)
+        self._check_speculation()
         if respond:
             await self._start_response()
 
@@ -428,8 +725,10 @@ class CascadeConnection(EngineConnection):
             self.instructions = instructions
         if tools is not None:
             self.tools = list(tools)
+        self._check_speculation()
 
     async def aclose(self) -> None:
+        self._discard_speculation("closed")
         await self.cancel_response()
         await self._tasks.cancel_all()
         if self._stt is not None:
@@ -440,11 +739,17 @@ class CascadeConnection(EngineConnection):
         await super().aclose()
 
     # ----------------------------------------------------------------- response
-    def _llm_context(self, extra_instructions: str | None) -> ChatContext:
+    def _llm_context(
+        self, extra_instructions: str | None, pending: ChatMessage | None = None
+    ) -> ChatContext:
+        """The LLM input: instructions + history (+ ``pending``, the not yet committed user
+        message a speculative reply answers), truncated to ``max_history_items``."""
         ctx = ChatContext()
         if self.instructions:
             ctx.add_message("system", self.instructions)
         items = ChatContext(self.chat_ctx.items)
+        if pending is not None:
+            items.append(pending)
         if self._opts.max_history_items is not None:
             items.truncate(self._opts.max_history_items)
         ctx.items.extend(items.items)
@@ -453,74 +758,107 @@ class CascadeConnection(EngineConnection):
         return ctx
 
     async def _start_response(
-        self, *, instructions: str | None = None, verbatim: str | None = None
+        self,
+        *,
+        instructions: str | None = None,
+        verbatim: str | None = None,
+        speculation: _Speculation | None = None,
     ) -> None:
         await self.cancel_response()
+        if speculation is not None:  # the committed turn is the one it answers: release it
+            self._response_task = speculation.task
+            speculation.output.release()
+            self._report_speculation(speculation, None)
+            return
         rid = new_id("resp_")
         self._response_task = asyncio.create_task(
-            self._respond(rid, instructions, verbatim), name=f"cascade-{rid}"
+            self._respond(rid, instructions, verbatim, _Output(self)), name=f"cascade-{rid}"
         )
 
-    async def _respond(self, rid: str, instructions: str | None, verbatim: str | None) -> None:
+    async def _respond(
+        self,
+        rid: str,
+        instructions: str | None,
+        verbatim: str | None,
+        output: _Output,
+        reply: _Prefetch | None = None,
+    ) -> None:
+        """One response. A speculative one (``output`` held, ``reply`` already streaming)
+        runs the same way, except that it waits for the commit before the TTS (unless
+        ``preemptive_tts``) and before it touches the history or reports tool calls."""
         engine = self._e
-        t0 = now()
         status: ResponseStatus = "completed"
         error: str | None = None
-        first_audio: list[float] = []
-        self._emit(ResponseStarted(response_id=rid))
+        stream: LLMStream | _Prefetch | None = None
+        item_id = new_id("item_")
+        output.emit(ResponseStarted(response_id=rid))
         try:
-            item_id = new_id("item_")
-            msg = self.chat_ctx.add_message("assistant", "", id=item_id)
+            msg = ChatMessage(role="assistant", content=[""], id=item_id)
+            output.on_release(lambda: self.chat_ctx.append(msg))
             if verbatim is not None:
                 msg.content = [verbatim]
-                await self._speak(rid, item_id, _once(verbatim), first_audio)
+                await self._speak(rid, item_id, _once(verbatim), output)
             else:
-                ctx = self._llm_context(instructions)
-                tools = self.tools if engine.llm.capabilities.tool_calling else []
-                stream = engine.llm.chat(ctx, tools=tools)
+                if reply is not None:
+                    stream = reply
+                else:
+                    ctx = self._llm_context(instructions)
+                    tools = self.tools if engine.llm.capabilities.tool_calling else []
+                    stream = engine.llm.chat(ctx, tools=tools)
+                source = stream
                 calls: list[FunctionCall] = []
                 text_parts: list[str] = []
 
                 async def text_source() -> AsyncIterator[str]:
                     try:
-                        async for chunk in stream:
+                        async for chunk in source:
                             if chunk.delta:
                                 text_parts.append(chunk.delta)
                                 msg.content = ["".join(text_parts)]
                                 yield chunk.delta
                             calls.extend(chunk.tool_calls)
                     finally:
-                        await stream.aclose()
+                        await source.aclose()
 
-                await self._speak(rid, item_id, text_source(), first_audio)
+                if not self._opts.preemptive_tts:
+                    await output.wait_released()  # nothing speculative reaches the TTS
+                await self._speak(rid, item_id, text_source(), output)
+                await output.wait_released()  # the turn is committed: history and tools
                 if not "".join(text_parts).strip():
                     self.chat_ctx.remove(item_id)
                 for call in calls:
                     self.chat_ctx.append(call)
-                    self._emit(ResponseToolCall(response_id=rid, call=call))
+                    output.emit(ResponseToolCall(response_id=rid, call=call))
         except asyncio.CancelledError:
             status = "cancelled"
             raise
         except Exception as exc:
             logger.exception("cascade response failed")
             status, error = "failed", repr(exc)
-            self._emit(EngineErrorEvent(error=exc, recoverable=True))
+            output.emit(EngineErrorEvent(error=exc, recoverable=True))
         finally:
-            self._emit(ResponseDone(response_id=rid, status=status, error=error))
-            engine.emit(
-                "metrics",
-                EngineMetrics(
-                    provider=engine.provider,
-                    model=engine.model,
-                    response_id=rid,
-                    ttfb=(first_audio[0] - t0) if first_audio else None,
-                    duration=now() - t0,
-                    cancelled=status == "cancelled",
-                ),
-            )
+            if stream is not None:
+                await stream.aclose()
+            output.emit(ResponseDone(response_id=rid, status=status, error=error))
+            if output.released:
+                t0 = output.released_at
+                first_audio = output.first_audio
+                engine.emit(
+                    "metrics",
+                    EngineMetrics(
+                        provider=engine.provider,
+                        model=engine.model,
+                        response_id=rid,
+                        ttfb=(first_audio - t0) if first_audio is not None else None,
+                        duration=now() - t0,
+                        cancelled=status == "cancelled",
+                    ),
+                )
+            else:  # a discarded speculation: as far as anyone knows, it never existed
+                self._spoken.pop(item_id, None)
 
     async def _speak(
-        self, rid: str, item_id: str, text: AsyncIterator[str], first_audio: list[float]
+        self, rid: str, item_id: str, text: AsyncIterator[str], output: _Output
     ) -> None:
         """Stream ``text`` through the TTS, emitting aligned text and audio events."""
         engine = self._e
@@ -540,7 +878,7 @@ class CascadeConnection(EngineConnection):
                 return
             spoken.text.append(cleaned + " ")
             if not aligned:
-                self._emit(ResponseText(response_id=rid, item_id=item_id, delta=cleaned + " "))
+                output.emit(ResponseText(response_id=rid, item_id=item_id, delta=cleaned + " "))
             tts_stream.push_text(cleaned + " ")
             if aligned:
                 # sentence-at-a-time TTS: synthesize exactly this segment now (the adapter's
@@ -564,14 +902,12 @@ class CascadeConnection(EngineConnection):
                     spoken.words.extend(audio.words)
                 if aligned and audio.text:
                     spoken.segments.append((audio.text, spoken.audio_duration))
-                    self._emit(
+                    output.emit(
                         ResponseText(response_id=rid, item_id=item_id, delta=audio.text + " ")
                     )
                 if audio.frame:
-                    if not first_audio:
-                        first_audio.append(now())
                     spoken.audio_duration += audio.frame.duration
-                    self._emit(ResponseAudio(response_id=rid, item_id=item_id, frame=audio.frame))
+                    output.emit(ResponseAudio(response_id=rid, item_id=item_id, frame=audio.frame))
             await feeder  # surface LLM errors
         finally:
             await cancel_and_wait(feeder)
@@ -580,3 +916,16 @@ class CascadeConnection(EngineConnection):
 
 async def _once(text: str) -> AsyncIterator[str]:
     yield text
+
+
+def _normalize(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _item_key(item: ChatItem) -> tuple[Any, ...]:
+    """What an LLM sees of a history item, as a snapshot: any later change shows."""
+    if isinstance(item, ChatMessage):
+        return ("message", item.id, item.role, tuple(item.content), item.interrupted)
+    if isinstance(item, FunctionCall):
+        return ("call", item.id, item.call_id, item.name, item.arguments)
+    return ("output", item.id, item.call_id, item.name, item.output, item.is_error)
