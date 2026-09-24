@@ -39,7 +39,8 @@ class Recorder:
     def __init__(self, session: AgentSession) -> None:
         self.events: list[tuple[str, Any]] = []
         for name in ("user_transcript", "agent_transcript", "tool_call", "tool_result",
-                     "interrupted", "metrics", "agent_state_changed", "error", "close"):  # fmt: skip
+                     "interrupted", "metrics", "agent_state_changed", "error", "close",
+                     "conversation_item"):  # fmt: skip
             session.on(name, self._make(name))
 
     def _make(self, name: str) -> Callable[[Any], None]:
@@ -442,3 +443,62 @@ async def test_file_transport_streams_exact_lengths_without_float_drift(tmp_path
     assert all(f for f in frames)  # never an empty frame
     assert sum(f.samples_per_channel for f in frames) >= 16_000 * 11.5
     assert sum(f.samples_per_channel for f in frames) < 16_000 * 11.6
+
+
+async def test_session_prewarms_the_engine_before_opening_the_transport() -> None:
+    order: list[str] = []
+
+    class WarmEngine(MockEngine):
+        async def warmup(self) -> None:
+            order.append("warmup")
+
+    class Tracking(LoopbackTransport):
+        async def start(self) -> None:
+            order.append("transport")
+            await super().start()
+
+    session = AgentSession(WarmEngine())
+    await session.start(Agent("x"), Tracking())
+    await session.aclose()
+    assert order == ["warmup", "transport"]
+
+    order.clear()
+    cold = AgentSession(WarmEngine(), options=SessionOptions(warmup=False))
+    await cold.start(Agent("x"), Tracking())
+    await cold.aclose()
+    assert order == ["transport"]
+
+
+async def test_user_turn_precedes_the_reply_even_with_a_late_transcript() -> None:
+    from voice_agent_next.events import InputCommitted, InputTranscript
+    from voice_agent_next.providers.mock import MockEngineConnection
+    from voice_agent_next.utils import new_id
+
+    class LateTranscript(MockEngineConnection):
+        async def _commit(self) -> None:  # the transcript arrives after the answer started
+            self._pending = []
+            text = self._engine.stt.next_transcript(AudioFrame.empty(16_000))
+            item_id = new_id("item_")
+            self._emit(InputCommitted(item_id=item_id))
+            self.chat_ctx.add_message("user", text, id=item_id)
+            await self._start_response()
+            await asyncio.sleep(0.2)
+            self._emit(InputTranscript(item_id=item_id, text=text, is_final=True))
+
+    class LateEngine(MockEngine):
+        async def connect(self, options):  # type: ignore[no-untyped-def]
+            conn = LateTranscript(self, options)
+            self.connections.append(conn)
+            return conn
+
+    session = AgentSession(LateEngine(transcripts=["where is my order"], responses=["On its way."]))
+    rec = Recorder(session)
+    transport = LoopbackTransport()
+    await session.start(Agent("x"), transport)
+    await speak(transport)
+    await wait_for(lambda: any(e.is_final for e in rec.of("user_transcript")), 3)
+    await session.aclose()
+    roles = [(i.role, i.text) for i in session.history.items if isinstance(i, ChatMessage)]
+    assert roles == [("user", "where is my order"), ("assistant", "On its way.")]
+    added = [e.item.role for e in rec.of("conversation_item") if isinstance(e.item, ChatMessage)]
+    assert added.count("user") == 1  # announced once, when the transcript arrived

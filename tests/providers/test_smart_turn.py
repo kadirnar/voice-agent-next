@@ -409,7 +409,7 @@ async def _speak(transport: LoopbackTransport, seconds: float, then_silence: flo
 
 
 async def test_agent_session_with_smart_turn_spec(monkeypatch: pytest.MonkeyPatch) -> None:
-    session_fake = FakeSession((0.05, 0.95))  # "not done yet", then "done"
+    session_fake = FakeSession((0.5, 0.05, 0.95))  # warmup, "not done yet", then "done"
     monkeypatch.setattr(SmartTurnDetector, "_load_session", lambda self: session_fake)
     durations: list[float] = []
     original_infer = SmartTurnDetector._infer
@@ -443,7 +443,8 @@ async def test_agent_session_with_smart_turn_spec(monkeypatch: pytest.MonkeyPatc
     assert finals == ["I would like to book a table"]
     assert [m.end_of_turn for m in eot] == [False, True]
     assert all(m.provider == "smart_turn" for m in eot)
-    assert len(durations) == 2 and durations[1] > durations[0] + 0.5  # whole turn re-scored
+    warmup, first, second = durations  # the session pre-warms the detector at start
+    assert warmup == 1.0 and second > first + 0.5  # whole turn re-scored
     assert all(f["input_features"].shape == (1, 80, 800) for f in session_fake.feeds)
 
 

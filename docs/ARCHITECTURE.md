@@ -52,9 +52,11 @@ Rules every engine follows:
 
 ## The session runtime
 
+* **Start:** `engine.warmup()` (model loads, connection pre-opening; `SessionOptions.warmup`) runs before the transport opens, then `engine.connect()`. Cold starts otherwise land on the first turn (a local LLM: 582 ms cold vs 10 ms warm TTFT).
 * **Input loop:** transport frames → optional processors (echo cancellation needs the played audio as a reference, which the playout loop feeds via `process_render`) → engine.
 * **Playout loop:** engine audio is resampled to the transport format and paced against a virtual playback clock with a small look-ahead (`SessionOptions.output_lookahead`, 150 ms). The session therefore always knows how much of each response the user has heard, independent of transport buffering.
 * **Barge-in:** `InputSpeechStarted` while a response is generating or playing → pause playback (transport `pause_audio()`, or hold queued frames) and let the interruption policy (`session/interruptions.py`) decide. A real barge-in (`min_interruption_duration` of speech, `min_interruption_words` non-backchannel words, or the engine committing the user's turn / cancelling the response) → clear transport audio, drop queued frames, `interrupt(item_id, played_ms)`, trim the history message to what was heard and mark it `interrupted`. A false one (cough, noise, "uh-huh") → resume and emit `agent_false_interruption`. See `docs/concepts/interruptions.md`.
+* **History order:** the user message is added when the engine commits the turn (`InputCommitted`) and its text is filled in when the final transcript arrives, so it always precedes the reply even when an engine transcribes after it starts answering (OpenAI Realtime). Until then it carries `metadata["transcript_pending"]`; `conversation_item` fires once, with the text.
 * **Tools:** `ResponseToolCall` → tools run concurrently (`execute_function_call`, timeouts, errors become tool outputs) → outputs are sent back once the response is done; only the last output triggers the follow-up response; `max_tool_steps` bounds loops. Tool calls withdrawn by the engine (`ToolCallCancelled`) are cancelled.
 * **Turn metrics:** one `TurnMetrics` per user turn spanning tool rounds: `voice_to_voice` (speech end → first agent audio handed to the transport), `end_of_turn_delay`, `response_ttfb`, `agent_speech_duration`, `interrupted`, `tool_calls`. Component metrics (`STTMetrics`, `LLMMetrics`, `TTSMetrics`, `VADMetrics`, `EOTMetrics`, `EngineMetrics`) are re-emitted and aggregated into `session.usage`.
 
@@ -75,7 +77,7 @@ Everything is asyncio on one event loop. Blocking model inference runs in thread
 
 ## Cross-platform rules
 
-Pure-Python core (numpy, pydantic, httpx, websockets); native wheels only in extras; `pathlib`/`platformdirs`; no Unix-only signals; timing tolerant of coarse Windows timers; CI on Linux on every PR and on macOS/Windows on `main`.
+Pure-Python core (numpy, pydantic, httpx, websockets); native wheels only in extras; `pathlib`/`platformdirs`; no Unix-only signals; timing tolerant of coarse Windows timers; CI on Linux and Windows on every PR, macOS on `main` and on PRs labelled `ci:full`.
 
 ## Extension points
 

@@ -933,6 +933,9 @@ async def test_cascade_session_greeting_then_tool_round_trip(api: FakeAnthropicA
         return f"sunny in {city}"
 
     api.reply(
+        http.Response(  # the session pre-warms the engine: the LLM opens its connection
+            200, json={"id": MODEL, "type": "model", "display_name": "Claude", "created_at": ""}
+        ),
         stream_response(
             [
                 message_start(),
@@ -975,7 +978,8 @@ async def test_cascade_session_greeting_then_tool_round_trip(api: FakeAnthropicA
     await session.aclose()
 
     assert looked_up == ["Paris"]
-    first, second = api.body(0), api.body(1)
+    assert (api.requests[0].method, api.requests[0].url.path) == ("GET", f"/v1/models/{MODEL}")
+    first, second = api.body(1), api.body(2)
     assert first["system"][0]["text"] == "You are a weather bot."
     assert [t["name"] for t in first["tools"]] == ["lookup_weather"]
     assert [(m["role"], m["content"][0]["text"]) for m in first["messages"]] == [
