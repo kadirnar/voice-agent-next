@@ -28,8 +28,9 @@ never logged. If no key is found, the constructor raises `AuthenticationError`.
 `project`, `location` or `credentials` also selects Vertex AI.
 
 ```python
-llm = create("llm", "google/gemini-3.8-flash", vertexai=True,
-             project="my-project", location="global")        # Application Default Credentials
+llm = create(
+    "llm", "google/gemini-3.8-flash", vertexai=True, project="my-project", location="global"
+)  # Application Default Credentials
 llm = create("llm", "google/gemini-3.8-flash", vertexai=True, api_key="...")  # express mode
 ```
 
