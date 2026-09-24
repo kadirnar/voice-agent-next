@@ -623,45 +623,6 @@ async def test_dropped_connection_is_resumed_and_buffered_audio_delivered(
     assert bytes(second.audio) == after
 
 
-async def test_zz_timer_diagnostics(fake: Callable[..., Any]) -> None:  # TEMPORARY, remove
-    import sys
-    import time
-    import warnings
-
-    loop = asyncio.get_running_loop()
-    idle = []
-    for _ in range(20):
-        t = time.perf_counter()
-        await asyncio.sleep(0.004)
-        idle.append(time.perf_counter() - t)
-    server = await fake()
-    conn, _ = await connect(server)
-    busy = []
-    t0 = time.perf_counter()
-    for frame in quiet_noise(0.5, seed=5):  # the old Feeder: 25 frames, sleep(0.004) between
-        await conn.send_audio(frame)
-        t = time.perf_counter()
-        await asyncio.sleep(0.004)
-        busy.append(time.perf_counter() - t)
-    span = time.perf_counter() - t0
-    await conn.aclose()
-
-    def stats(xs: list[float]) -> str:
-        return (
-            f"min={min(xs) * 1e3:.2f} mean={sum(xs) / len(xs) * 1e3:.2f} max={max(xs) * 1e3:.2f}ms"
-        )
-
-    info = time.get_clock_info("monotonic")
-    warnings.warn(
-        f"TIMER-DIAG py{sys.version_info[0]}.{sys.version_info[1]} {sys.platform} "
-        f"loop={type(loop).__name__} clock_resolution={loop._clock_resolution:.6f} "  # type: ignore[attr-defined]
-        f"monotonic={info.implementation}; sleep(0.004) idle: {stats(idle)}; "
-        f"with websocket I/O: {stats(busy)}; old feeder 25 frames: {span * 1e3:.1f} ms "
-        "(replay margin in the old test: 50 ms)",
-        stacklevel=1,
-    )
-
-
 async def test_expired_handle_falls_back_to_a_fresh_session_with_history(
     fake: Callable[..., Any],
 ) -> None:
