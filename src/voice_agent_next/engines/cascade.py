@@ -1043,7 +1043,7 @@ def _cut_after_word(text: str, n: int) -> str:
     if n <= 0:
         return ""
     end = min(n, len(text))
-    while end < len(text) and not text[end].isspace():
+    while end < len(text) and not text[end - 1].isspace() and not text[end].isspace():
         end += 1
     return text[:end]
 
