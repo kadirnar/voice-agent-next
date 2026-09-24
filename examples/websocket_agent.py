@@ -72,11 +72,15 @@ def make_session(args: argparse.Namespace, transport: WebSocketServerTransport) 
     def log(text: str) -> None:
         print(f"[{transport.session_id}] {text}", flush=True)
 
+    def on_user(ev: Any) -> None:
+        if ev.is_final:
+            log(f"user : {ev.text}")
+
     def on_metrics(m: Any) -> None:
         if isinstance(m, TurnMetrics) and m.voice_to_voice is not None:
             log(f"voice-to-voice latency: {m.voice_to_voice * 1000:.0f} ms")
 
-    session.on("user_transcript", lambda ev: ev.is_final and log(f"user : {ev.text}"))
+    session.on("user_transcript", on_user)
     session.on("agent_transcript", lambda ev: log(f"agent: {ev.delta.strip()}"))
     session.on("interrupted", lambda ev: log(f"(interrupted after {ev.played:.1f} s)"))
     session.on("metrics", on_metrics)
