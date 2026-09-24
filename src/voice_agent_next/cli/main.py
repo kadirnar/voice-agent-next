@@ -218,7 +218,182 @@ def devices(
 
 
 @app.command()
+def presets(
+    name: Annotated[str | None, typer.Argument(help="Show one preset in detail")] = None,
+    transport: Annotated[
+        str, typer.Option(help="Transport to check for (local needs the audio extra)")
+    ] = "local",
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output")] = False,
+) -> None:
+    """List presets and whether they are ready here (extras, API keys, platform, GPU, Ollama)."""
+    from .. import presets as presets_mod
+    from ..errors import ConfigurationError
+
+    env = presets_mod.current_environment()
+    try:
+        chosen = [presets_mod.get_preset(name)] if name else presets_mod.list_presets()
+    except ConfigurationError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]", highlight=False)
+        raise typer.Exit(2) from None
+    results = [presets_mod.check_preset(p, transport=transport, env=env) for p in chosen]
+    if as_json:
+        rows = [
+            {
+                "name": p.name,
+                "summary": p.summary,
+                "where": p.where,
+                "platforms": list(p.platforms),
+                "accelerator": p.accelerator,
+                "extras": list(p.extras),
+                "env": [list(group) for group in p.env_vars],
+                "config": dict(p.config),
+                "ready": r.ready,
+                "problems": [dataclasses.asdict(problem) for problem in r.problems],
+                "fixes": r.fixes(),
+                "notes": list(r.notes),
+            }
+            for p, r in zip(chosen, results, strict=True)
+        ]
+        typer.echo(json.dumps(rows if name is None else rows[0], indent=2))
+        return
+    if name is not None:
+        _print_preset(chosen[0], results[0])
+        return
+    table = Table(title="voice-agent-next presets")
+    for col in ("preset", "where", "stack", "status"):
+        table.add_column(col, overflow="fold")
+    for p, r in zip(chosen, results, strict=True):
+        status = "[green]ready[/green]" if r.ready else f"[yellow]{escape(r.summary())}[/yellow]"
+        table.add_row(f"[bold]{p.name}[/bold]", p.where, escape(p.stack()), status)
+    console.print(table)
+    ready = [r.name for r in results if r.ready]
+    if ready:
+        console.print(f"`van run` picks [bold]{ready[0]}[/bold]; or: van run --preset <name>")
+    else:
+        console.print("[yellow]no preset is ready here[/yellow]")
+    console.print("[dim]details and fixes: van presets <name>[/dim]")
+
+
+def _print_preset(preset: Any, result: Any) -> None:
+    import yaml
+
+    console.print(f"[bold]{preset.name}[/bold]: {escape(preset.summary)}")
+    where = f"{preset.where}; platforms: {', '.join(preset.platforms)}"
+    if preset.accelerator:
+        where += f"; built for: {preset.accelerator}"
+    console.print(escape(where))
+    if preset.extras:
+        console.print(f"extras: {', '.join(preset.extras)}")
+    if preset.env_vars:
+        console.print("API keys: " + ", ".join(" or ".join(g) for g in preset.env_vars))
+    console.print(f"\n[dim]{escape(preset.rationale)}[/dim]\n")
+    console.print(escape(f"# config (use it with `extends: {preset.name}`)"))
+    console.print(escape(yaml.safe_dump(dict(preset.config), sort_keys=False).rstrip()))
+    console.print()
+    _print_readiness(result)
+
+
+def _print_readiness(result: Any) -> None:
+    for note in result.notes:
+        console.print(f"[dim]{escape(note)}[/dim]")
+    if result.ready:
+        console.print(f"[green]{escape(result.explain())}[/green]")
+    else:
+        console.print(f"[yellow]{escape(result.explain())}[/yellow]", highlight=False)
+
+
+def _run_config(
+    *,
+    config: Path | None,
+    preset: str | None,
+    components: dict[str, str | None],
+    instructions: str | None,
+    greeting: str | None,
+    transport: str,
+    skip_checks: bool,
+) -> Any:
+    """The :class:`AppConfig` ``van run`` runs: preset < config file < flags, checked."""
+    from .. import presets as presets_mod
+    from ..config import AppConfig, load_config, merge_config
+    from ..errors import ConfigurationError
+
+    try:
+        file_cfg = load_config(config) if config else None
+        if (
+            preset
+            and file_cfg is not None
+            and file_cfg.extends
+            and presets_mod.get_preset(preset).name != file_cfg.extends
+        ):
+            raise ConfigurationError(
+                f"--preset {preset} conflicts with `extends: {file_cfg.extends}` in {config}"
+            )
+        chosen = presets_mod.get_preset(preset) if preset else None
+    except ConfigurationError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]", highlight=False)
+        raise typer.Exit(2) from None
+    raw: dict[str, Any] = dict(chosen.config) if chosen else {}
+    if file_cfg is not None:
+        chosen = chosen or (presets_mod.get_preset(file_cfg.extends) if file_cfg.extends else None)
+        raw = merge_config(raw, file_cfg.model_dump(exclude_unset=True))
+    overrides = {k: v for k, v in components.items() if v is not None}
+    raw = merge_config(raw, overrides)
+    if config is None or transport != "local":
+        raw["transport"] = {"type": transport}
+    transport_type = str((raw.get("transport") or {"type": "local"}).get("type", "local"))
+    env = presets_mod.current_environment()
+    if chosen is None and config is None and not overrides:
+        picked, _ = presets_mod.pick_preset(transport=transport_type, env=env)
+        if picked is None:
+            console.print(
+                "[yellow]no preset is ready on this machine (`van presets` shows what each "
+                "needs); using the mock engine[/yellow]"
+            )
+            raw["engine"] = "mock"
+        else:
+            chosen = presets_mod.get_preset(picked.name)
+            console.print(
+                f"no --preset or --config given: using preset [bold]{picked.name}[/bold] "
+                f"({escape(chosen.stack())}), the first ready one of "
+                f"{', '.join(presets_mod.AUTO_ORDER)}. Choose with --preset; see `van presets`."
+            )
+            raw = merge_config(dict(chosen.config), raw)
+    if chosen is not None and not skip_checks:
+        result = presets_mod.check_config(
+            raw,
+            name=chosen.name,
+            platforms=chosen.platforms,
+            accelerator=chosen.accelerator,
+            transport=transport_type,
+            env=env,
+        )
+        if not result.ready:
+            _print_readiness(result)
+            console.print("[dim](run anyway with --skip-checks)[/dim]")
+            raise typer.Exit(1)
+        for note in result.notes:
+            console.print(f"[dim]{escape(note)}[/dim]")
+        raw = result.config
+    if chosen is not None:
+        raw["extends"] = chosen.name
+    cfg = AppConfig.model_validate(raw)
+    if instructions:
+        cfg.agent.instructions = instructions
+    if greeting:
+        cfg.agent.greeting = greeting
+    if cfg.engine is None and cfg.llm is None:
+        cfg.engine = "mock"
+        console.print("[yellow]no engine configured; using the mock engine[/yellow]")
+    cfg.validate_components()
+    return cfg
+
+
+@app.command()
 def run(
+    preset: Annotated[
+        str | None,
+        typer.Option("--preset", "-p", help="Named configuration (`van presets` lists them)"),
+    ] = None,
     config: Annotated[
         Path | None, typer.Option("--config", "-c", help="YAML/TOML/JSON config")
     ] = None,
@@ -241,47 +416,52 @@ def run(
     output_wav: Annotated[
         Path | None, typer.Option("--output", help="Output WAV (file transport)")
     ] = None,
+    skip_checks: Annotated[
+        bool, typer.Option("--skip-checks", help="Run a preset without the readiness checks")
+    ] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Run a voice agent from a config file and/or command-line flags."""
-    import logging
+    """Run a voice agent from a preset, a config file and/or command-line flags.
 
-    from ..app import build_agent, build_session
-    from ..config import AppConfig, load_config
-    from ..transports import create_transport
+    Without any of them, the best preset that is ready on this machine is used.
+    """
+    import logging
 
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    cfg = load_config(config) if config else AppConfig()
-    overrides = {
-        "engine": engine,
-        "stt": stt,
-        "llm": llm,
-        "tts": tts,
-        "vad": vad,
-        "turn_detector": turn_detector,
-    }
-    for key, value in overrides.items():
-        if value is not None:
-            setattr(cfg, key, value)
-    if instructions:
-        cfg.agent.instructions = instructions
-    if greeting:
-        cfg.agent.greeting = greeting
-    if config is None or transport != "local":
-        cfg.transport = {"type": transport}
+    if transport == "file" and input_wav is None:
+        raise typer.BadParameter("--input is required with --transport file")
+    cfg = _run_config(
+        config=config,
+        preset=preset,
+        components={
+            "engine": engine,
+            "stt": stt,
+            "llm": llm,
+            "tts": tts,
+            "vad": vad,
+            "turn_detector": turn_detector,
+        },
+        instructions=instructions,
+        greeting=greeting,
+        transport=transport,
+        skip_checks=skip_checks,
+    )
     if cfg.transport.get("type") == "file":
         if input_wav is None:
             raise typer.BadParameter("--input is required with --transport file")
         cfg.transport.update(
             input_path=str(input_wav), output_path=str(output_wav) if output_wav else None
         )
-    if cfg.engine is None and cfg.llm is None:
-        cfg.engine = "mock"
-        console.print("[yellow]no engine configured; using the mock engine[/yellow]")
-    cfg.validate_components()
+    _run_session(cfg)
+
+
+def _run_session(cfg: Any) -> None:
+    """Build the session, agent and transport of ``cfg`` and run until Ctrl+C."""
+    from ..app import build_agent, build_session
+    from ..transports import create_transport
 
     async def _main() -> None:
         session = build_session(cfg)
