@@ -27,7 +27,16 @@ import re
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, Any, get_args, get_origin, get_type_hints, overload
+from typing import (
+    Annotated,
+    Any,
+    Literal,
+    TypeAlias,
+    get_args,
+    get_origin,
+    get_type_hints,
+    overload,
+)
 
 import pydantic
 
@@ -36,12 +45,35 @@ from .errors import ToolError
 from .utils.log import logger
 
 __all__ = [
+    "DEFAULT_TOOL_ACK",
+    "FillerSpec",
     "FunctionTool",
     "ToolContext",
+    "ToolScheduling",
     "execute_function_call",
     "find_tool",
     "function_tool",
 ]
+
+
+ToolScheduling: TypeAlias = Literal["interrupt", "when_idle", "silent"]
+"""When the result of a non-blocking tool reaches the conversation (Gemini Live's
+``FunctionResponse.scheduling``): ``interrupt`` stops what the agent is saying and answers
+right away, ``when_idle`` waits until the agent has finished speaking and then answers,
+``silent`` only adds the result to the context (the model uses it later)."""
+
+FillerSpec: TypeAlias = (
+    bool | str | Sequence[str] | Callable[[FunctionCall], str | None] | None
+)
+"""What a slow tool says while it runs (see :func:`function_tool`): ``None``/``True`` = the
+session's default fillers, ``False`` = never, a phrase, a list of phrases (picked without
+repeating) or a callable ``(call) -> phrase | None``."""
+
+DEFAULT_TOOL_ACK = (
+    "The task is running in the background. Its result will be added to the conversation "
+    "when it is ready; do not wait for it and do not make up a result."
+)
+"""Immediate output of a non-blocking tool on engines without native asynchronous tools."""
 
 
 @dataclass(slots=True)
@@ -57,6 +89,24 @@ class ToolContext:
     call: FunctionCall
     session: Any = None
     userdata: Any = None
+
+    async def report_progress(
+        self, message: str, *, speak: bool = True, to_model: bool = False
+    ) -> bool:
+        """Report progress of a long-running tool ("Found 3 flights, comparing prices").
+
+        The session emits a ``tool_progress`` event; with ``speak`` it also says ``message``
+        (unless the user or the agent is talking), and with ``to_model`` it adds it to the
+        model's context without triggering a response. Spoken progress counts as the
+        round's filler. Without a session this is a no-op.
+
+        Returns:
+            ``True`` if the message is being spoken.
+        """
+        report = getattr(self.session, "report_tool_progress", None)
+        if report is None:
+            return False
+        return bool(await report(self.call, message, speak=speak, to_model=to_model))
 
 
 @dataclass(eq=False)
@@ -75,6 +125,21 @@ class FunctionTool:
     timeout: float | None = None
     _model: type[pydantic.BaseModel] | None = field(default=None, repr=False)
     _ctx_param: str | None = field(default=None, repr=False)
+    filler: FillerSpec = None
+    """Spoken by the session when a (blocking) call runs longer than
+    ``SessionOptions.tool_filler_delay`` (see :data:`FillerSpec`)."""
+    blocking: bool = True
+    """``False``: the conversation goes on while the tool runs; its result is added when
+    it arrives (see :data:`ToolScheduling`)."""
+    scheduling: ToolScheduling = "when_idle"
+    """How the result of a non-blocking call is delivered."""
+    ack: str | None = None
+    """Immediate output of a non-blocking call on engines without native asynchronous
+    tools (``None`` = :data:`DEFAULT_TOOL_ACK`)."""
+
+    def __post_init__(self) -> None:
+        if self.scheduling not in ("interrupt", "when_idle", "silent"):
+            raise ValueError(f"unknown tool scheduling {self.scheduling!r}")
 
     def schema(self) -> dict[str, Any]:
         """Provider-neutral schema (``type``/``name``/``description``/``parameters``)."""
@@ -171,6 +236,7 @@ def _build_tool(
     description: str | None,
     timeout: float | None,
     localns: dict[str, Any] | None = None,
+    **behavior: Any,
 ) -> FunctionTool:
     sig = inspect.signature(fn)
     try:
@@ -218,6 +284,7 @@ def _build_tool(
         timeout=timeout,
         _model=model,
         _ctx_param=ctx_param,
+        **behavior,
     )
 
 
@@ -227,7 +294,14 @@ def function_tool(fn: Callable[..., Any], /) -> FunctionTool: ...
 
 @overload
 def function_tool(
-    *, name: str | None = None, description: str | None = None, timeout: float | None = None
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    timeout: float | None = None,
+    filler: FillerSpec = None,
+    blocking: bool = True,
+    scheduling: ToolScheduling = "when_idle",
+    ack: str | None = None,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 
 
@@ -238,13 +312,31 @@ def function_tool(
     name: str | None = None,
     description: str | None = None,
     timeout: float | None = None,
+    filler: FillerSpec = None,
+    blocking: bool = True,
+    scheduling: ToolScheduling = "when_idle",
+    ack: str | None = None,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
-    """Decorator turning a (sync or async) function into a :class:`FunctionTool`."""
+    """Decorator turning a (sync or async) function into a :class:`FunctionTool`.
+
+    Args:
+        timeout: per-call timeout in seconds (the session's ``tool_timeout`` applies too).
+        filler: what the session says when a call is slow (see :data:`FillerSpec`).
+        blocking: ``False`` makes the tool non-blocking: the model is not kept waiting,
+            the conversation goes on and the result is delivered when it is ready.
+        scheduling: delivery of a non-blocking result (see :data:`ToolScheduling`).
+        ack: immediate output of a non-blocking call on engines that need one.
+    """
+    behavior: dict[str, Any] = {
+        "filler": filler, "blocking": blocking, "scheduling": scheduling, "ack": ack
+    }  # fmt: skip
     if fn is not None:
-        return _build_tool(fn, name, description, timeout, dict(sys._getframe(1).f_locals))
+        localns = dict(sys._getframe(1).f_locals)
+        return _build_tool(fn, name, description, timeout, localns, **behavior)
 
     def decorator(f: Callable[..., Any]) -> FunctionTool:
-        return _build_tool(f, name, description, timeout, dict(sys._getframe(1).f_locals))
+        localns = dict(sys._getframe(1).f_locals)
+        return _build_tool(f, name, description, timeout, localns, **behavior)
 
     return decorator
 
