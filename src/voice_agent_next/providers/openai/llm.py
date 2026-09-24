@@ -46,6 +46,7 @@ from ...errors import (
 from ...llm import LLM, ChatChunk, CompletionUsage, LLMCapabilities, LLMStream, ToolChoice
 from ...registry import register_provider
 from ...tools import FunctionTool
+from ...utils.clock import now
 from ...utils.deps import require
 from ...utils.ids import new_id
 from ...utils.log import logger
@@ -423,10 +424,11 @@ class OpenAICompatibleLLM(OpenAILLM):
     """
 
     provider = "openai_compatible"
-    DEFAULT_MODEL = None
-    BASE_URL_ENV = ()
-    API_KEY_ENV = ()
+    DEFAULT_MODEL: ClassVar[str | None] = None
+    BASE_URL_ENV: ClassVar[tuple[str, ...]] = ()
+    API_KEY_ENV: ClassVar[tuple[str, ...]] = ()
     API_KEY_REQUIRED: ClassVar[bool] = True
+    """False for local servers, which accept requests without a key."""
 
     def _default_api_key(self, *, custom_base_url: bool) -> str | None:
         return _first_env(self.API_KEY_ENV)
@@ -456,7 +458,12 @@ class _OpenAILLMStream(LLMStream):
         parser = _StreamParser(strip_thinking=llm.strip_thinking)
         try:
             async for chunk in stream:
-                self._forward(*parser.feed(chunk))
+                text, calls = parser.feed(chunk)
+                if self._first_token is None and parser.tool_call_started:
+                    # tool calls are emitted once complete; time the first token at the
+                    # first fragment so ttft / tokens_per_second reflect the model
+                    self._first_token = now()
+                self._forward(text, calls)
         except Exception as exc:
             raise llm._map_error(exc) from exc
         finally:
@@ -484,6 +491,7 @@ class _StreamParser:
         self._tools = _ToolCallBuffer()
         self.usage: CompletionUsage | None = None
         self.finish_reason: str | None = None
+        self.tool_call_started = False
 
     def feed(self, chunk: Any) -> tuple[str, list[FunctionCall]]:
         usage = _field(chunk, "usage")
@@ -501,6 +509,7 @@ class _StreamParser:
                     text.append(self._think.push(piece) if self._think else piece)
             for tc in _field(delta, "tool_calls") or ():
                 fn = _field(tc, "function")
+                self.tool_call_started = True
                 self._tools.add(
                     _field(tc, "index"),
                     _field(tc, "id"),
