@@ -878,12 +878,15 @@ class GeminiLiveConnection(EngineConnection):
                 return
             except Exception as exc:
                 failures += 1
-                if handle is not None and isinstance(exc, ProviderError) and not exc.retryable:
+                rejected = isinstance(exc, ProviderError) and not exc.retryable
+                if rejected and handle is not None:
+                    # e.g. an expired handle: continue in a fresh session (history re-seeded)
                     logger.warning("gemini-live: cannot resume (%s); starting a new session", exc)
                     self._handle = None
-                if failures >= self._e.max_reconnect_attempts:
+                    continue
+                if rejected or failures >= self._e.max_reconnect_attempts:
                     msg = f"Gemini Live reconnection failed after {failures} attempts: {exc}"
-                    self._fail(ProviderConnectionError(msg, provider="google"))
+                    self._fail(exc if rejected else ProviderConnectionError(msg, provider="google"))
                     return
                 logger.warning("gemini-live: reconnect attempt %d failed: %s", failures, exc)
                 await asyncio.sleep(delay)
