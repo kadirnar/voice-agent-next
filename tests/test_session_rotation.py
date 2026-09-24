@@ -406,6 +406,7 @@ async def test_buffer_overflow_is_never_silent(closing: list[EngineConnection]) 
     await feed(conn, AudioFrame.silence(0.5, 16_000))
     await wait_for(lambda: metrics)
     assert metrics[0].lost_audio == pytest.approx(0.4, abs=0.03)
+    await wait_for(lambda: rec.statuses()[-1:] == ["reconnected"])  # events are async
     errors = rec.of(EngineErrorEvent)
     assert len(errors) == 1 and errors[0].recoverable and "lost" in str(errors[0].error)
 

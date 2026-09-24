@@ -154,7 +154,7 @@ async def test_rotation_at_the_deadline_cuts_the_response_short() -> None:
         await conn.create_response()
         await rec.wait(lambda: rec.of(ResponseAudio))
         conn.rotate("test", deadline=now())
-        await rec.wait(lambda: metrics)
+        await rec.wait(lambda: statuses(rec)[-1:] == ["reconnected"])
         done = rec.of(ResponseDone)[0]
         assert done.status == "failed" and "session rotated" in (done.error or "")
         assert metrics[0].failed_responses == 1
