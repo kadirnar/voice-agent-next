@@ -82,7 +82,7 @@ def _processing_rate(input_rate: int, forced: int | None) -> int:
 class _Converter:
     """Channel and sample-rate conversion of one stream to a fixed format (identity if equal).
 
-    Deliberately uses the numpy polyphase backend: it adds < 1 ms of group delay, while
+    Deliberately uses the numpy polyphase backend: it adds 0.5-1 ms of group delay, while
     soxr's streaming mode withholds 20-60 ms of audio, far beyond the 10 ms budget.
     """
 
@@ -114,6 +114,16 @@ class _CapturePath:
         self.out = bytearray()
         self.delay = 0
         """Samples (at the input rate) of silence inserted so far = latency added by framing."""
+        self.max_delay = math.ceil((rate // 100 - 1) * fmt.sample_rate / rate)
+        """Largest framing remainder, in input samples: enough delay for any frame sizes."""
+        self.started = False
+
+    def start(self, frame: AudioFrame) -> None:
+        """Pick the delay from the first frame: none if it is made of whole 10 ms frames."""
+        self.started = True
+        if self.rate != self.format.sample_rate or frame.samples_per_channel % (self.rate // 100):
+            self.out += bytes(self.max_delay * self.format.bytes_per_sample)
+            self.delay = self.max_delay
 
 
 class _RenderPath:
@@ -137,9 +147,10 @@ class WebRTCAudioProcessor(AudioProcessor):
     * capture audio is re-chunked into the exact 10 ms frames the APM needs, processed at
       its own rate (rates that are not a multiple of 100 Hz are resampled to 48/16 kHz and
       back) and returned as a frame of the **same format and duration** as the input.
-      The only added latency is the framing remainder, at most 10 ms (zero when input
-      frames are multiples of 10 ms) plus < 1 ms per resampling stage; it is reported by
-      :attr:`latency` and subtracted from the returned frame's ``timestamp``;
+      The added latency is the framing remainder: none when frames are whole multiples of
+      10 ms, otherwise just under 10 ms, set once at the first frame (plus about 1 ms per
+      resampling stage). It is reported by :attr:`latency` and subtracted from the
+      returned frame's ``timestamp``;
     * :meth:`process_render` only queues the reference (cheap and non-blocking, safe to
       call from a real-time playback callback on another thread); it is converted to mono
       at the capture processing rate and handed to the APM on the capture path, right
@@ -251,7 +262,7 @@ class WebRTCAudioProcessor(AudioProcessor):
             self._pending.append(frame)
             self._pending_duration += frame.duration
             # nothing consumes the queue while the microphone is not processed: bound it
-            while self._pending_duration > _MAX_PENDING_RENDER and len(self._pending) > 1:
+            while self._pending_duration > _MAX_PENDING_RENDER + 1e-6 and len(self._pending) > 1:
                 self._pending_duration -= self._pending.popleft().duration
 
     def process_capture(self, frame: AudioFrame) -> AudioFrame:
@@ -264,16 +275,19 @@ class WebRTCAudioProcessor(AudioProcessor):
                 cap = self._configure(frame.format)
             if self.echo_cancellation:
                 self._drain_render()
+            if not cap.started:
+                cap.start(frame)
             out = cap.out
             for chunk in cap.chunker.push(cap.to_apm.push(frame)):
                 out += cap.from_apm.push(self._process_chunk(chunk)).data
             n = len(frame.data)
             if len(out) < n:
-                # not enough processed audio yet (framing remainder, resampler warm-up): delay
-                # the stream by the shortfall once; afterwards the FIFO always has enough
-                missing = n - len(out)
-                out[:0] = bytes(missing)
-                cap.delay += missing // frame.format.bytes_per_sample
+                # whole 10 ms frames at first, then not: the stream is delayed (once, with a
+                # short gap) by the largest possible framing remainder so it never runs short
+                bps = frame.format.bytes_per_sample
+                pad = max(n - len(out), (cap.max_delay - cap.delay) * bps)
+                out[:0] = bytes(pad)
+                cap.delay += pad // bps
             data = bytes(out[:n])
             del out[:n]
             ts = None if frame.timestamp is None else frame.timestamp - self.latency
