@@ -1,8 +1,8 @@
 """Kokoro TTS provider.
 
 Unit tests replace ``kokoro_onnx`` and ``onnxruntime`` with in-memory fakes (no model,
-no network). ``test_real_model_*`` downloads the int8 model (~142 MB with the voice pack)
-and only runs with ``-m model``.
+no network). ``test_real_model_*`` downloads the int8 model (~142 MB with the voice pack;
+fp16, ~191 MB, on ARM64) and only runs with ``-m model``.
 """
 
 from __future__ import annotations
@@ -83,6 +83,8 @@ class FakeKokoro:
             time.sleep(self.backend.delay)
         if self.backend.error is not None:
             raise self.backend.error
+        if self.backend.session_output is not None:
+            self.session.run(None, {"tokens": text})  # the real one runs the model
         n = round(0.01 * SR * len(text) / speed)
         tone = 0.5 * np.sin(2 * np.pi * 220.0 * np.arange(n) / SR)
         return tone.astype(np.float32), SR
@@ -108,6 +110,8 @@ class FakeBackend:
         self.espeak_configs: list[FakeEspeakConfig | None] = []
         self.downloads: list[tuple[str, str, str | None]] = []
         self.error: Exception | None = None
+        self.session_output: np.ndarray | None = None
+        """What the fake ONNX session returns as audio (``None``: the model is not run)."""
         self.delay = 0.0
 
     @property
@@ -134,6 +138,9 @@ class FakeBackend:
 
             def get_providers(self) -> list[str]:
                 return [p if isinstance(p, str) else p[0] for p in self.providers]
+
+            def run(self, output_names: Any, feed: Any, run_options: Any = None) -> list[Any]:
+                return [backend.session_output, np.array([1, 2])]
 
         class Kokoro:
             @classmethod
@@ -499,6 +506,28 @@ async def test_text_without_phonemes_is_skipped(backend: FakeBackend) -> None:
         await synthesize(tts, "Hmm, xyz.")
 
 
+@pytest.mark.parametrize("arm64", [False, True])
+async def test_non_finite_model_output_is_a_clear_error(
+    backend: FakeBackend,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    arm64: bool,
+) -> None:
+    """int8 on ARM64 CPUs (Apple Silicon): a NaN in the harmonic source phase makes
+    DynamicQuantizeLinear's scale NaN, so all of the audio is NaN. kokoro-onnx would trim it
+    to nothing and fail in numpy; the provider names the problem and the way out."""
+    monkeypatch.setattr(kokoro_module, "_ARM64", arm64)
+    tts = KokoroTTS(model="v1.0-int8")
+    backend.session_output = np.full(2400, 0.1, dtype=np.float32)
+    assert await synthesize(tts, "Hello.")  # finite audio passes through the check
+    backend.session_output = np.full(2400, np.nan, dtype=np.float32)
+    with pytest.raises(ProviderError, match="non-finite audio") as info:
+        await synthesize(tts, "Hello.")
+    assert ("v1.0-fp16" in str(info.value)) is arm64
+    assert ("may produce NaN audio" in caplog.text) is arm64
+    await tts.aclose()
+
+
 async def test_metrics_are_emitted(backend: FakeBackend) -> None:
     metrics: list[TTSMetrics] = []
     tts = KokoroTTS(model="v1.0-int8")
@@ -555,7 +584,10 @@ async def test_real_model_synthesizes_a_sentence() -> None:
     ``VAN_KOKORO_TEST_MODEL=v1.0 uv run pytest -m model tests/providers/test_kokoro.py -s``.
     """
     pytest.importorskip("kokoro_onnx")
-    model = os.environ.get("VAN_KOKORO_TEST_MODEL", "v1.0-int8")
+    # the int8 export produces NaN audio with ONNX Runtime's ARM64 kernels (e.g. Apple
+    # Silicon runners), see test_non_finite_model_output_is_a_clear_error
+    default = "v1.0-fp16" if kokoro_module._ARM64 else "v1.0-int8"
+    model = os.environ.get("VAN_KOKORO_TEST_MODEL", default)
     tts = KokoroTTS(model=model)
     metrics: list[TTSMetrics] = []
     tts.on("metrics", metrics.append)
