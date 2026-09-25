@@ -135,6 +135,23 @@ session = AgentSession(
 * **Preemptive generation** needs an STT transcript to compare, so a half-cascade never
   speculates.
 
+### Measured latency
+
+T1 (`van bench latency`, scenario `latency-local-omni`, 2 sessions × 12 turns, first turn
+of each session excluded), 2026-09-25. LFM2.5-Audio-1.5B Q4_0 on mainline `llama-server`
+(CUDA build b10567, `-np 2`, RTX 5070 Ti; the model hears the audio and answers in text)
+→ Kokoro v1.0 (CPU) · Silero VAD · Smart Turn v3.2. No STT. The machine was shared with
+other jobs (load average up to 48 during the first run), which shows in the p90s.
+
+| configuration | v2v p50 | v2v p90 | LLM TTFT p50 | TTS first audio p50 | user transcripts |
+|---|---:|---:|---:|---:|---|
+| audio only | 1,159 ms | 3,564 ms | 200 ms | 424 ms | none |
+| `input_transcriber="llm"`, `audio_history=1` | 1,198 ms | 2,211 ms | 224 ms | 406 ms | 24/24 exact |
+
+The end-of-turn delay (401 ms) and Kokoro on the CPU account for most of the latency.
+The model's time to first token includes encoding the audio (≈ 200 ms).
+The transcription request runs alongside the reply and does not delay it.
+
 ## Limits
 
 * Omni models are large for their quality. LFM2.5-Audio-1.5B is the smallest capable

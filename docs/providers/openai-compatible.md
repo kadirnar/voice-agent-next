@@ -204,9 +204,8 @@ session = AgentSession(
 )  # no stt=...
 ```
 
-Measured (T1, `latency-local-omni` scenario, RTX 5070 Ti, shared machine):
-LFM2.5-Audio-1.5B Q4_0 on `llama-server` (CUDA, `-np 2`) + Kokoro (CPU) + Silero +
-Smart Turn, 11 measured turns: see the table in [omni models](../concepts/omni-models.md#audio-input-half-cascade).
+Measured latency (T1, LFM2.5-Audio-1.5B on `llama-server` + Kokoro): see
+[omni models](../concepts/omni-models.md#measured-latency).
 
 ### LM Studio
 
