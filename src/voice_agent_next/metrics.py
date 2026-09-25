@@ -245,6 +245,11 @@ class EndpointingMetrics:
     false_commit: bool = False
     """The turn was committed, but the user started speaking again within
     ``false_commit_window``: probably cut off mid-thought."""
+    audio_probability: float | None = None
+    """Fused turn detector: the audio half's end-of-turn probability."""
+    text_probability: float | None = None
+    """Fused turn detector: the text half's end-of-turn probability (``None``: no
+    transcript, or over its latency budget)."""
     timestamp: float = field(default_factory=_ts)
     type: Literal["endpointing"] = "endpointing"
 

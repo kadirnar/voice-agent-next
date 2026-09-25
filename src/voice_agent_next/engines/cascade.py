@@ -38,7 +38,7 @@ import asyncio
 import contextlib
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..audio.buffer import AudioBuffer
@@ -81,7 +81,7 @@ from ..text.filters import tts_clean
 from ..text.sentences import SentenceSegmenter
 from ..tools import FunctionTool
 from ..tts import TTS
-from ..turn import TurnDetector
+from ..turn import FusedTurnDetector, TurnDetector
 from ..utils.aio import BackgroundTasks, Chan, ChanClosed, cancel_and_wait
 from ..utils.clock import now
 from ..utils.ids import new_id
@@ -665,12 +665,58 @@ class CascadeConnection(EngineConnection):
                 committed=committed,
                 pause=length,
                 false_commit=false_commit,
+                audio_probability=d.audio_probability,
+                text_probability=d.text_probability,
             ),
         )
+
+    def _user_context(self, text: str) -> ChatContext:
+        """The conversation plus the pending user ``text`` (what text detectors judge)."""
+        ctx = self._llm_context(None)
+        ctx.add_message("user", text)
+        return ctx
+
+    async def _fused_probability(self, fused: FusedTurnDetector) -> tuple[float, dict[str, Any]]:
+        """Run both halves of a fused detector: the audio half concurrently with the STT
+        flush, the text half on the transcript — started on the interim text so that it
+        overlaps the flush too, and run again only if the final transcript differs."""
+        t0 = now()
+        audio = self._turn_audio.to_frame() if self._turn_audio else None
+        audio_task = asyncio.ensure_future(fused.predict_audio(audio))
+        guess = " ".join(p for p in (self._turn_text(), self._turn_interim.strip()) if p)
+        text_task: asyncio.Future[float | None] | None = None
+        if guess:
+            text_task = asyncio.ensure_future(fused.predict_text(self._user_context(guess)))
+        try:
+            await self._wait_final_transcript()
+            final = self._turn_text()
+            if _normalize(final) != _normalize(guess):
+                if text_task is not None:
+                    text_task.cancel()
+                text_task = None
+                if final:
+                    text_task = asyncio.ensure_future(fused.predict_text(self._user_context(final)))
+            pa = await audio_task
+            if text_task is not None and not text_task.done():
+                # the audio verdict alone may already justify a (held) speculative reply:
+                # start it now rather than after the text half
+                self._speculate(pa)
+            pt = await text_task if text_task is not None else None
+        finally:
+            for task in (audio_task, text_task):
+                if task is not None and not task.done():
+                    task.cancel()
+        p = fused.report(fused.fuse(pa, pt), now() - t0)
+        return p, {"audio_probability": pa, "text_probability": pt}
 
     async def _endpoint(self) -> None:
         t_end = self._speech_end_wall if self._speech_end_wall is not None else now()
         detector = self._e.turn_detector
+        if isinstance(detector, FusedTurnDetector):
+            fused, parts = await self._fused_probability(detector)
+            decision = replace(self._endpointer.decide(fused, detector.threshold), **parts)
+            await self._wait_and_commit(decision, t_end, fused)
+            return
         early: asyncio.Future[float] | None = None
         if detector is not None and detector.modality == "audio" and self._turn_audio:
             # audio-only detectors don't need the transcript: overlap them with the STT flush
@@ -692,20 +738,25 @@ class CascadeConnection(EngineConnection):
                     )
                 else:
                     prob = 1.0
-            decision = self._endpointer.decide(
-                prob, detector.threshold if detector is not None else None
-            )
-            pause = self._pause = _Pause(decision, self._turn_item_id, t_end)
-            remaining = decision.delay - (now() - t_end)
-            if remaining > 0:
-                # only the silence is left to wait for: the reply can start meanwhile
-                self._speculate(prob)
-                await asyncio.sleep(remaining)
-            await self._commit_gate.wait()  # the session may still drop this turn
-            await self._wait_unconfirmed_speech()
         finally:
             if early is not None and not early.done():
                 early.cancel()
+        decision = self._endpointer.decide(
+            prob, detector.threshold if detector is not None else None
+        )
+        await self._wait_and_commit(decision, t_end, prob)
+
+    async def _wait_and_commit(
+        self, decision: EndpointingDecision, t_end: float, prob: float | None
+    ) -> None:
+        pause = self._pause = _Pause(decision, self._turn_item_id, t_end)
+        remaining = decision.delay - (now() - t_end)
+        if remaining > 0:
+            # only the silence is left to wait for: the reply can start meanwhile
+            self._speculate(prob)
+            await asyncio.sleep(remaining)
+        await self._commit_gate.wait()  # the session may still drop this turn
+        await self._wait_unconfirmed_speech()
         self._pause = None
         self._watch_commit(pause)
         await self._commit_turn()

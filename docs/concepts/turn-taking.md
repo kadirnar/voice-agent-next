@@ -8,7 +8,7 @@ splits the decision into signals of increasing cost and meaning:
 | Signal | Component | Cost | What it knows |
 |---|---|---|---|
 | Voice activity | VAD (`silero`, `sherpa_onnx`, `energy`) | < 1 ms per 32 ms window on CPU | someone is speaking / silence |
-| Semantic end of turn | turn detector (`smart_turn`) | tens of ms per pause | the utterance *sounds* finished (audio) or *reads* finished (text) |
+| Semantic end of turn | turn detector (`smart_turn`, `lm_turn`, `fused`) | tens of ms per pause | the utterance *sounds* finished (audio) or *reads* finished (text) |
 | Provider turn events | STT with `end_of_turn` (Deepgram Flux, AssemblyAI, Cartesia Ink, Soniox, Speechmatics) | included in the STT | end of turn, eager end of turn, turn resumed |
 | Server turn detection | native engines (OpenAI `semantic_vad` / `server_vad`, Gemini Live) | included in the engine | the engine commits turns itself |
 
@@ -52,6 +52,24 @@ pause ("Where is my order? · I placed it last week.") is "done" to it (Smart Tu
 and short answers ("Yes.") often sound unfinished. The T4 battery (`van bench
 turn-taking`) measures what that does to a whole system; the local presets' settings and
 the remaining trade-off are in [endpointing](endpointing.md#the-local-presets-issue-113).
+
+### Audio and text together
+
+A text detector reads what the audio cannot: "I would like to book a table," is not
+finished whatever it sounds like, and "my number is five five" goes on. `fused` combines
+an audio and a text detector in log-odds
+([`lm_turn` / `llm_turn` / `fused`](../providers/lm-turn.md)):
+
+```yaml
+turn_detector: {provider: fused, audio: smart_turn, text: lm_turn}
+```
+
+The cascade runs the audio half concurrently with the STT flush and the text half on the
+transcript it already has, so fusion costs little latency; the text half has a latency
+budget, past which the audio verdict is used alone. On eot-bench it lowers the false
+cut-offs in English, German and Spanish. It does not make a complete sentence
+incomplete: a pause after "Where is my order?" still reads, and sounds, like a turn end
+(see [endpointing](endpointing.md#semantic-end-of-turn-issue-124)).
 
 ## STT-driven turns
 
