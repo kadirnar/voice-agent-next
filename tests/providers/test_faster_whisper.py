@@ -43,6 +43,8 @@ from voice_agent_next.stt import StreamAdapter, STTEventType
 from voice_agent_next.utils.download import DownloadError, download
 from voice_agent_next.vad import VAD
 
+from .whisper_helpers import LevelVAD, push_settled, stream_paced
+
 # ------------------------------------------------------------------------ fakes
 
 
@@ -532,38 +534,6 @@ def test_cascade_wraps_it_in_a_stream_adapter(backend: FakeBackend) -> None:
 # --------------------------------------------------- interim transcripts
 
 
-class LevelVAD(VAD):
-    """Scripted VAD: ``probability`` on any 20 ms window louder than -40 dBFS, else 0."""
-
-    provider = "level"
-
-    def __init__(
-        self, probability: float = 0.95, *, min_silence: float = 0.25, activation: float = 0.5
-    ) -> None:
-        super().__init__(
-            sample_rate=16_000,
-            window_samples=320,
-            options=VADOptions(
-                activation_threshold=activation,
-                min_speech_duration=0.06,
-                min_silence_duration=min_silence,
-            ),
-        )
-        self.probability = probability
-
-    def _new_inference(self) -> Any:
-        probability = self.probability
-
-        class Inference:
-            def __call__(self, window: Any) -> float:
-                return probability if float(np.sqrt(np.mean(np.square(window)))) > 0.01 else 0.0
-
-            def reset(self) -> None:
-                pass
-
-        return Inference()
-
-
 def growing_text(audio: Any) -> list[FakeSegment]:
     """One word per 0.2 s of audio: interim decodes see the transcript grow."""
     words = " ".join(f"w{i}" for i in range(max(1, int(len(audio) / 16_000 / 0.2))))
@@ -577,31 +547,6 @@ def interim_calls(backend: FakeBackend) -> list[dict[str, Any]]:
 
 def final_calls(backend: FakeBackend) -> list[dict[str, Any]]:
     return [c for c in backend.calls if not c.get("without_timestamps")]
-
-
-async def stream_paced(
-    stream: Any, audio: AudioFrame, *, speed: float = 2.0, step: float = 0.02
-) -> list[tuple[float, Any]]:
-    """Push ``audio`` in ``step`` chunks paced at ``speed`` x real time, end the input and
-    return ``(audio time, event)`` pairs: the audio pushed when each event arrived."""
-    events: list[tuple[float, Any]] = []
-    pushed = 0.0
-
-    async def consume() -> None:
-        async for ev in stream:
-            events.append((pushed, ev))
-
-    consumer = asyncio.create_task(consume())
-    t0 = time.perf_counter()
-    for i, frame in enumerate(chunks(audio, step)):
-        delay = t0 + i * step / speed - time.perf_counter()
-        if delay > 0:
-            await asyncio.sleep(delay)
-        stream.push_audio(frame)
-        pushed += frame.duration
-    stream.end_input()
-    await consumer
-    return events
 
 
 def whisper_adapter(
@@ -734,6 +679,62 @@ async def test_second_replica_runs_the_final_next_to_an_interim_decode(
     kinds = [ev.type for _, ev in events]
     assert kinds[-2:] == [STTEventType.FINAL_TRANSCRIPT, STTEventType.END_OF_SPEECH]
     assert STTEventType.INTERIM_TRANSCRIPT not in kinds
+    await adapter.aclose()
+
+
+async def test_final_from_interim_skips_the_second_decode(backend: FakeBackend) -> None:
+    backend.segments = growing_text
+    stt, adapter = whisper_adapter(
+        backend, interim_results=True, interim_interval=0.02, final_from_interim=True
+    )
+    metrics: list[STTMetrics] = []
+    stt.on("metrics", metrics.append)
+    await adapter.warmup()
+    stream = adapter.stream()
+    # the input ends mid-speech (0.1 s of silence < min_silence): a flush, not a VAD end;
+    # an interim decode starts on every voiced frame, so the last one heard all the speech
+    events = await push_settled(
+        stream, AudioFrame.concat([speech(0.8), AudioFrame.silence(0.1, 16_000)])
+    )
+    interims = [ev for ev in events if ev.type == STTEventType.INTERIM_TRANSCRIPT]
+    (final,) = [ev for ev in events if ev.type == STTEventType.FINAL_TRANSCRIPT]
+    assert final_calls(backend) == []  # no second decode
+    assert stream.finals_from_interim == 1
+    assert final.text == interims[-1].text and final.segment_id == interims[-1].segment_id
+    assert [ev.type for ev in events][-1] == STTEventType.END_OF_SPEECH
+    assert len(metrics) == 1 and metrics[0].audio_duration > 0.7  # still reported
+    await adapter.aclose()
+
+
+async def test_final_from_interim_only_when_no_speech_followed(backend: FakeBackend) -> None:
+    backend.segments = growing_text
+    backend.decode_delay = 0.5  # the only interim decode starts early and runs long
+    _, adapter = whisper_adapter(
+        backend, interim_results=True, interim_interval=0.1, final_from_interim=True
+    )
+    await adapter.warmup()
+    stream = adapter.stream()
+    events = await stream_paced(
+        stream, AudioFrame.concat([speech(1.0), AudioFrame.silence(0.1, 16_000)])
+    )
+    # speech arrived after the interim decode took its audio: the final is decoded
+    assert stream.finals_from_interim == 0 and len(final_calls(backend)) == 1
+    finals = [ev.text for _, ev in events if ev.type == STTEventType.FINAL_TRANSCRIPT]
+    assert len(finals) == 1 and finals[0].startswith("w0 w1 w2 w3")
+    await adapter.aclose()
+
+
+@pytest.mark.parametrize("options", [{"final_from_interim": False}, {"word_timestamps": True}])
+async def test_final_from_interim_is_opt_in_and_needs_no_words(
+    backend: FakeBackend, options: dict[str, Any]
+) -> None:
+    backend.segments = growing_text
+    kwargs = {"final_from_interim": True, **options}
+    _, adapter = whisper_adapter(backend, interim_results=True, interim_interval=0.02, **kwargs)
+    await adapter.warmup()
+    stream = adapter.stream()
+    await push_settled(stream, AudioFrame.concat([speech(0.8), AudioFrame.silence(0.1, 16_000)]))
+    assert stream.finals_from_interim == 0 and len(final_calls(backend)) == 1
     await adapter.aclose()
 
 

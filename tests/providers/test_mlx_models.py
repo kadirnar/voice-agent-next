@@ -107,6 +107,55 @@ async def test_whisper_tiny_transcribes_a_public_domain_clip() -> None:
     )
 
 
+@pytest.mark.timeout(900)
+async def test_whisper_tiny_interims_and_guard_behind_a_vad() -> None:
+    """mlx-whisper behind a VAD: interim decodes (greedy, without timestamps) on the real
+    model, the final transcript, and the hallucination guard on quiet noise."""
+    pytest.importorskip("mlx_whisper")
+    from voice_agent_next.providers.energy import EnergyVAD
+    from voice_agent_next.providers.mlx_whisper import MLXWhisperSTT
+    from voice_agent_next.stt import StreamAdapter
+
+    clip = _jfk_clip()
+    stt = MLXWhisperSTT(model="tiny", language="en", interim_results=True)
+    await _loaded(stt)
+    adapter = StreamAdapter(stt, EnergyVAD())
+    stream = adapter.stream()
+    interims: list[str] = []
+    finals: list[str] = []
+
+    async def consume() -> None:
+        async for ev in stream:
+            if ev.type == STTEventType.INTERIM_TRANSCRIPT:
+                interims.append(ev.text)
+            elif ev.type == STTEventType.FINAL_TRANSCRIPT:
+                finals.append(ev.text)
+
+    reader = asyncio.create_task(consume())
+    tail = AudioFrame.silence(1.0, clip.sample_rate, clip.channels)
+    audio = AudioFrame.concat([clip, tail])
+    start = now()
+    for i, frame in enumerate(_chunks(audio)):
+        stream.push_audio(frame)
+        await asyncio.sleep(max(0.0, start + (i + 1) * 0.01 - now()))  # 2x real time
+    stream.end_input()
+    await reader
+    assert interims, "no interim transcript"
+    assert "your country" in _normalize(" ".join(finals))
+    waits = stream.final_waits  # type: ignore[attr-defined]
+    decodes = stream.interim_decodes  # type: ignore[attr-defined]
+    await stream.aclose()
+    # quiet noise decodes to nothing, or the guard drops what Whisper made of it
+    rng = np.random.default_rng(0)
+    noise = AudioFrame.from_numpy((rng.standard_normal(16_000) * 0.003).astype(np.float32), 16_000)
+    assert (await stt.transcribe(noise)).text == ""
+    await adapter.aclose()
+    print(
+        f"\nmlx-whisper tiny behind a VAD: {decodes} interim decodes, {len(interims)} interim "
+        f"transcripts, {len(finals)} finals; final waited {max(waits) * 1000:.0f} ms at most"
+    )
+
+
 async def _stream_in_real_time(stt: STT, clip: AudioFrame) -> tuple[str, float, int]:
     """Stream ``clip`` like a microphone; ``(final text, final latency, interim count)``."""
     metrics: list[STTMetrics] = []

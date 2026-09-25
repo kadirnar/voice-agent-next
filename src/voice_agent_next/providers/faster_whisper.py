@@ -9,10 +9,11 @@ input into utterances with the configured VAD and transcribes each one. With
 speaks (interim transcripts), paced by the cost of a decode so that the model is idle
 when the utterance ends and the final transcript is not delayed.
 
-A :class:`HallucinationGuard` (on by default) drops what Whisper "hears" in noise:
-segments Whisper itself rates as no-speech, known subtitle artifacts ("Thanks for
-watching!"), repetition loops, and short stock phrases ("Thank you.") that the VAD was
-unsure about.
+A :class:`~voice_agent_next.stt_guard.HallucinationGuard` (on by default, shared with
+``mlx_whisper``) drops what Whisper "hears" in noise: segments Whisper itself rates as
+no-speech, known subtitle artifacts in many languages ("Thanks for watching!",
+"Untertitel im Auftrag des ZDF"), repetition loops, and short stock phrases ("Thank
+you.", "Danke.") that the VAD was unsure about.
 
 The model is downloaded into the Hugging Face cache on first use. It is loaded once,
 lazily, in a worker thread (:meth:`FasterWhisperSTT.warmup` loads it ahead of time), and
@@ -34,7 +35,6 @@ import numpy as np
 import numpy.typing as npt
 
 from ..audio.frame import AudioFrame
-from ..audio.resample import StreamResampler
 from ..errors import (
     AuthenticationError,
     ConfigurationError,
@@ -44,17 +44,17 @@ from ..errors import (
     VoiceAgentError,
 )
 from ..hardware import ctranslate2_compute_type, select_ctranslate2_backend
-from ..metrics import STTMetrics
 from ..models import ModelFile, register_model
 from ..registry import register_provider
-from ..stt import STT, STTCapabilities, STTEvent, STTEventType, STTStream, Transcript, WordTiming
-from ..utils.aio import cancel_and_wait
+from ..stt import STT, STTCapabilities, STTStream, Transcript, WordTiming
+from ..stt_guard import HallucinationGuard, coerce_guard
 from ..utils.clock import now
 from ..utils.deps import is_installed, require
 from ..utils.env import is_offline
-from ..utils.ids import new_id
 from ..utils.log import logger
-from ._whisper_guard import HallucinationGuard
+from ._whisper_stream import SAMPLE_RATE as _SAMPLE_RATE
+from ._whisper_stream import WhisperAdapterStream, frames_to_samples
+from ._whisper_stream import whisper_language as _whisper_language
 
 if TYPE_CHECKING:
     from ..stt import StreamAdapter
@@ -63,7 +63,6 @@ __all__ = ["FasterWhisperSTT", "HallucinationGuard"]
 
 _PROVIDER = "faster_whisper"
 _EXTRA = "faster-whisper"
-_SAMPLE_RATE = 16_000  # Whisper's native input rate
 _DEVICES = ("auto", "cpu", "cuda")
 _MODELS = (
     "large-v3-turbo",
@@ -79,10 +78,6 @@ _MODELS = (
 )
 _INTERIM_INTERVAL = {"cuda": 0.25, "cpu": 0.5}
 """Default seconds of new speech between two interim decodes, per device."""
-_PACING = 2.0
-"""Queue at least this many times the last interim decode's duration between decodes."""
-_MIN_INTERIM_AUDIO = 0.3
-"""Utterances shorter than this (seconds, VAD prefix included) get no interim decode."""
 
 
 @register_provider(
@@ -140,6 +135,12 @@ class FasterWhisperSTT(STT):
             :class:`HallucinationGuard`): ``True`` (default) uses the default thresholds,
             ``False`` disables it, a :class:`HallucinationGuard` or a mapping of its
             fields configures it.
+        final_from_interim: behind a VAD with ``interim_results``, when the utterance ends
+            and no voiced VAD window arrived after the latest interim decode took its audio
+            (it has heard all of the speech), use its transcript as the final one instead of
+            decoding the utterance again. Saves a decode when the input ends right after
+            the speech (a forced flush, the end of a file), at the price of an interim-grade
+            final (greedy, no temperature fallback). Ignored with ``word_timestamps``.
     """
 
     provider = _PROVIDER
@@ -165,6 +166,7 @@ class FasterWhisperSTT(STT):
         interim_results: bool = False,
         interim_interval: float | None = None,
         hallucination_guard: bool | HallucinationGuard | Mapping[str, Any] = True,
+        final_from_interim: bool = False,
     ) -> None:
         if not is_installed("faster_whisper"):
             # Fail fast with an install hint; the import itself (~0.3 s) happens in the
@@ -181,7 +183,7 @@ class FasterWhisperSTT(STT):
             raise ConfigurationError(
                 f"faster_whisper: interim_interval must be > 0, got {interim_interval}"
             )
-        guard = _make_guard(hallucination_guard)
+        guard = coerce_guard(hallucination_guard, provider=_PROVIDER)
         name = model or "large-v3-turbo"
         super().__init__(
             model=name,
@@ -210,6 +212,7 @@ class FasterWhisperSTT(STT):
         self.interim_interval = interim_interval
         self.guard = guard
         """The :class:`HallucinationGuard` applied to every transcript."""
+        self.final_from_interim = final_from_interim
         self.resolved_device: str | None = None
         """Device the model runs on (``None`` until it is loaded)."""
         self.resolved_compute_type: str | None = None
@@ -331,7 +334,36 @@ class FasterWhisperSTT(STT):
     def _create_adapter_stream(
         self, adapter: StreamAdapter, *, language: str | None
     ) -> STTStream | None:
-        return _WhisperAdapterStream(adapter, self, language=language)
+        return WhisperAdapterStream(adapter, self, language=language)
+
+    @property
+    def parallel_final(self) -> bool:
+        """A second model replica runs the final next to an interim decode in flight."""
+        return self.num_workers >= 2
+
+    async def decode_frames(
+        self,
+        frames: Sequence[AudioFrame],
+        language: str | None,
+        *,
+        interim: bool,
+        vad_confidence: float | None,
+    ) -> Transcript:
+        """Transcribe VAD frames (any rate) in a worker thread (for the adapter stream)."""
+        return await asyncio.to_thread(
+            self._transcribe_frames, frames, language, interim, vad_confidence
+        )
+
+    def _transcribe_frames(
+        self,
+        frames: Sequence[AudioFrame],
+        language: str | None,
+        interim: bool,
+        vad_confidence: float | None,
+    ) -> Transcript:
+        return self._transcribe_sync(
+            frames_to_samples(frames), language, interim=interim, vad_confidence=vad_confidence
+        )
 
     def _transcribe_sync(
         self,
@@ -382,230 +414,7 @@ class FasterWhisperSTT(STT):
         )
 
 
-class _WhisperAdapterStream(STTStream):
-    """What :class:`~voice_agent_next.stt.StreamAdapter` runs for faster-whisper.
-
-    Like the adapter's own stream, the VAD cuts the input into utterances and each one gets
-    one final transcript. In addition:
-
-    * **interim transcripts** (``interim_results=True``): while the VAD reports speech, the
-      utterance so far is re-decoded in a background thread whenever enough new speech has
-      arrived: ``interim_interval``, or twice the duration of the last decode when that is
-      longer (back-off on a slow device), so that the model is busy at most about half of
-      the time. No decode starts while the latest VAD window is below the activation
-      threshold (pauses, the trailing silence before END_OF_SPEECH): a decode that starts
-      on the last voiced window has the VAD's ``min_silence_duration`` to finish before
-      the final one is needed. A decode still running when the utterance ends is awaited
-      and its result discarded (a CTranslate2 call cannot be interrupted), unless
-      ``num_workers >= 2``: then the final runs on the second model replica meanwhile.
-    * **VAD-aware hallucination guard**: the mean speech probability of the utterance's
-      speech windows is passed to :class:`HallucinationGuard`.
-    """
-
-    def __init__(
-        self, adapter: StreamAdapter, whisper: FasterWhisperSTT, *, language: str | None
-    ) -> None:
-        self._adapter = adapter
-        self._whisper = whisper
-        self._segment_id = new_id("seg_")
-        self._live: str | None = None
-        """Segment whose interim results are still wanted (``None`` once it ends)."""
-        self._probs: list[float] = []
-        """VAD probabilities of the utterance's speech windows."""
-        self._voiced = False
-        """The latest VAD window is at or above the activation threshold."""
-        self._since_step = 0.0
-        """Seconds of input since the last interim decode started (or the utterance)."""
-        self._step_time = 0.0
-        """Duration of the last interim decode (seconds)."""
-        self._step: asyncio.Task[None] | None = None
-        self._partial = ""
-        self._detected: str | None = None
-        """Language detected by an interim decode (reused by the next ones)."""
-        self.interim_decodes = 0
-        """Interim decodes run by this stream (diagnostics)."""
-        self.final_waits: list[float] = []
-        """Seconds each final transcript waited for an interim decode in flight."""
-        super().__init__(adapter, language=language)
-
-    # -------------------------------------------------------------- event loop
-    async def _run(self) -> None:
-        from ..vad import VADEventType
-
-        vad = self._adapter.vad
-        activation = vad.options.activation_threshold
-        deactivation = vad.options.effective_deactivation
-        vad_stream = vad.stream(emit_inference_events=True)
-        try:
-            async for item in self._input:
-                if self.is_flush(item):
-                    if vad_stream.speaking:
-                        await self._finish(vad_stream.speech_frames())
-                        vad_stream.reset()
-                    continue
-                assert isinstance(item, AudioFrame)
-                for ev in vad_stream.push_audio(item):
-                    if ev.type == VADEventType.START_OF_SPEECH:
-                        self._live = self._segment_id
-                        # the first decode comes after half an interval: the VAD has
-                        # already held back min_speech_duration, and the prefix padding
-                        # gives the decoder context
-                        self._since_step = self._whisper.resolved_interim_interval / 2
-                        self._emit(
-                            STTEvent(STTEventType.START_OF_SPEECH, segment_id=self._segment_id)
-                        )
-                    elif ev.type == VADEventType.END_OF_SPEECH:
-                        await self._finish(list(ev.frames))
-                    elif ev.type == VADEventType.INFERENCE_DONE:
-                        self._voiced = ev.speaking and ev.probability >= activation
-                        if ev.speaking and ev.probability >= deactivation:
-                            self._probs.append(ev.probability)
-                if vad_stream.speaking:
-                    self._since_step += item.duration
-                    self._maybe_step(vad_stream.speech_frames)
-            if vad_stream.speaking:
-                await self._finish(vad_stream.speech_frames())
-        finally:
-            await cancel_and_wait(self._step)
-            vad_stream.close()
-
-    @property
-    def _threshold(self) -> float:
-        """Seconds of new input before the next interim decode."""
-        return max(self._whisper.resolved_interim_interval, _PACING * self._step_time)
-
-    @property
-    def _vad_confidence(self) -> float | None:
-        return sum(self._probs) / len(self._probs) if self._probs else None
-
-    def _maybe_step(self, speech_frames: Callable[[], list[AudioFrame]]) -> None:
-        if not self._whisper.capabilities.interim_results or not self._voiced:
-            return
-        if self._step is not None and not self._step.done():
-            return
-        if self._live is None or self._since_step < self._threshold:
-            return
-        frames = speech_frames()
-        if sum(f.duration for f in frames) < _MIN_INTERIM_AUDIO:
-            return
-        self._since_step = 0.0
-        self._step = asyncio.create_task(
-            self._interim(frames, self._live, self._vad_confidence),
-            name="faster-whisper-interim",
-        )
-
-    async def _interim(
-        self, frames: list[AudioFrame], segment_id: str, vad_confidence: float | None
-    ) -> None:
-        whisper = self._whisper
-        language = _whisper_language(self._language) or self._detected
-        t0 = now()
-        try:
-            transcript = await asyncio.to_thread(
-                _run_on_frames,
-                whisper,
-                frames,
-                language,
-                interim=True,
-                vad_confidence=vad_confidence,
-            )
-        except Exception as exc:  # interims are best effort; the final reports errors
-            logger.warning("faster-whisper: interim decode failed: %s", exc)
-            return
-        finally:
-            self._step_time = now() - t0
-            self.interim_decodes += 1
-        if segment_id != self._live:
-            return  # the utterance ended meanwhile: its final transcript is coming
-        self._detected = self._detected or transcript.language
-        text = transcript.text
-        if text and text != self._partial:
-            self._partial = text
-            self._emit(STTEvent(STTEventType.INTERIM_TRANSCRIPT, transcript, segment_id))
-
-    async def _finish(self, frames: list[AudioFrame]) -> None:
-        segment_id = self._segment_id
-        self._live = None  # a decode in flight is now stale: its result is dropped
-        step = self._step
-        if step is not None and not step.done() and self._whisper.num_workers < 2:
-            # one model replica: the final would queue behind the decode anyway
-            t0 = now()
-            await asyncio.wait({step})
-            self.final_waits.append(now() - t0)
-        else:  # idle, or a second replica runs the final next to the interim decode
-            self.final_waits.append(0.0)
-        vad_confidence = self._vad_confidence
-        self._segment_id = new_id("seg_")
-        self._probs = []
-        self._voiced = False
-        self._since_step = 0.0
-        self._partial = ""
-        self._detected = None
-        if frames:
-            transcript = await self._final(frames, vad_confidence)
-            if transcript.text.strip():
-                self._emit(STTEvent(STTEventType.FINAL_TRANSCRIPT, transcript, segment_id))
-        self._emit(STTEvent(STTEventType.END_OF_SPEECH, segment_id=segment_id))
-
-    async def _final(self, frames: list[AudioFrame], vad_confidence: float | None) -> Transcript:
-        """Like :meth:`STT.transcribe` (same metrics), with the VAD's confidence."""
-        whisper = self._whisper
-        t0 = now()
-        error: str | None = None
-        duration = sum(f.duration for f in frames)
-        try:
-            return await asyncio.to_thread(
-                _run_on_frames,
-                whisper,
-                frames,
-                _whisper_language(self._language),
-                vad_confidence=vad_confidence,
-            )
-        except Exception as exc:
-            error = repr(exc)
-            raise
-        finally:
-            whisper.emit(
-                "metrics",
-                STTMetrics(
-                    provider=whisper.provider,
-                    model=whisper.model,
-                    request_id=new_id("stt_"),
-                    audio_duration=duration,
-                    duration=now() - t0,
-                    streamed=False,
-                    error=error,
-                ),
-            )
-
-
-def _run_on_frames(
-    whisper: FasterWhisperSTT,
-    frames: Sequence[AudioFrame],
-    language: str | None,
-    *,
-    interim: bool = False,
-    vad_confidence: float | None = None,
-) -> Transcript:
-    """Transcribe VAD frames (any rate) on the calling (worker) thread."""
-    frame = AudioFrame.concat(list(frames))
-    if frame.sample_rate != _SAMPLE_RATE or frame.channels != 1:
-        rs = StreamResampler(_SAMPLE_RATE, 1)
-        frame = AudioFrame.concat([rs.push(frame), rs.flush()])
-    return whisper._transcribe_sync(
-        frame.to_float32(), language, interim=interim, vad_confidence=vad_confidence
-    )
-
-
 # ---------------------------------------------------------------------- helpers
-def _whisper_language(language: str | None) -> str | None:
-    """``"en-US"``/``"pt_BR"`` -> ``"en"``/``"pt"``; empty, ``"auto"``, ``"multi"`` -> detect."""
-    if not language:
-        return None
-    code = language.strip().replace("_", "-").split("-")[0].lower()
-    return None if code in ("", "auto", "multi") else code
-
-
 def _english_only(model: str) -> bool:
     name = os.path.basename(model.rstrip("/\\")).lower()
     return name.endswith(".en") or "distil" in name
@@ -624,29 +433,6 @@ def _warm_up(model: Any) -> None:
     )
     for _ in segments:
         pass
-
-
-def _make_guard(
-    value: bool | HallucinationGuard | Mapping[str, Any] | None,
-) -> HallucinationGuard:
-    if isinstance(value, HallucinationGuard):
-        return value
-    if value is None or value is False:
-        return HallucinationGuard.disabled()
-    if value is True:
-        return HallucinationGuard()
-    if isinstance(value, Mapping):
-        fields: dict[str, Any] = {
-            k: tuple(v) if isinstance(v, list) else v for k, v in value.items()
-        }
-        try:
-            return HallucinationGuard(**fields)
-        except (TypeError, ValueError) as exc:
-            raise ConfigurationError(f"faster_whisper: hallucination_guard: {exc}") from exc
-    raise ConfigurationError(
-        "faster_whisper: hallucination_guard must be a bool, a HallucinationGuard or a "
-        f"mapping, got {type(value).__name__}"
-    )
 
 
 def _to_transcript(

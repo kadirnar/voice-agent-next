@@ -84,6 +84,7 @@ converted model (`model="/models/whisper-ct2"`). Downloads go to the Hugging Fac
 | `interim_results` | `False` | behind a VAD, re-decode the utterance while the user speaks and emit interim transcripts (see [Partial transcripts](#partial-transcripts)) |
 | `interim_interval` | `None` | seconds of new speech between interim decodes; `None` = 0.25 s on CUDA, 0.5 s on the CPU |
 | `hallucination_guard` | `True` | drop segments that are probably not speech (see [Hallucination guard](#hallucination-guard)); `False`, or a mapping / `HallucinationGuard` to configure it |
+| `final_from_interim` | `False` | when the utterance ends and the latest interim decode heard all of the speech, use it as the final transcript instead of decoding again (see [Final from the interim](#final-from-the-interim)) |
 
 `Transcript.confidence` is `exp(mean token log-probability)` over the utterance, and
 `start_time` / `end_time` are relative to the start of the utterance audio.
@@ -262,6 +263,31 @@ higher when the machine is shared. `num_workers=2` lets the final transcript run
 an interim decode instead of after it, at the cost of a second copy of the model; it
 helps on a GPU, not on a CPU.
 
+### Final from the interim
+
+When the input ends while the VAD still reports speech (a forced flush, the end of a
+file, `van bench asr`), an interim decode can still be running, and the final transcript
+waits for it before it is decoded (on one model replica). With
+`final_from_interim=True`, if no voiced VAD window arrived after the latest interim
+decode (in flight or finished) took its audio, that decode has heard the whole
+utterance: its transcript becomes the final one and no second decode runs. If voiced
+audio arrived after it started, the final is decoded as usual. This applies to every end
+of utterance, the VAD's end of speech included.
+
+The final is then an interim-grade decode: greedy, without timestamps or temperature
+fallback, and filtered by the guard with the VAD confidence of the moment it started.
+`word_timestamps=True` disables the option (interim decodes do not align words). The
+stream counts these finals in `finals_from_interim` and still reports `STTMetrics` for
+them (the time spent waiting for the decode). Off by default, because it trades final
+accuracy (no beam search, no temperature fallback) for one decode less.
+
+It only helps when the speech really stopped before the input ended. In the benchmark
+above (`base`, CPU int8, 30 LibriSpeech utterances, Silero, real time, 2026-09-25), most
+recordings end on the last word, so voiced audio follows the last interim decode and the
+final is decoded as usual: WER was unchanged (5.00 %) and TTFS p50 / p90 were 379 / 533 ms
+without the option and 402 / 618 ms with it (a shared, loaded CPU: noise), with a 0 ms
+TTFS on the utterance whose last interim decode had heard everything.
+
 ## Hallucination guard
 
 Whisper was trained on subtitles, and when a VAD lets noise, breathing or silence through
@@ -270,11 +296,12 @@ repeated until the window ends. `hallucination_guard` (on by default) drops such
 segments. A segment is dropped when:
 
 1. it has no words (`"..."`, `"♪"`);
-2. it is a known subtitle artifact (`ARTIFACT_PHRASES`: "Thanks for watching!",
-   "Please subscribe", "Subtitles by the Amara.org community" and their usual
-   non-English forms);
-3. it is a stock phrase that is also a real answer (`SUSPECT_PHRASES`: "Thank you.",
-   "you", "Bye.", "So"...) **and** there is other evidence of non-speech:
+2. it is a known subtitle artifact or video outro in one of 16 languages (see
+   [Multilingual phrase lists](#multilingual-phrase-lists)): "Thanks for watching!",
+   "Untertitel im Auftrag des ZDF für funk, 2017", "Sous-titres réalisés par la
+   communauté d'Amara.org", "Altyazı M.K.", "ご視聴ありがとうございました"...;
+3. it is a stock phrase that is also a real answer ("Thank you.", "you", "Bye.",
+   "Danke.", "Gracias.", "谢谢"...) **and** there is other evidence of non-speech:
    `no_speech_prob >= 0.2`, `avg_logprob < -0.8`, or a weak VAD;
 4. `no_speech_prob >= 0.6` and (`avg_logprob < -1.0` or a weak VAD): Whisper's own
    no-speech rule, which also accepts the VAD's doubt instead of a low log-probability;
@@ -293,10 +320,13 @@ keyboard click that barely crossed the VAD threshold are dropped. When the whole
 the adapter still reports the VAD's `START_OF_SPEECH` / `END_OF_SPEECH` but no final
 transcript, like any utterance without words.
 
-Every threshold is configurable, and `None` disables a rule:
+The guard lives in `voice_agent_next.stt_guard` and is shared with
+[`mlx_whisper`](mlx.md#stt-whisper-mlx_whisper). Every threshold is configurable, and
+`None` disables a rule:
 
 ```python
-from voice_agent_next.providers.faster_whisper import FasterWhisperSTT, HallucinationGuard
+from voice_agent_next.providers.faster_whisper import FasterWhisperSTT
+from voice_agent_next.stt_guard import HallucinationGuard
 
 stt = FasterWhisperSTT(
     model="small",
@@ -312,6 +342,62 @@ stt:
 
 `hallucination_guard=False` returns Whisper's output unchanged. Dropped segments are
 logged at DEBUG level (`voice_agent_next` logger) with the rule that dropped them.
+
+### Multilingual phrase lists
+
+Texts are compared after normalization: case-folded, accents removed (`ı` folded to `i`),
+punctuation replaced by spaces. The lists are per language, in
+`stt_guard.ARTIFACTS_BY_LANGUAGE` and `stt_guard.SUSPECTS_BY_LANGUAGE`:
+
+| Language | Artifacts (dropped always, examples) | Suspects (dropped on weak evidence) |
+|---|---|---|
+| `en` | "Thanks for watching!", "Please subscribe", "Transcription by CastingWords" | "you", "Thank you.", "Bye.", "So", "Hmm" |
+| `de` | "Untertitel im Auftrag des ZDF für funk, 2017", "Vielen Dank fürs Zuschauen", "Copyright WDR 2021" | "Danke.", "Vielen Dank.", "Tschüss." |
+| `es` | "Subtítulos realizados por la comunidad de Amara.org", "Gracias por ver el video", "Suscríbete al canal" | "Gracias.", "Adiós." |
+| `fr` | "Sous-titres réalisés para la communauté d'Amara.org", "Merci d'avoir regardé cette vidéo", "Sous-titrage ST' 501" | "Merci.", "Au revoir." |
+| `it` | "Sottotitoli e revisione a cura di QTSS", "Grazie per la visione" | "Grazie.", "Ciao." |
+| `pt` | "Legendas pela comunidade Amara.org", "Obrigado por assistir" | "Obrigado.", "Tchau." |
+| `nl` | "Ondertiteld door de Amara.org gemeenschap", "Bedankt voor het kijken" | "Bedankt." |
+| `pl` | "Napisy stworzone przez społeczność Amara.org", "Dziękuję za oglądanie" | "Dziękuję." |
+| `tr` | "Altyazı M.K.", "İzlediğiniz için teşekkürler", "Abone olmayı unutmayın" | "Teşekkürler." |
+| `ru` | "Продолжение следует...", "Субтитры сделал DimaTorzok", "Спасибо за просмотр" | "Спасибо." |
+| `zh` | "字幕由Amara.org社区提供", "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目", "谢谢观看" | "谢谢", "好" |
+| `ja` | "ご視聴ありがとうございました", "チャンネル登録をお願いします" | "ありがとう" |
+| `ko` | "시청해주셔서 감사합니다", "구독과 좋아요 부탁드립니다" | "감사합니다" |
+| `ar` | "ترجمة نانسي قنقر", "شكرا على المشاهدة" | "شكرا" |
+| `el`, `no` | "Ευχαριστώ που παρακολουθήσατε", "Tekstet av Nicolai Winther" | – |
+
+Credit lines whose wording varies (a year, a name) are matched by regular expressions
+(`stt_guard.ARTIFACT_PATTERNS`, the guard's `patterns`): any segment mentioning
+"Amara.org" or "DimaTorzok", "Untertitel im Auftrag des ZDF/WDR/..., <year>",
+"Sous-titres par <name>", "Napisy by <name>", "字幕由…提供".
+
+By default the guard uses every language's lists: Whisper detects the language per
+utterance, and an artifact can come out in another language than the user's. The
+artifacts are credit lines and outros nobody says as a whole utterance to a voice agent,
+so the union costs nothing; a suspect is only dropped with other evidence of non-speech.
+To restrict the lists:
+
+```python
+from voice_agent_next.stt_guard import HallucinationGuard, artifact_phrases, suspect_phrases
+
+guard = HallucinationGuard(
+    artifacts=artifact_phrases("en", "de"),
+    suspects=suspect_phrases("en", "de"),
+)
+```
+
+Sources: the subtitle credits and outros reported in openai/whisper discussions
+[#928](https://github.com/openai/whisper/discussions/928),
+[#1873](https://github.com/openai/whisper/discussions/1873),
+[#2412](https://github.com/openai/whisper/discussions/2412) and
+[#2608](https://github.com/openai/whisper/discussions/2608), in
+[whisperX #230](https://github.com/m-bain/whisperX/issues/230), and Whisper's outputs on a
+noise-only corpus in the
+[sachaarbonel/whisper-hallucinations](https://huggingface.co/datasets/sachaarbonel/whisper-hallucinations)
+dataset (MIT); [Barański et al., ICASSP 2025](https://arxiv.org/abs/2501.11378) describe
+the same English outros ("bag of hallucinations"). Only phrases that are clearly not a
+voice-agent utterance are artifacts; short thank-yous and goodbyes are suspects.
 
 Measured on the T4 VAD corpus (`van bench vad`'s deterministic corpus: 50 LibriSpeech
 utterances laid out with 0.8-2.5 s noise-only gaps, a 2 s lead and a 20 s noise-only tail,
@@ -365,9 +451,8 @@ A failed load is retried on the next call.
   pass (30 s window), and the tail of an interim is often a cut-off word that the next
   one corrects. Long utterances make every decode slower, and the back-off spaces them out.
 * The hallucination guard works on whole segments: a hallucinated phrase glued to real
-  speech inside one segment is kept. Its phrase lists are English-centric (plus the most
-  common non-English subtitle credits); extend `artifacts` / `suspects` for other
-  languages.
+  speech inside one segment is kept. Its phrase lists cover 16 languages; for others, add
+  to `artifacts` / `suspects` / `patterns`.
 * `word_timestamps` still list the words of a repetition loop that the guard cut from the
   text.
 * A transcription that is already running finishes in its worker thread even when the

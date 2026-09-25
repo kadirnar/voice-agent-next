@@ -7,8 +7,14 @@ conversion or a local directory works too.
 
 Whisper is a batch recognizer (``capabilities.streaming=False``): the cascade wraps it in
 a :class:`~voice_agent_next.stt.StreamAdapter`, which cuts the input into utterances with
-the VAD and transcribes each one. For streaming English and European languages, prefer
-Parakeet (``mlx/parakeet-tdt-0.6b-v3``).
+the VAD and transcribes each one. With ``interim_results=True`` it also re-decodes the
+growing utterance while the user speaks, like faster-whisper (the same adapter stream).
+For streaming English and European languages, prefer Parakeet
+(``mlx/parakeet-tdt-0.6b-v3``).
+
+The :class:`~voice_agent_next.stt_guard.HallucinationGuard` shared with faster-whisper (on
+by default) drops what Whisper "hears" in noise: no-speech segments, known subtitle
+artifacts in many languages, repetition loops and stock phrases the VAD was unsure about.
 
 Install with ``pip install 'voice-agent-next[mlx-whisper]'`` (macOS on Apple silicon).
 Every MLX call runs on one shared worker thread (see :mod:`._mlx`). See
@@ -20,8 +26,8 @@ from __future__ import annotations
 import math
 import os
 import threading
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
@@ -30,12 +36,17 @@ from ..audio.frame import AudioFrame
 from ..errors import ConfigurationError
 from ..models import ModelFile, register_model
 from ..registry import register_provider
-from ..stt import STT, STTCapabilities, Transcript, WordTiming
+from ..stt import STT, STTCapabilities, STTStream, Transcript, WordTiming
+from ..stt_guard import HallucinationGuard, coerce_guard
 from ..utils.clock import now
 from ..utils.deps import require
 from ..utils.log import logger
 from . import _mlx
-from .faster_whisper import _whisper_language
+from ._whisper_stream import WhisperAdapterStream, frames_to_samples
+from ._whisper_stream import whisper_language as _whisper_language
+
+if TYPE_CHECKING:
+    from ..stt import StreamAdapter
 
 __all__ = ["DEFAULT_MODEL", "MODELS", "MLXWhisperSTT"]
 
@@ -45,6 +56,8 @@ _SAMPLE_RATE = 16_000
 _FILES = ("config.json", "weights.npz", "weights.safetensors")
 
 DEFAULT_MODEL = "large-v3-turbo"
+_INTERIM_INTERVAL = 0.25
+"""Default seconds of new speech between two interim decodes (a GPU, like CUDA)."""
 
 MODELS: dict[str, tuple[str, int]] = {
     "large-v3-turbo": ("mlx-community/whisper-large-v3-turbo", 1_613_977_880),
@@ -101,6 +114,20 @@ class MLXWhisperSTT(STT):
         local_files_only: never download; also implied by ``VAN_OFFLINE=1``.
         transcribe_options: extra keyword arguments for ``mlx_whisper.transcribe()``
             (e.g. ``{"no_speech_threshold": 0.5}``); they override the options above.
+        interim_results: behind a VAD (:class:`~voice_agent_next.stt.StreamAdapter`, as in
+            the cascade), re-decode the utterance while the user speaks and emit
+            ``INTERIM_TRANSCRIPT`` events. Interim decodes run without timestamps or word
+            alignment; the final transcript is decoded as usual.
+        interim_interval: seconds of new speech between two interim decodes (at least: a
+            decode that takes longer than half of it spaces the next one out); 0.25 s by
+            default.
+        hallucination_guard: drop segments that are probably not speech (see
+            :class:`~voice_agent_next.stt_guard.HallucinationGuard`): ``True`` (default),
+            ``False``, a guard or a mapping of its fields.
+        final_from_interim: behind a VAD with ``interim_results``, use the latest interim
+            decode as the final transcript when no voiced VAD window arrived after it took
+            its audio (no second decode when the input ends right after the speech).
+            Ignored with ``word_timestamps``.
     """
 
     provider = _PROVIDER
@@ -115,6 +142,10 @@ class MLXWhisperSTT(STT):
         initial_prompt: str | None = None,
         local_files_only: bool = False,
         transcribe_options: Mapping[str, Any] | None = None,
+        interim_results: bool = False,
+        interim_interval: float | None = None,
+        hallucination_guard: bool | HallucinationGuard | Mapping[str, Any] = True,
+        final_from_interim: bool = False,
     ) -> None:
         _mlx.ensure_available(
             "mlx_whisper", extra=_EXTRA, package="mlx-whisper", provider=_PROVIDER
@@ -122,11 +153,16 @@ class MLXWhisperSTT(STT):
         name = (model or DEFAULT_MODEL).strip()
         if "parakeet" in name.lower():
             raise ConfigurationError(f"mlx_whisper: {name!r} is a Parakeet model; use mlx/{name}")
+        if interim_interval is not None and interim_interval <= 0:
+            raise ConfigurationError(
+                f"mlx_whisper: interim_interval must be > 0, got {interim_interval}"
+            )
+        guard = coerce_guard(hallucination_guard, provider=_PROVIDER)
         super().__init__(
             model=name,
             capabilities=STTCapabilities(
                 streaming=False,
-                interim_results=False,
+                interim_results=interim_results,
                 word_timestamps=word_timestamps,
                 language_detection=not _english_only(_resolve(name)),
             ),
@@ -138,6 +174,11 @@ class MLXWhisperSTT(STT):
         self.initial_prompt = initial_prompt
         self.local_files_only = local_files_only
         self.transcribe_options = dict(transcribe_options or {})
+        self.interim_interval = interim_interval
+        self.guard = guard
+        """The :class:`~voice_agent_next.stt_guard.HallucinationGuard` applied to every
+        transcript."""
+        self.final_from_interim = final_from_interim
         self._model: Any = None
         self._path: str | None = None
         self._load_lock = threading.Lock()
@@ -187,8 +228,52 @@ class MLXWhisperSTT(STT):
         samples = audio.to_float32()
         return await _mlx.WORKER.run(self._transcribe_sync, samples, _whisper_language(language))
 
+    def _create_adapter_stream(
+        self, adapter: StreamAdapter, *, language: str | None
+    ) -> STTStream | None:
+        return WhisperAdapterStream(adapter, self, language=language)
+
+    @property
+    def resolved_interim_interval(self) -> float:
+        """Seconds of new speech between interim decodes."""
+        return self.interim_interval if self.interim_interval is not None else _INTERIM_INTERVAL
+
+    @property
+    def parallel_final(self) -> bool:
+        """Never: every MLX call runs on the one MLX worker thread."""
+        return False
+
+    async def decode_frames(
+        self,
+        frames: Sequence[AudioFrame],
+        language: str | None,
+        *,
+        interim: bool,
+        vad_confidence: float | None,
+    ) -> Transcript:
+        """Transcribe VAD frames (any rate) on the MLX thread (for the adapter stream)."""
+        return await _mlx.WORKER.run(
+            self._transcribe_frames, frames, language, interim, vad_confidence
+        )
+
+    def _transcribe_frames(
+        self,
+        frames: Sequence[AudioFrame],
+        language: str | None,
+        interim: bool,
+        vad_confidence: float | None,
+    ) -> Transcript:
+        return self._transcribe_sync(
+            frames_to_samples(frames), language, interim=interim, vad_confidence=vad_confidence
+        )
+
     def _transcribe_sync(
-        self, samples: npt.NDArray[np.float32], language: str | None
+        self,
+        samples: npt.NDArray[np.float32],
+        language: str | None,
+        *,
+        interim: bool = False,
+        vad_confidence: float | None = None,
     ) -> Transcript:
         if samples.size == 0:
             return Transcript(text="", language=language)
@@ -198,11 +283,27 @@ class MLXWhisperSTT(STT):
             "initial_prompt": self.initial_prompt,
             **self.transcribe_options,
         }
+        if interim:  # fast and cheap: the final transcript is decoded properly anyway
+            options.update(word_timestamps=False, temperature=0.0, without_timestamps=True)
         try:
             result = self._run(samples, language, options)
         except Exception as exc:
             raise _mlx.map_error(exc, _PROVIDER, "transcription") from exc
-        return _to_transcript(result, language, words=bool(options["word_timestamps"]))
+        segments = list(result.get("segments") or [])
+        verdict = self.guard.filter(segments, vad_confidence=vad_confidence)
+        if verdict.dropped:
+            logger.debug(
+                "mlx-whisper: dropped %s (%s)",
+                "; ".join(f"{t!r}: {why}" for t, why in verdict.dropped),
+                "interim" if interim else "final",
+            )
+        return _to_transcript(
+            verdict.kept,
+            result.get("language") or language,
+            words=bool(options["word_timestamps"]),
+            clean=self.guard.clean_text,
+            text=None if len(verdict.kept) != len(segments) else result.get("text"),
+        )
 
     def _run(
         self, samples: npt.NDArray[np.float32], language: str | None, options: Mapping[str, Any]
@@ -227,8 +328,20 @@ class MLXWhisperSTT(STT):
         return result
 
 
-def _to_transcript(result: Mapping[str, Any], language: str | None, *, words: bool) -> Transcript:
-    segments = list(result.get("segments") or [])
+def _to_transcript(
+    segments: Sequence[Mapping[str, Any]],
+    language: str | None,
+    *,
+    words: bool,
+    clean: Callable[[str], str] | None = None,
+    text: str | None = None,
+) -> Transcript:
+    """``text`` is mlx-whisper's own text of all the segments (``None``: join them)."""
+    if text is None:
+        text = "".join(str(s.get("text") or "") for s in segments)
+    text = text.strip()
+    if clean is not None:
+        text = clean(text)
     confidence: float | None = None
     if segments:
         weights = [max(1, len(s.get("tokens") or ())) for s in segments]
@@ -236,8 +349,8 @@ def _to_transcript(result: Mapping[str, Any], language: str | None, *, words: bo
         total = sum(lp * w for lp, w in zip(logprobs, weights, strict=True))
         confidence = min(1.0, math.exp(total / sum(weights)))
     return Transcript(
-        text=str(result.get("text") or "").strip(),
-        language=result.get("language") or language,
+        text=text,
+        language=language,
         confidence=confidence,
         start_time=float(segments[0]["start"]) if segments else None,
         end_time=float(segments[-1]["end"]) if segments else None,

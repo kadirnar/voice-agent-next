@@ -91,6 +91,11 @@ class MLXFakes:
     whisper_loads: list[tuple[str, Any]] = field(default_factory=list)
     whisper_calls: list[dict[str, Any]] = field(default_factory=list)
     holder: Any = None
+    whisper_segments: Any = None
+    """Segment dicts ``transcribe()`` returns, or a function of the audio returning them
+    (``None``: one "Hello there." segment)."""
+    whisper_delay: float = 0.0
+    """Seconds every ``transcribe()`` of non-silent audio takes."""
     # mlx-audio
     tts_loads: list[str] = field(default_factory=list)
     tts_load_kwargs: list[dict[str, Any]] = field(default_factory=list)
@@ -209,6 +214,16 @@ class MLXFakes:
             assert ModelHolder.model_path == kwargs["path_or_hf_repo"]
             assert ModelHolder.model is not None
             fakes.whisper_calls.append({"audio": audio, **kwargs})
+            if fakes.whisper_delay and audio.any():
+                time.sleep(fakes.whisper_delay)
+            scripted = fakes.whisper_segments
+            if scripted is not None:
+                segments = scripted(audio) if callable(scripted) else list(scripted)
+                return {
+                    "text": "".join(s["text"] for s in segments),
+                    "language": kwargs.get("language") or "de",
+                    "segments": segments,
+                }
             words = [
                 {"word": " Hello", "start": 0.0, "end": 0.4, "probability": 0.9},
                 {"word": " there.", "start": 0.4, "end": 0.9, "probability": 0.8},
