@@ -1,12 +1,15 @@
 [build-system]
-requires = ["hatchling>=1.25"]
+# hatch-fancy-pypi-readme: README links made absolute for PyPI (see [tool.hatch.metadata.hooks])
+requires = ["hatchling>=1.27", "hatch-fancy-pypi-readme>=25.1"]
 build-backend = "hatchling.build"
 
 [project]
 name = "voice-agent-next"
+# The single source of truth for the version: bump with `uv version --bump ...` and tag
+# `v<version>` (docs/releasing.md). `voice_agent_next.__version__` reads the installed metadata.
 version = "0.1.0.dev0"
 description = "Real-time speech-to-speech voice agents: native S2S models and streaming cascades, local and cloud, on Linux, macOS and Windows."
-readme = "README.md"
+dynamic = ["readme"]
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -24,7 +27,7 @@ keywords = [
   "benchmark",
 ]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
   "Operating System :: OS Independent",
@@ -37,8 +40,10 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
   "Framework :: AsyncIO",
+  "Topic :: Communications :: Telephony",
   "Topic :: Multimedia :: Sound/Audio :: Speech",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Libraries :: Python Modules",
   "Typing :: Typed",
 ]
 dependencies = [
@@ -111,8 +116,10 @@ voice-agent-next = "voice_agent_next.cli.main:main"
 
 [project.urls]
 Homepage = "https://github.com/kadirnar/voice-agent-next"
+Documentation = "https://kadirnar.github.io/voice-agent-next/"
 Repository = "https://github.com/kadirnar/voice-agent-next"
 Issues = "https://github.com/kadirnar/voice-agent-next/issues"
+Changelog = "https://github.com/kadirnar/voice-agent-next/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
@@ -127,6 +134,9 @@ dev = [
   "sphn>=0.2,<0.3",  # Ogg/Opus for the Moshi fake-server tests (extra `moshi`)
   "opentelemetry-api>=1.27",  # tracing tests (in-memory span exporter)
   "opentelemetry-sdk>=1.27",
+  # tests/test_packaging.py builds the wheel and sdist in-process, offline (PEP 517 hooks)
+  "hatchling>=1.27",
+  "hatch-fancy-pypi-readme>=25.1",
 ]
 # documentation site: `uv run --group docs mkdocs serve` (mkdocs.yml)
 docs = [
@@ -148,8 +158,29 @@ explicit = true
 [tool.hatch.build.targets.wheel]
 packages = ["src/voice_agent_next"]
 
+# Anchored patterns (a bare "README.md" would also match examples/README.md, ...). Tests are
+# shipped so downstream packagers can run them from the sdist; docs, benchmarks and CI are not.
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "README.md", "LICENSE", "pyproject.toml"]
+include = [
+  "/src",
+  "/tests",
+  "/README.md",
+  "/CHANGELOG.md",
+  "/LICENSE",
+  "/pyproject.toml",
+]
+
+# PyPI renders the README without the repository around it: make relative links absolute.
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\((?!https?://|#|mailto:)([^)]+)\)'
+replacement = '](https://github.com/kadirnar/voice-agent-next/blob/main/\1)'
+
 
 # --- tooling ----------------------------------------------------------------
 
