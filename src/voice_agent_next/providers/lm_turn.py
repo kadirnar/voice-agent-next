@@ -28,10 +28,11 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 import numpy as np
 
@@ -46,7 +47,15 @@ from ..utils.deps import require
 from ..utils.download import hf_file
 from ..utils.log import logger
 
-__all__ = ["DEFAULT_MODEL", "MODELS", "LMTurnDetector", "LMTurnModel", "format_prompt"]
+__all__ = [
+    "DEFAULT_MODEL",
+    "MODELS",
+    "LMTurnDetector",
+    "LMTurnModel",
+    "format_prompt",
+    "is_punctuated",
+    "unpunctuated",
+]
 
 
 @dataclass(frozen=True)
@@ -62,6 +71,9 @@ class LMTurnModel:
     tokenizer_size: int
     calibration: tuple[float, float]
     """``(a, b)`` of ``sigmoid(a * ln(p_end) + b)``, fitted on eot-bench English."""
+    calibration_unpunctuated: tuple[float, float]
+    """The same, fitted on eot-bench English lowercased and without punctuation: for STTs
+    that don't punctuate (the model's end-of-message probability is much lower there)."""
     languages: str = "en"
 
 
@@ -75,6 +87,7 @@ MODELS: dict[str, LMTurnModel] = {
         tokenizer_sha256="9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c",
         tokenizer_size=2_104_556,
         calibration=(0.2172, 1.3627),
+        calibration_unpunctuated=(0.1733, 1.2938),
     ),
     "smollm2-360m": LMTurnModel(
         repo="HuggingFaceTB/SmolLM2-360M-Instruct",
@@ -85,10 +98,23 @@ MODELS: dict[str, LMTurnModel] = {
         tokenizer_sha256="9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c",
         tokenizer_size=2_104_556,
         calibration=(0.1846, 0.7728),
+        calibration_unpunctuated=(0.1471, 0.5295),
     ),
 }
 DEFAULT_MODEL = "smollm2-135m"
 END_OF_MESSAGE = "<|im_end|>"
+_PUNCTUATION = re.compile(r"[.?!,;:\u3002\uff1f\uff01\u3001\uff0c]")
+_NOT_WORD = re.compile(r"[^\w\s']+")
+
+
+def is_punctuated(text: str) -> bool:
+    """The transcript has sentence punctuation (the STT punctuates)."""
+    return _PUNCTUATION.search(text) is not None
+
+
+def unpunctuated(text: str) -> str:
+    """``text`` lowercased, without punctuation: how the unpunctuated calibration saw it."""
+    return " ".join(_NOT_WORD.sub(" ", text.lower()).split())
 
 
 def format_prompt(agent: str, user: str, *, max_agent_chars: int = 300) -> str:
@@ -128,8 +154,11 @@ class LMTurnDetector(TurnDetector):
             ``past_key_values.*``; ``logits`` output) used instead of downloading
             ``model``; needs ``tokenizer_path`` too.
         tokenizer_path: its ``tokenizer.json``.
-        calibration: ``(a, b)`` of ``sigmoid(a * ln(p) + b)``; ``None``: the model's fitted
-            values (with ``model_path``: the raw probability).
+        calibration: ``(a, b)`` of ``sigmoid(a * ln(p) + b)`` for punctuated transcripts;
+            ``None``: the model's fitted values (with ``model_path``: the raw probability).
+        calibration_unpunctuated: the same for transcripts without any punctuation (STTs
+            that don't punctuate, e.g. sherpa-onnx NeMo), which are lowercased first;
+            ``None``: the model's fitted values (with ``model_path``: ``calibration``).
         threshold: calibrated probability at/above which the turn counts as complete.
         max_tokens: the prompt is cut to its last ``max_tokens`` tokens.
         num_threads: ONNX Runtime intra-op threads (1 keeps a voice agent's CPU usage
@@ -138,7 +167,6 @@ class LMTurnDetector(TurnDetector):
 
     provider = "lm_turn"
     modality = "text"
-    languages: ClassVar[tuple[str, ...]] = ("en",)
 
     def __init__(
         self,
@@ -147,6 +175,7 @@ class LMTurnDetector(TurnDetector):
         model_path: str | os.PathLike[str] | None = None,
         tokenizer_path: str | os.PathLike[str] | None = None,
         calibration: tuple[float, float] | None = None,
+        calibration_unpunctuated: tuple[float, float] | None = None,
         threshold: float = 0.5,
         max_tokens: int = 128,
         num_threads: int = 1,
@@ -173,6 +202,9 @@ class LMTurnDetector(TurnDetector):
         self.model_path = Path(model_path) if model_path is not None else None
         self.tokenizer_path = Path(tokenizer_path) if tokenizer_path is not None else None
         self.calibration = calibration or (self.spec.calibration if self.spec else None)
+        self.calibration_unpunctuated = calibration_unpunctuated or (
+            self.spec.calibration_unpunctuated if self.spec else self.calibration
+        )
         self.max_tokens = max_tokens
         self.num_threads = num_threads
         self._session: Any = None
@@ -263,30 +295,26 @@ class LMTurnDetector(TurnDetector):
         last -= last.max()
         return float(math.exp(last[self._end_id]) / np.exp(last).sum())
 
-    def calibrate(self, p_end: float) -> float:
+    def calibrate(self, p_end: float, *, punctuated: bool = True) -> float:
         """The calibrated end-of-turn probability of a raw end-of-message probability."""
-        if self.calibration is None:
+        calibration = self.calibration if punctuated else self.calibration_unpunctuated
+        if calibration is None:
             return p_end
-        a, b = self.calibration
+        a, b = calibration
         x = a * math.log(max(p_end, 1e-12)) + b
         return 1.0 / (1.0 + math.exp(-x))
 
     def _infer(self, agent: str, user: str) -> float:
-        return self.calibrate(self.end_probability(agent, user))
+        punctuated = is_punctuated(user)
+        if not punctuated:
+            user = unpunctuated(user)
+        return self.calibrate(self.end_probability(agent, user), punctuated=punctuated)
 
     async def _predict(self, *, audio: AudioFrame | None, chat_ctx: ChatContext | None) -> float:
         agent, user = turn_text(chat_ctx)
         if not user:
             return 1.0
         return await asyncio.to_thread(self._infer, agent, user)
-
-    def supports_language(self, language: str | None) -> bool:
-        """English (the calibration was fitted on English; other languages work worse)."""
-        return not language or language.strip().lower().replace("_", "-").split("-")[0] in (
-            "en",
-            "eng",
-            "english",
-        )
 
     async def warmup(self) -> None:
         """Download (first run only) and load the model, then run one prediction."""

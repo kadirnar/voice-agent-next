@@ -452,3 +452,28 @@ async def test_cascade_uses_the_audio_verdict_when_the_text_is_late() -> None:
     [m] = endpointing(rec)
     assert m.text_probability is None and m.probability == pytest.approx(0.95)
     assert m.delay == pytest.approx(0.4)
+
+
+async def test_lm_turn_calibrates_unpunctuated_transcripts_separately(
+    fake_lm: tuple[Path, Path],
+) -> None:
+    from voice_agent_next.providers.lm_turn import LMTurnDetector, is_punctuated, unpunctuated
+
+    assert is_punctuated("Where is my order?") and not is_punctuated("where is my order")
+    assert unpunctuated("Where's my ORDER") == "where's my order"
+    model, tokenizer = fake_lm
+    d = LMTurnDetector(
+        model_path=model, tokenizer_path=tokenizer, calibration=(0.2, 1.0),
+        calibration_unpunctuated=(0.1, 0.0),
+    )  # fmt: skip
+
+    def sigmoid(x: float) -> float:
+        return 1 / (1 + math.exp(-x))
+
+    # an STT without punctuation (sherpa-onnx NeMo): lowercased, its own calibration
+    p = await d.predict_end_of_turn(chat_ctx=user("Hello TABLE"))
+    assert p == pytest.approx(sigmoid(0.1 * math.log(1e-4)), rel=1e-3)
+    p = await d.predict_end_of_turn(chat_ctx=user("hello, table"))
+    assert p == pytest.approx(sigmoid(0.2 * math.log(1e-4) + 1.0), rel=1e-3)
+    default = LMTurnDetector(model_path=model, tokenizer_path=tokenizer, calibration=(0.2, 1.0))
+    assert default.calibration_unpunctuated == (0.2, 1.0)
