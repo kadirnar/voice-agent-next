@@ -533,6 +533,7 @@ class GeminiLiveConnection(EngineConnection):
         self._ws: ClientConnection | None = None
         self._retired: set[ClientConnection] = set()
         self._epoch = 0
+        self._lost_epoch = -1
         self._recv_task: asyncio.Task[None] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
         self._rotation_task: asyncio.Task[None] | None = None
@@ -803,8 +804,16 @@ class GeminiLiveConnection(EngineConnection):
             logger.exception("gemini-live: receiving failed")
             code, reason = None, "receive failed"
             await _close_quietly(ws)
-        if self._closed or epoch != self._epoch:
+        self._connection_lost(epoch, code, reason)
+
+    def _connection_lost(
+        self, epoch: int, code: int | None, reason: str, *, label: str | None = None
+    ) -> None:
+        """The connection of ``epoch`` is gone: reconnect (once, whichever of the receive
+        loop and a failed send notices first), keeping the server's close code."""
+        if self._closed or epoch != self._epoch or self._lost_epoch == epoch:
             return
+        self._lost_epoch = epoch
         error = _close_error(code, reason)
         t = now()
         self._drops.append(t)
@@ -820,7 +829,10 @@ class GeminiLiveConnection(EngineConnection):
             self._replay = deque(e for e in self._replay if e.kind == "audio")
             self._replay_audio = sum(e.audio_duration for e in self._replay)
         logger.warning("gemini-live: connection closed unexpectedly (%s %s)", code, reason)
-        self._start_rotation(f"connection closed ({code} {reason})".strip(), planned=False)
+        if code is None and label is not None:
+            self._start_rotation(label, planned=False)
+        else:
+            self._start_rotation(f"connection closed ({code} {reason})".strip(), planned=False)
 
     def _dispatch(self, msg: dict[str, Any]) -> None:
         try:
@@ -850,9 +862,18 @@ class GeminiLiveConnection(EngineConnection):
         if self._switching or ws is None:
             self._switch_buffered += entry.audio_duration
             self._queue(entry)
-        elif not await self._deliver(ws, entry):
-            self._queue(entry, front=True)
-            self._start_rotation("connection lost while sending", planned=False)
+        else:
+            epoch = self._epoch
+            if not await self._deliver(ws, entry):
+                self._queue(entry, front=True)
+                # the close frame (if any) has been received: report the server's code, as
+                # the receive loop would (it may notice only after this send)
+                self._connection_lost(
+                    epoch,
+                    ws.close_code,
+                    ws.close_reason or "",
+                    label="connection lost while sending",
+                )
 
     async def _deliver(self, ws: ClientConnection, entry: _Outgoing) -> bool:
         from websockets.exceptions import ConnectionClosed

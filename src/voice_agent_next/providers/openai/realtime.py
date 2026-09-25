@@ -984,6 +984,9 @@ class OpenAIRealtimeConnection(EngineConnection):
                 self._reconnect_times.append(now())
                 history = await self._carried_history()
                 self._ws = ws
+                # the conversation is on a fresh session now: a rotation that was waiting
+                # for a quiet moment is done (as in RotatingConnection._reconnect)
+                self._rotation_pending = self._rotation_deadline = None
                 await self._configure(seed=True, ws=ws, history=history)
                 replayed = await self._deliver_audio(ws)
                 self._finish_switch(reason, planned=False, started=started,
