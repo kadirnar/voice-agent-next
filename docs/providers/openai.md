@@ -104,7 +104,11 @@ which delays the first spoken word: set `reasoning_effort="none"` (or `"minimal"
 | `parallel_tool_calls` | not sent | `False` limits the model to one tool call per response. Only sent with tools. |
 | `extra` | `{}` | Extra request parameters for every request; the per-call `extra=` wins. Parameters the SDK knows (`seed`, `stop`, `top_p`, `service_tier`, `prompt_cache_key`, `verbosity`...) are passed as such; anything else goes into the JSON body (`extra_body`). A `None` value removes a default. |
 | `headers` | — | Extra HTTP headers on every request. |
-| `capabilities` | tools, parallel tools, image input | Override the declared `LLMCapabilities`, e.g. `audio_input=True` for audio-input models. |
+| `capabilities` | tools, parallel tools, image input | Override the declared `LLMCapabilities`. |
+| `audio_input` | from the model id | The model hears `AudioContent` (half-cascade). Unset: the host's default, else the known-model table. |
+| `audio_format` | the host's | `AudioInputFormat` (or a mapping): `format` (`"wav"` or `"pcm16"`), `sample_rate`, `data_url`. |
+| `audio_history` | all | Send only the last N user audio clips as audio, older ones as their transcripts. |
+| `voice` | — | Voice of an audio-output model; also turns audio output on (`modalities: ["text", "audio"]`). |
 | `max_tokens_param` | auto | `"max_completion_tokens"` for OpenAI and Azure OpenAI, `"max_tokens"` elsewhere. |
 | `developer_role` | auto | Role used for `developer` messages: `"developer"` for OpenAI, `"system"` elsewhere. |
 | `include_usage` | `True` | Sends `stream_options={"include_usage": true}` to get token usage. Turn it off for servers that reject it. |
@@ -124,8 +128,10 @@ which delays the first spoken word: set `reasoning_effort="none"` (or `"minimal"
   `system` for servers other than OpenAI).
 * **User messages** are sent as a string, or as content parts when they carry media:
   `image_url` for `ImageContent` (`https://` or `data:` URLs) and `input_audio` (base64
-  WAV) for `AudioContent`. Audio is sent only when `capabilities.audio_input` is set;
-  otherwise its transcript is used, and audio without a transcript is dropped.
+  WAV by default, see `audio_format`) for `AudioContent`. Audio is sent only when
+  `capabilities.audio_input` is set; otherwise its transcript is used, and audio without
+  a transcript is dropped. With `audio_history=N`, clips older than the last N are sent
+  as their transcripts when they have one.
 * **Tool calls**: consecutive assistant text and `FunctionCall` items become one assistant
   message with `tool_calls`, and each `FunctionCallOutput` is placed right after it as a
   `tool` message, even if the user spoke while the tool was running. Calls without an
@@ -203,10 +209,13 @@ llm = OpenAILLM(
 
 ### Audio input
 
-Chat models that accept audio (for example `gpt-audio`) can receive the user's audio
-directly: construct the LLM with `capabilities=LLMCapabilities(audio_input=True)` and user
-`AudioContent` is sent as WAV `input_audio` parts. Half-cascades built on this are tracked
-in issue #14.
+Chat models that accept audio (`gpt-audio*`, `gpt-4o-audio*`, and on other servers
+Qwen-Omni, Ultravox, Voxtral, Gemma audio...) receive the user's audio directly: user
+`AudioContent` is sent as `input_audio` parts. `audio_input` is set from a table of known
+model ids, or explicitly with `audio_input=True`. With `stt=None` the cascade then runs as
+a half-cascade. `await llm.transcribe(frame)` asks the model for a verbatim transcript
+(text only, not in the metrics), which `CascadeOptions(input_transcriber="llm")` uses for
+the history. Hosts, formats and options: [audio-input half-cascades](openai-compatible.md#audio-input-half-cascades).
 
 ### Audio output (`gpt-audio`)
 

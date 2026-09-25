@@ -12,7 +12,10 @@ into Chat Completions messages:
   position; ``system_messages`` moves them for chat templates that only accept one
   leading system message;
 * ``user`` content becomes a plain string, or a list of ``text``/``image_url``/
-  ``input_audio`` parts when it carries media;
+  ``input_audio`` parts when it carries media. How audio is encoded (WAV or raw PCM,
+  sample rate, plain base64 or a ``data:`` URL) depends on the host
+  (:class:`AudioInputFormat`); older audio turns can be replaced by their transcripts
+  (``audio_history``);
 * consecutive assistant text and :class:`~voice_agent_next.chat.FunctionCall` items
   are grouped into one assistant message with ``tool_calls``, and every call's
   :class:`~voice_agent_next.chat.FunctionCallOutput` is placed right after it as a
@@ -33,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
 from ...audio.frame import AudioFrame
+from ...audio.resample import resample
 from ...audio.wav import wav_bytes
 from ...chat import (
     AudioContent,
@@ -48,6 +52,7 @@ from ...tools import FunctionTool
 from ...utils.log import logger
 
 __all__ = [
+    "AudioInputFormat",
     "SystemMessagePolicy",
     "audio_content_part",
     "to_chat_messages",
@@ -82,10 +87,48 @@ def to_tool_choice(choice: ToolChoice | None) -> str | dict[str, Any] | None:
     return {"type": "function", "function": {"name": choice}}
 
 
-def audio_content_part(frame: AudioFrame) -> dict[str, Any]:
-    """An ``input_audio`` content part (base64 WAV) for audio-input chat models."""
-    data = base64.b64encode(wav_bytes(frame)).decode("ascii")
-    return {"type": "input_audio", "input_audio": {"data": data, "format": "wav"}}
+@dataclass(frozen=True, slots=True)
+class AudioInputFormat:
+    """How user audio is encoded in ``input_audio`` parts (it differs per host).
+
+    * OpenAI (``gpt-audio``, ``gpt-4o-audio``), vLLM / vLLM-Omni and llama.cpp take
+      base64 WAV (``format="wav"``) and resample it themselves;
+    * DashScope (Qwen-Omni) wants the base64 as a ``data:;base64,...`` URL
+      (``data_url=True``);
+    * ``format="pcm16"`` sends raw little-endian 16-bit PCM without a header, for servers
+      that take it (the sample rate is then implicit: set ``sample_rate`` to the one the
+      server expects).
+    """
+
+    format: Literal["wav", "pcm16"] = "wav"
+    """Container of the base64 payload (and the part's ``format`` field)."""
+    sample_rate: int | None = None
+    """Resample to this rate first (``None``: keep the input rate). Audio encoders of
+    open models (Whisper-style: Qwen-Omni, Ultravox, Voxtral, Gemma) run at 16 kHz."""
+    data_url: bool = False
+    """Send ``data:;base64,<payload>`` instead of the bare base64 string."""
+
+    def encode(self, frame: AudioFrame) -> dict[str, Any]:
+        """The ``input_audio`` object for one clip."""
+        if frame.channels > 1:
+            frame = frame.to_mono()
+        if self.sample_rate and frame.sample_rate != self.sample_rate:
+            frame = resample(frame, self.sample_rate)
+        payload = wav_bytes(frame) if self.format == "wav" else frame.data
+        data = base64.b64encode(payload).decode("ascii")
+        if self.data_url:
+            data = f"data:;base64,{data}"
+        return {"data": data, "format": self.format}
+
+
+def audio_content_part(
+    frame: AudioFrame, audio_format: AudioInputFormat | None = None
+) -> dict[str, Any]:
+    """An ``input_audio`` content part for audio-input chat models (base64 WAV by default)."""
+    return {
+        "type": "input_audio",
+        "input_audio": (audio_format or AudioInputFormat()).encode(frame),
+    }
 
 
 @dataclass
@@ -100,6 +143,8 @@ def to_chat_messages(
     developer_role: Literal["developer", "system"] = "developer",
     audio_input: bool = False,
     system_messages: SystemMessagePolicy = "keep",
+    audio_format: AudioInputFormat | None = None,
+    audio_history: int | None = None,
 ) -> list[dict[str, Any]]:
     """Convert a chat context to Chat Completions ``messages``.
 
@@ -116,8 +161,27 @@ def to_chat_messages(
             message; ``"as_user"`` merges only the leading ones and sends later ones as
             user messages (adjacent user messages are then joined, for templates that
             require alternating roles).
+        audio_format: encoding of ``input_audio`` parts (default: base64 WAV at the
+            input rate).
+        audio_history: with ``audio_input``, send only the most recent ``audio_history``
+            audio clips as audio; older clips that have a transcript are sent as text
+            (a clip without one stays audio, so the model never loses a turn). Re-sending
+            every earlier turn's audio makes each request slower and dearer as the
+            conversation grows. ``None``: all clips as audio.
     """
     items = list(ctx.items if isinstance(ctx, ChatContext) else ctx)
+    as_text: set[int] = set()  # ids of AudioContent sent as their transcript
+    if audio_input and audio_history is not None:
+        clips = [
+            c
+            for item in items
+            if isinstance(item, ChatMessage) and item.role == "user"
+            for c in item.content
+            if isinstance(c, AudioContent) and c.frame
+        ]
+        older = clips[: max(0, len(clips) - max(0, audio_history))]
+        as_text = {id(c) for c in older if c.transcript}
+    audio = _AudioOptions(audio_input, audio_format, as_text)
     outputs: dict[str, FunctionCallOutput] = {}
     for item in items:
         if isinstance(item, FunctionCallOutput):
@@ -180,7 +244,7 @@ def to_chat_messages(
                 turn = _AssistantTurn(text=text)
         else:
             flush()
-            message = _to_message(item, developer_role=developer_role, audio_input=audio_input)
+            message = _to_message(item, developer_role=developer_role, audio=audio)
             if message is not None:
                 messages.append(message)
     flush()
@@ -228,22 +292,29 @@ def _join_user_content(a: str | list[dict[str, Any]], b: str | list[dict[str, An
     return parts(a) + parts(b)
 
 
+@dataclass(slots=True)
+class _AudioOptions:
+    enabled: bool
+    format: AudioInputFormat | None
+    as_text: set[int]
+
+
 def _to_message(
-    msg: ChatMessage, *, developer_role: str, audio_input: bool
+    msg: ChatMessage, *, developer_role: str, audio: _AudioOptions
 ) -> dict[str, Any] | None:
     if msg.role in ("system", "developer"):
         text = msg.text
         if not text.strip():
             return None
         return {"role": developer_role if msg.role == "developer" else "system", "content": text}
-    content = _user_content(msg, audio_input=audio_input)
+    content = _user_content(msg, audio=audio)
     if content is None:
         logger.debug("skipping empty %s message %s", msg.role, msg.id)
         return None
     return {"role": "user", "content": content}
 
 
-def _user_content(msg: ChatMessage, *, audio_input: bool) -> str | list[dict[str, Any]] | None:
+def _user_content(msg: ChatMessage, *, audio: _AudioOptions) -> str | list[dict[str, Any]] | None:
     parts: list[dict[str, Any]] = []
     media = False
     for c in msg.content:
@@ -251,8 +322,8 @@ def _user_content(msg: ChatMessage, *, audio_input: bool) -> str | list[dict[str
             if c:
                 parts.append({"type": "text", "text": c})
         elif isinstance(c, AudioContent):
-            if audio_input and c.frame:
-                parts.append(audio_content_part(c.frame))
+            if audio.enabled and c.frame and id(c) not in audio.as_text:
+                parts.append(audio_content_part(c.frame, audio.format))
                 media = True
             elif c.transcript:
                 parts.append({"type": "text", "text": c.transcript})
