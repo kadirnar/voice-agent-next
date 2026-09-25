@@ -15,7 +15,12 @@ import contextlib
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
-from ..errors import ConfigurationError, ProviderConnectionError, ProviderTimeoutError
+from ..errors import (
+    ConfigurationError,
+    ProviderConnectionError,
+    ProviderError,
+    ProviderTimeoutError,
+)
 
 if TYPE_CHECKING:
     from websockets.asyncio.client import ClientConnection
@@ -50,6 +55,8 @@ async def ws_connect(
     headers: Mapping[str, str] | None = None,
     open_timeout: float,
     close_timeout: float | None = 2.0,
+    hint: str | None = None,
+    timeout_error: type[ProviderError] = ProviderTimeoutError,
     **kwargs: Any,
 ) -> ClientConnection:
     """Open a WebSocket client connection, mapping failures to library errors.
@@ -63,18 +70,24 @@ async def ws_connect(
         headers: extra request headers.
         open_timeout: seconds allowed for the TCP/TLS/HTTP handshake.
         close_timeout: seconds allowed for the closing handshake.
+        hint: appended to the connection/timeout messages in parentheses (e.g. how to
+            start a local server).
+        timeout_error: the error raised when the handshake times out (a provider whose
+            unreachable server usually shows up as a timeout may prefer
+            :class:`~voice_agent_next.errors.ProviderConnectionError`).
         **kwargs: passed to :func:`websockets.asyncio.client.connect` (``max_size``,
             ``compression``, ``proxy``...).
 
     Raises:
         ConfigurationError: invalid URL.
-        ProviderTimeoutError: the handshake timed out.
+        ProviderTimeoutError: the handshake timed out (or ``timeout_error``).
         ProviderConnectionError: the connection failed (refused, reset, bad handshake).
         Exception: whatever ``http_error`` returns, for a rejected handshake.
     """
     from websockets.asyncio.client import connect
     from websockets.exceptions import InvalidHandshake, InvalidStatus, InvalidURI
 
+    suffix = f" ({hint})" if hint else ""
     try:
         return await connect(
             url,
@@ -88,11 +101,11 @@ async def ws_connect(
     except InvalidURI as exc:
         raise ConfigurationError(f"invalid {name} URL: {exc}") from exc
     except TimeoutError as exc:
-        raise ProviderTimeoutError(f"timed out connecting to {target}", provider=provider) from exc
+        msg = f"timed out connecting to {target}{suffix}"
+        raise timeout_error(msg, provider=provider) from exc
     except (OSError, InvalidHandshake) as exc:
-        raise ProviderConnectionError(
-            f"could not connect to {target}: {exc}", provider=provider
-        ) from exc
+        msg = f"could not connect to {target}: {exc}{suffix}"
+        raise ProviderConnectionError(msg, provider=provider) from exc
 
 
 async def close_ws(ws: ClientConnection | None, *, timeout: float = 2.0) -> None:

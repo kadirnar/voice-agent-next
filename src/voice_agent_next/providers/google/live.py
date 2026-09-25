@@ -96,6 +96,7 @@ from ...utils.ids import new_id
 from ...utils.log import logger
 from ...vad import VADEventType, VADOptions, VADStream
 from .._options import deprecated
+from .._ws import body_text, close_ws, ws_connect
 from ..energy import EnergyVAD
 
 if TYPE_CHECKING:
@@ -267,11 +268,6 @@ def _close_info(exc: Exception) -> tuple[int | None, str]:
     if rcvd is None:
         return None, ""
     return int(rcvd.code), str(rcvd.reason or "")
-
-
-async def _close_quietly(ws: ClientConnection, timeout: float = 2.0) -> None:
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(ws.close(), timeout)
 
 
 @functools.cache
@@ -637,7 +633,7 @@ class GeminiLiveConnection(EngineConnection):
         ws, self._ws = self._ws, None
         for sock in [ws, *self._retired]:
             if sock is not None:
-                await _close_quietly(sock)
+                await close_ws(sock)
         self._retired.clear()
         if self._vad is not None:
             self._vad.close()
@@ -652,13 +648,7 @@ class GeminiLiveConnection(EngineConnection):
     ) -> tuple[ClientConnection, list[dict[str, Any]]]:
         """Connect, send ``setup`` and wait for ``setupComplete``. A fresh session is seeded
         with the history (``carry``: fitted by the engine's ``carry_over`` strategy)."""
-        from websockets.asyncio.client import connect
-        from websockets.exceptions import (
-            ConnectionClosed,
-            InvalidStatus,
-            InvalidURI,
-            WebSocketException,
-        )
+        from websockets.exceptions import ConnectionClosed
 
         url, headers = self._e._endpoint()
         turns: list[dict[str, Any]] = []
@@ -667,22 +657,20 @@ class GeminiLiveConnection(EngineConnection):
             turns = self._history_turns(ctx)
         self._switch_carried = len(turns)
         setup = self._build_setup(handle, seed_history=bool(turns))
-        try:
-            ws = await connect(
-                url,
-                additional_headers=headers,
-                open_timeout=self._e.connect_timeout,
-                max_size=_MAX_MESSAGE,
-                **self._e._connect_kwargs(url),
-            )
-        except InvalidStatus as exc:
-            body = exc.response.body.decode("utf-8", "replace") if exc.response.body else ""
-            raise _http_error(exc.response.status_code, body) from exc
-        except InvalidURI as exc:
-            raise ConfigurationError(f"invalid Gemini Live base_url: {exc}") from exc
-        except (OSError, WebSocketException, TimeoutError) as exc:
-            msg = f"cannot connect to Gemini Live: {type(exc).__name__}: {exc}"
-            raise ProviderConnectionError(msg, provider="google") from exc
+        ws = await ws_connect(
+            url,
+            provider="google",
+            target="Gemini Live",
+            name="Gemini Live",
+            http_error=lambda r: _http_error(r.status_code, body_text(r)),
+            headers=headers,
+            open_timeout=self._e.connect_timeout,
+            close_timeout=10.0,  # the websockets default, as before
+            # a handshake timeout is reported (and retried) like a refused connection
+            timeout_error=ProviderConnectionError,
+            max_size=_MAX_MESSAGE,
+            **self._e._connect_kwargs(url),
+        )
         self.connections += 1
         early: list[dict[str, Any]] = []
         try:
@@ -698,14 +686,14 @@ class GeminiLiveConnection(EngineConnection):
             if turns:  # historyConfig.initialHistoryInClientContent: no model call
                 await ws.send(json.dumps({"clientContent": {"turns": turns, "turnComplete": True}}))
         except ConnectionClosed as exc:
-            await _close_quietly(ws)
+            await close_ws(ws)
             raise _close_error(*_close_info(exc)) from exc
         except TimeoutError as exc:
-            await _close_quietly(ws)
+            await close_ws(ws)
             msg = "Gemini Live did not acknowledge the session setup in time"
             raise ProviderTimeoutError(msg, provider="google") from exc
         except BaseException:
-            await _close_quietly(ws)
+            await close_ws(ws)
             raise
         return ws, early
 
@@ -813,7 +801,7 @@ class GeminiLiveConnection(EngineConnection):
         except Exception:
             logger.exception("gemini-live: receiving failed")
             code, reason = None, "receive failed"
-            await _close_quietly(ws)
+            await close_ws(ws)
         self._connection_lost(epoch, code, reason)
 
     def _connection_lost(
@@ -1102,7 +1090,7 @@ class GeminiLiveConnection(EngineConnection):
         self._retired.add(ws)
 
         async def close() -> None:
-            await _close_quietly(ws)
+            await close_ws(ws)
             self._retired.discard(ws)
 
         self._tasks.spawn(close(), name="gemini-live-close-old")
