@@ -98,6 +98,11 @@ class _TimelineWriter:
         )
         self._thread.start()
 
+    @property
+    def closed(self) -> bool:
+        """Everything was written and the file is closed (like ``IO.closed``)."""
+        return bool(self._file.closed)
+
     def write(self, line: dict[str, Any]) -> None:
         self._queue.put(line)
 
