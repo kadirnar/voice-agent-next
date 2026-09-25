@@ -8,8 +8,9 @@ same clock as the ``t`` of every line of the timeline, so a transcript, an inter
 a latency metric can be found in the waveform at a glance.
 
 Both files are streamed to disk: only the last second or so of audio is held in memory,
-the WAV header is kept valid after every write, and everything is flushed and finalized
-when the session closes. It works with every transport and engine because it only uses
+the WAV header is kept valid after every write, timeline lines are encoded and written by
+a background thread (in order, never on the event loop), and everything is flushed and
+finalized when the session closes. It works with every transport and engine because it only uses
 what the session itself sees.
 """
 
@@ -20,10 +21,12 @@ import enum
 import json
 import math
 import os
+import queue
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -81,6 +84,67 @@ class _Gap:
     in_end: int  # input samples of the stream up to its end
 
 
+class _TimelineWriter:
+    """Appends JSON lines to a file from a background thread, in the order they were
+    submitted: encoding and file I/O stay off the event loop. Payloads must already be
+    snapshots (:func:`to_jsonable` output); :meth:`close` drains, flushes and closes."""
+
+    def __init__(self, path: Path) -> None:
+        self._file = open(path, "w", encoding="utf-8")  # noqa: SIM115 - closed by the thread
+        self._queue: queue.SimpleQueue[dict[str, Any] | None] = queue.SimpleQueue()
+        self._failed = False
+        self._thread = threading.Thread(
+            target=self._run, name=f"van-timeline-{path.name}", daemon=True
+        )
+        self._thread.start()
+
+    def write(self, line: dict[str, Any]) -> None:
+        self._queue.put(line)
+
+    def close(self, timeout: float = 5.0) -> None:
+        self._queue.put(None)
+        self._thread.join(timeout)
+        if self._thread.is_alive():
+            logger.warning("the session timeline writer did not finish within %.0f s", timeout)
+
+    def _run(self) -> None:
+        try:
+            while True:
+                line = self._queue.get()
+                while line is not None:
+                    self._write(line)
+                    try:
+                        line = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                else:
+                    return
+                self._flush()  # the backlog is written: readers see complete lines
+        finally:
+            try:
+                self._file.close()
+            except Exception:
+                logger.exception("closing the session timeline failed")
+
+    def _write(self, line: dict[str, Any]) -> None:
+        if self._failed:
+            return
+        try:
+            self._file.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")
+        except Exception:
+            logger.exception("writing the session timeline failed; timeline stopped")
+            self._failed = True
+
+    def _flush(self) -> None:
+        if self._failed:
+            return
+        try:
+            self._file.flush()
+        except Exception:
+            logger.exception("flushing the session timeline failed; timeline stopped")
+            self._failed = True
+
+
 class SessionRecorder(SessionTap):
     """Records an :class:`~voice_agent_next.session.AgentSession` to disk.
 
@@ -119,7 +183,7 @@ class SessionRecorder(SessionTap):
         self._session: AgentSession | None = None
         self._origin = 0.0
         self._wav: WavWriter | None = None
-        self._timeline: IO[str] | None = None
+        self._timeline: _TimelineWriter | None = None
         self._closed = False
         self._wav_failed = False
         self._written = 0  # stereo samples written to the WAV
@@ -180,7 +244,7 @@ class SessionRecorder(SessionTap):
         self.wav_path.parent.mkdir(parents=True, exist_ok=True)
         self.timeline_path.parent.mkdir(parents=True, exist_ok=True)
         self._wav = WavWriter(self.wav_path, rate, 2)
-        self._timeline = open(self.timeline_path, "w", encoding="utf-8", buffering=1)  # noqa: SIM115
+        self._timeline = _TimelineWriter(self.timeline_path)
         self._agent = TimelineTrack(rate)
         self._user = TimelineTrack(rate)
         engine = session.engine
@@ -314,7 +378,7 @@ class SessionRecorder(SessionTap):
 
     def _write_line(self, obj: dict[str, Any]) -> None:
         assert self._timeline is not None
-        self._timeline.write(json.dumps(obj, ensure_ascii=False, default=str) + "\n")
+        self._timeline.write(obj)  # encoded and written by the writer thread
 
     # -------------------------------------------------------------------- audio
     def _pos(self, t: float) -> int:
