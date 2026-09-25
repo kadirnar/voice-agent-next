@@ -526,6 +526,7 @@ async def test_expiry_rotates_to_a_seeded_session(fake: Callable[..., Any]) -> N
     await wait_for(lambda: bool(events.of(ResponseDone)))
     await conn.mute_input()  # re-applied on the next session
     await wait_for(lambda: len(server.sessions) == 2 and conn.session_id == "live_002")
+    await wait_for(lambda: any(e.status == "reconnected" for e in events.of(EngineStatus)))
     await silence(conn, 0.3)
     await conn.aclose()
     await events.close()
@@ -551,7 +552,8 @@ async def test_expired_session_reconnects_with_history(fake: Callable[..., Any])
     await silence(conn, 1.0)
     await wait_for(lambda: bool(events.of(ResponseDone)))
     await server.close_session("expired")
-    await wait_for(lambda: len(server.sessions) == 2 and bool(server.sessions[1].config))
+    # the switch is over once reconnected is reported (not when the fake saw session.start)
+    await wait_for(lambda: any(e.status == "reconnected" for e in events.of(EngineStatus)))
     await conn.aclose()
     await events.close()
     assert [e.status for e in events.of(EngineStatus)] == ["reconnecting", "reconnected"]
@@ -565,7 +567,8 @@ async def test_dropped_connection_reconnects(fake: Callable[..., Any]) -> None:
     conn = await engine_for(server, rotation=RotationPolicy(backoff=0.05)).connect(EngineOptions())
     events = Events(conn)
     await server.drop()
-    await wait_for(lambda: len(server.sessions) == 2 and bool(server.sessions[1].config))
+    # the switch is over once reconnected is reported (not when the fake saw session.start)
+    await wait_for(lambda: any(e.status == "reconnected" for e in events.of(EngineStatus)))
     await silence(conn, 0.2)
     assert not conn.closed
     await conn.aclose()
