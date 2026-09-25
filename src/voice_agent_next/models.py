@@ -970,6 +970,11 @@ def models_for_spec(kind: str, spec: Any) -> Requirements:
         name, model = parse_spec(spec)
     else:
         return req  # a component instance
+    if kind == "turn" and name == "fused":  # FusedTurnDetector: its two detectors
+        parts = spec if isinstance(spec, Mapping) else {}
+        req.extend(models_for_spec("turn", parts.get("audio", "smart_turn")))
+        req.extend(models_for_spec("turn", parts.get("text", "lm_turn")))
+        return req
     try:
         provider = get_provider(kind, name)  # type: ignore[arg-type]
     except ProviderNotFoundError as exc:

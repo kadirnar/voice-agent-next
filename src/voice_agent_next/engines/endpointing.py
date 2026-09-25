@@ -80,6 +80,12 @@ class EndpointingDecision:
     hold: float | None = None
     """Dynamic policy: the delay at ``probability == threshold`` (learned from the user's
     pauses, else the fixed policy's minimum)."""
+    audio_probability: float | None = None
+    """Fused detector (:class:`~voice_agent_next.turn.FusedTurnDetector`): the audio
+    half's probability (``None``: no audio)."""
+    text_probability: float | None = None
+    """Fused detector: the text half's probability (``None``: no transcript, or over its
+    latency budget)."""
 
 
 class Endpointer:

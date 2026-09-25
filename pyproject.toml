@@ -71,9 +71,9 @@ cuda = [
   "nvidia-cublas-cu12>=12.8; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')",
 ]
 # --- VAD / turn detection (local) ----------------------------------------------
-namo = ["onnxruntime>=1.19", "tokenizers>=0.20"]
 silero = ["onnxruntime>=1.19"]
 smart-turn = ["onnxruntime>=1.19"]
+text-turn = ["onnxruntime>=1.19", "tokenizers>=0.20"]
 # --- local STT / TTS / LLM ------------------------------------------------------
 faster-whisper = ["faster-whisper>=1.1"]
 kokoro = ["kokoro-onnx>=0.6.1; python_version < '3.14'"]  # upstream caps Requires-Python <3.14
