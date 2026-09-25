@@ -64,7 +64,11 @@ jobs:
         id: version
         shell: bash
         run: |
-          version="$(uv version --short)"
+          version="$(uv version --short --color never)"  # FORCE_COLOR would colorize it
+          if [[ ! "$version" =~ ^[0-9][0-9A-Za-z.]*$ ]]; then
+            echo "::error::unexpected version string '$version'"
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [[ "$version" =~ (a|b|rc|\.dev)[0-9]+$ ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
