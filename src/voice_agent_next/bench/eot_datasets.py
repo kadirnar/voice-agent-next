@@ -34,6 +34,7 @@ from ..audio.frame import AudioFrame
 from ..audio.wav import read_wav, write_wav
 from ..utils.deps import require
 from ..utils.download import DownloadError, cache_dir, download
+from ..utils.env import is_offline
 
 __all__ = [
     "EOT_BENCH_FILES",
@@ -322,11 +323,10 @@ def _load_eot_bench(
         "attribution": "LiveKit eot-bench (https://github.com/livekit/eot-bench)",
     }
     if not marker.exists() or marker.read_text(encoding="utf-8").strip() != sha256:
-        if (
-            os.environ.get("VAN_OFFLINE", "").lower() in ("1", "true", "yes")
-            and not (directory / "validation-00000-of-00001.parquet").exists()
-        ):
-            raise DownloadError(f"dataset {name} is not cached and VAN_OFFLINE is set")
+        if is_offline() and not (directory / "validation-00000-of-00001.parquet").exists():
+            raise DownloadError(
+                f"dataset {name} is not cached and offline mode is on (VAN_OFFLINE/HF_HUB_OFFLINE)"
+            )
         if progress is not None:
             progress(
                 f"fetching {name} ({size / 1e6:.0f} MB, {EOT_BENCH_REPO}@{EOT_BENCH_REVISION[:8]})"

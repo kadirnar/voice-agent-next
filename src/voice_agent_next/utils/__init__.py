@@ -6,6 +6,7 @@ from .aio import BackgroundTasks, Chan, ChanClosed, cancel_and_wait, merge_async
 from .clock import now
 from .deps import is_installed, require
 from .emitter import EventEmitter
+from .env import is_offline
 from .ids import new_id
 from .log import logger
 
@@ -16,6 +17,7 @@ __all__ = [
     "EventEmitter",
     "cancel_and_wait",
     "is_installed",
+    "is_offline",
     "logger",
     "merge_async_iterators",
     "new_id",

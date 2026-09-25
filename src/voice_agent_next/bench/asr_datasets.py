@@ -51,6 +51,7 @@ from ..audio.frame import AudioFrame
 from ..audio.wav import read_wav
 from ..utils.deps import require
 from ..utils.download import DownloadError, cache_dir
+from ..utils.env import is_offline
 from ..utils.log import logger
 
 __all__ = [
@@ -306,10 +307,6 @@ def builtin_datasets() -> dict[str, dict[str, Any]]:
     return datasets
 
 
-def _offline() -> bool:
-    return os.environ.get("VAN_OFFLINE", "").lower() in ("1", "true", "yes")
-
-
 def load_builtin_dataset(
     name: str,
     *,
@@ -329,8 +326,10 @@ def load_builtin_dataset(
         if not path.exists() or _file_sha256(path) != item["sha256"]:
             missing[item["member"]] = (item["file"], item["sha256"])
     if missing:
-        if _offline():
-            raise DownloadError(f"dataset {name} is not cached and VAN_OFFLINE is set")
+        if is_offline():
+            raise DownloadError(
+                f"dataset {name} is not cached and offline mode is on (VAN_OFFLINE/HF_HUB_OFFLINE)"
+            )
         archive = spec["archive"]
         if progress is not None:
             progress(f"fetching {len(missing)} file(s) of {name} (streaming {archive['urls'][0]})")
