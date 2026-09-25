@@ -166,9 +166,16 @@ def test_serve_layers_preset_file_and_flags(
     assert cfg.extends == "local-cpu" and cfg.agent.greeting == "Hello"
     assert cfg.llm == LOCAL_CPU["llm"]
     assert cfg.stt == {"provider": LOCAL_CPU["stt"], "language": "en"}
+    # flags on top of the preset and the file (#156): preset < file < flags
+    flags = build_app_config(SourceOptions(preset="local-cpu", config=str(tweaks), llm="mock"))
+    assert flags.extends == "local-cpu" and flags.llm == "mock" and flags.agent.greeting == "Hello"
+    assert flags.stt == {"provider": LOCAL_CPU["stt"], "language": "en"}
+    engine = build_app_config(SourceOptions(preset="local-cpu", engines=["mock"]))
+    assert engine.engine == "mock" and engine.is_cascade() is False and engine.stt is None
     for bad in (
         SourceOptions(engines=["mock", "mock"]),
-        SourceOptions(preset="local-cpu", llm="mock"),  # one agent: no flags on top
+        SourceOptions(preset="local-cpu", engines=["mock"], llm="mock"),  # engine or cascade
+        SourceOptions(config=str(tweaks), engines=[str(tweaks)]),  # two files
     ):
         with pytest.raises(ConfigurationError, match="one agent"):
             build_app_config(bad)

@@ -38,6 +38,7 @@ __all__ = [
     "CarrierVerifier",
     "answer_markup",
     "call_id_from_query",
+    "public_base",
     "stream_url_for",
 ]
 
@@ -63,6 +64,12 @@ def _split_public_url(public_url: str) -> tuple[str, str]:
     if parts.query or parts.fragment:
         raise ConfigurationError(f"public_url must not have a query or fragment: {public_url!r}")
     return parts.netloc, parts.path.rstrip("/")
+
+
+def public_base(public_url: str, scheme: str = "https") -> str:
+    """``public_url`` (``wss://`` or ``https://``) with ``scheme``, without a trailing ``/``."""
+    netloc, prefix = _split_public_url(public_url)
+    return f"{scheme}://{netloc}{prefix}"
 
 
 @dataclass(frozen=True)

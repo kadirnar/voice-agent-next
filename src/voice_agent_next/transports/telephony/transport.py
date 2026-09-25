@@ -56,7 +56,13 @@ from .serializers import (
     TelephonySerializer,
     create_serializer,
 )
-from .webhook import CarrierVerifier, answer_markup, call_id_from_query, stream_url_for
+from .webhook import (
+    CarrierVerifier,
+    answer_markup,
+    call_id_from_query,
+    stream_url_for,
+)
+from .webhook import public_base as webhook_public_base
 
 __all__ = [
     "PlivoTransport",
@@ -638,7 +644,7 @@ class TelephonyServer(WebSocketAgentServer):
         if self.answer_path is None:
             return None
         if public_base is None and self.public_url is not None:
-            public_base = "https" + self.public_url.strip().removeprefix("wss").rstrip("/")
+            public_base = webhook_public_base(self.public_url)
         base = (public_base or self.url.replace("ws", "http", 1)).rstrip("/")
         return base + self.answer_path
 

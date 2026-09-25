@@ -527,15 +527,21 @@ def test_app_config_from_sources(tmp_path: Path) -> None:
     path.write_text("engine: mock\nagent: {instructions: From file.}\n", encoding="utf-8")
     assert build_app_config(SourceOptions(config=str(path))).agent.instructions == "From file."
     assert build_app_config(SourceOptions(engines=[str(path)])).engine == "mock"
-    for bad in (SourceOptions(engines=["mock", "mock"]), SourceOptions(config=str(path), llm="x"),
+    layered = build_app_config(SourceOptions(config=str(path), llm="mock", tts="mock"))
+    assert layered.is_cascade() and layered.llm == "mock"  # file < flags (#156)
+    assert layered.agent.instructions == "From file."
+    for bad in (SourceOptions(engines=["mock", "mock"]), SourceOptions(engines=["mock"], llm="x"),
                 SourceOptions(engines=["a=mock"]), SourceOptions(tts="mock"),  # (TTS optional: omni LLMs)
                 SourceOptions(vad="energy"), SourceOptions(config=str(tmp_path / "no.yaml"))):  # fmt: skip
         with pytest.raises(ConfigurationError):
             build_app_config(bad)
     with pytest.raises(ConfigurationError, match="unknown protocol"):
         build_served(SourceOptions(), options("sip"))
-    with pytest.raises(ConfigurationError, match="api-key"):
-        build_served(SourceOptions(), options("websocket", api_keys=["k"]))
+    # --api-key applies to every protocol now (#156)
+    keyed = build_served(SourceOptions(), options("websocket", api_keys=["k"])).server
+    assert keyed.api_keys.matches("k") and not keyed.api_keys.matches("x")
+    with pytest.raises(ConfigurationError, match="public-url"):
+        build_served(SourceOptions(), options("websocket", public_url="wss://a.example"))
     assert serve_cli.PROTOCOLS == serving.PROTOCOLS
 
 
