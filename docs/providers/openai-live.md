@@ -36,7 +36,8 @@ engine:
 No extra is needed (the engine uses `websockets`, a core dependency). Set
 `OPENAI_API_KEY` to a project key with GPT-Live access (every paid tier; the rate limit
 counts concurrent sessions, from 25 on Tier 1 to 500 on Tier 5). Keep the key on the
-server: this engine is a server-side WebSocket client.
+server: this engine is a server-side WebSocket client. `OPENAI_API_KEY` is only sent to
+`api.openai.com` (or to an `OPENAI_LIVE_BASE_URL`); pass `api_key=` for another `base_url=`.
 
 **Pricing:** $0.05 per minute of voice session, billed per second. The Responses backend
 (model and tools) is billed separately at its normal rates.
