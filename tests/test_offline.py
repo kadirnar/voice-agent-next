@@ -48,3 +48,15 @@ def test_hf_hub_offline_blocks_downloads_and_datasets(monkeypatch: pytest.Monkey
         load_eot_dataset("eot-bench-en")
     with pytest.raises(DownloadError, match="not cached"):
         load_asr_dataset("librispeech-test-clean-smoke")
+
+
+def test_doctor_reports_offline_mode_from_hf_hub_offline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from voice_agent_next import doctor
+
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hf"))
+    names = [c.name for c in doctor.model_checks()]
+    assert "offline mode" not in names
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    assert "offline mode" in [c.name for c in doctor.model_checks()]
