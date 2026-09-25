@@ -372,14 +372,17 @@ class MockTTS(TTS):
         audio = synth_speech(
             duration, self.sample_rate, frequency=self.frequency, amplitude=self.amplitude
         )
+        # pace against the start time, not chunk by chunk: a late wake-up (a 15.6 ms timer
+        # tick on Windows, a loaded runner) must not add up into a slower-than-real-time
+        # stream, which would make the audio underrun with gaps
+        started = now()
         t = 0.0
         while t < duration - 1e-9:
             chunk = audio.slice(t, min(duration, t + self.chunk_duration))
             push(chunk)
-            t += self.chunk_duration
-            await asyncio.sleep(
-                chunk.duration * self.realtime_factor if self.realtime_factor else 0
-            )
+            t = min(duration, t + self.chunk_duration)
+            delay = started + t * self.realtime_factor - now() if self.realtime_factor else 0
+            await asyncio.sleep(max(0.0, delay))
 
     def _synthesize(self, text: str, *, voice: str | None) -> ChunkedStream:
         return _MockChunkedStream(self, text, voice=voice)
