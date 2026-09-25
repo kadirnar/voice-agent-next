@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import dataclasses
 import functools
 import inspect
@@ -122,6 +123,13 @@ _IDLE_POLL = 0.05
 _IDLE_SETTLE = 0.15
 """The conversation must stay idle this long before a background result is delivered."""
 
+_OWNER_TASK: contextvars.ContextVar[asyncio.Task[Any] | None] = contextvars.ContextVar(
+    "voice_agent_next_session_owner_task", default=None
+)
+"""The session's background task running a tool or delegated work. Code it runs may sit in
+an inner task (``asyncio.wait_for`` creates one on Python 3.11); ``aclose()`` called from
+there must not cancel the owner it is awaited by."""
+
 DEFAULT_TOOL_FILLERS: tuple[str, ...] = (
     "One moment, let me check that.",
     "Just a second.",
@@ -141,7 +149,9 @@ class SessionOptions:
     tool_timeout: float | None = 30.0
     """Per-call timeout for tool execution (``None`` = no timeout)."""
     max_tool_steps: int = 5
-    """Maximum consecutive tool-call rounds per user turn."""
+    """Maximum consecutive tool-call rounds per request chain: a user turn (spoken or
+    typed with ``generate_reply(user_input=)``), a ``generate_reply()`` or a background
+    result that asks for a response, and the tool rounds that follow it."""
     close_on_disconnect: bool = True
     """Close the session when the transport's audio input ends (user hung up)."""
     warmup: bool = True
@@ -425,6 +435,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         self._closed = asyncio.Event()
         self._closing = False
         self._close_task: asyncio.Task[None] | None = None
+        self._close_callers: set[asyncio.Task[Any]] = set()  # tasks waiting in aclose()
         self._out: Chan[ResponseAudio | _EndOfResponse] = Chan()
         self._virtual_end = 0.0
         self._responses: dict[str, _Response] = {}
@@ -433,7 +444,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         self._user_items: dict[str, ChatMessage] = {}
         self._turn: _Turn | None = None
         self._user_speech_end: float | None = None
-        self._tool_steps = 0
+        self._tool_steps = 0  # tool rounds of the current request chain
         self._tool_runs: dict[str, _ToolRun] = {}  # running executions by call id
         self._pending_rounds: set[_Response] = set()  # tool rounds the model waits for
         self._fillers = _PhrasePicker()
@@ -531,6 +542,15 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         self._agent = agent
         self._voice = agent.voice
         self._transport = transport
+        try:
+            await self._start(agent, transport)
+        except BaseException:
+            # release whatever was opened (transport, recorder file, engine, loops)
+            with contextlib.suppress(Exception):
+                await self.aclose("start_failed")
+            raise
+
+    async def _start(self, agent: Agent, transport: Transport) -> None:
         if self.options.warmup:
             try:  # before the transport opens, so no user audio queues up meanwhile
                 await self.engine.warmup()
@@ -555,6 +575,8 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
             asyncio.create_task(self._event_loop(), name="session-events"),
             asyncio.create_task(self._playout_loop(), name="session-playout"),
         ]
+        for task in self._loops:
+            task.add_done_callback(self._on_loop_done)
         self._set_agent_state(AgentState.LISTENING)
         await agent.on_enter(self)
         if agent.greeting:
@@ -569,37 +591,82 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         await self._closed.wait()
 
     def _schedule_close(self, reason: str) -> None:
-        if self._closing or self._close_task is not None:
-            return
-        self._close_task = asyncio.create_task(self.aclose(reason), name="session-close")
+        self._begin_close(reason)
+
+    def _begin_close(self, reason: str) -> asyncio.Task[None]:
+        """Start closing the session (once); returns the task doing it."""
+        if self._close_task is None:
+            self._closing = True
+            self._close_task = asyncio.create_task(self._close(reason), name="session-close")
+        return self._close_task
 
     async def aclose(self, reason: str = "closed") -> None:
-        """Stop the session and release the engine connection and transport."""
-        if self._closing:
-            await self._closed.wait()
-            return
-        self._closing = True
-        self._cancel_barge_in_timer()
+        """Stop the session and release the engine connection and transport.
+
+        Idempotent and safe to call concurrently: every call waits for the same close.
+        Cancelling a caller does not abort the cleanup, which runs to the end in its own
+        task. The calling task (e.g. a tool ending the call) is not cancelled by it.
+        """
+        task = self._begin_close(reason)
         current = asyncio.current_task()
-        await cancel_and_wait(*[t for t in self._loops if t is not current])
-        await self._tasks.cancel_all()
+        if task is current:
+            return  # called from a hook during the close (e.g. ``Agent.on_exit``)
+        callers = {t for t in (current, _OWNER_TASK.get()) if t is not None}
+        if not task.done():
+            self._close_callers.update(callers)
+        try:
+            await asyncio.shield(task)
+        finally:
+            self._close_callers.difference_update(callers)
+
+    async def _close(self, reason: str) -> None:
+        try:
+            await self._release(reason)
+        finally:
+            self._closed.set()
+            self.emit("close", SessionClosed(reason))
+
+    async def _release(self, reason: str) -> None:
+        self._cancel_barge_in_timer()
+        exempt = self._close_callers
+        await cancel_and_wait(*[t for t in self._loops if t not in exempt])
+        await self._tasks.cancel_all(exclude=exempt)
         self._out.close()
+        steps: list[tuple[str, Callable[[], Any]]] = []
         if self._conn is not None:
-            with contextlib.suppress(Exception):
-                await self._conn.aclose()
+            steps.append(("engine connection close", self._conn.aclose))
         if self._transport is not None:
-            with contextlib.suppress(Exception):
-                await self._transport.aclose()
+            steps.append(("transport close", self._transport.aclose))
         if self._processors is not None:
-            self._processors.close()
-        self._set_agent_state(AgentState.CLOSED)
+            steps.append(("audio processor close", self._processors.close))
+        steps.append(("state change", lambda: self._set_agent_state(AgentState.CLOSED)))
         if self._agent is not None:
-            with contextlib.suppress(Exception):
-                await self._agent.on_exit(self)
-        if self._taps and self._agent is not None:
-            self._notify("session_closing", self, reason, now())
-        self._closed.set()
-        self.emit("close", SessionClosed(reason))
+            steps.append(("on_exit", functools.partial(self._agent.on_exit, self)))
+            if self._taps:
+                steps.append(("taps", lambda: self._notify("session_closing", self, reason, now())))
+        for what, step in steps:
+            try:
+                result = step()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.exception("session close: %s failed", what)
+
+    def _on_loop_done(self, task: asyncio.Task[Any]) -> None:
+        """A session loop failed: report it as fatal and close the session."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        if self._closing:  # a consequence of the close (e.g. a socket torn down under it)
+            logger.warning("session loop %s failed while closing: %r", task.get_name(), exc)
+            return
+        logger.error("session loop %s failed", task.get_name(), exc_info=exc)
+        error = exc if isinstance(exc, Exception) else RuntimeError(repr(exc))
+        self.emit("error", SessionError(error, recoverable=False))
+        reason = "engine_error" if task.get_name() == "session-events" else "transport_error"
+        self._schedule_close(reason)
 
     async def __aenter__(self) -> AgentSession:
         return self
@@ -639,6 +706,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
     ) -> None:
         """Make the agent respond now, optionally to a typed ``user_input``."""
         self._reply_requests += 1
+        self._tool_steps = 0  # a new request chain
         if user_input is not None:
             msg = self.history.add_message("user", user_input)
             self.emit("conversation_item", ConversationItemAdded(msg))
@@ -815,6 +883,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         coro = work() if callable(work) else work
 
         async def run() -> Any:
+            _OWNER_TASK.set(asyncio.current_task())
             return await (asyncio.wait_for(coro, timeout) if timeout is not None else coro)
 
         task: asyncio.Task[Any] = self._tasks.spawn(run(), name=f"delegate-{name}")
@@ -867,31 +936,28 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
     async def _input_loop(self) -> None:
         transport, conn = self.transport, self.connection
         discarding = False
-        try:
-            async for frame in transport.audio_input():
-                if self._taps:
-                    self._notify("user_audio", frame, now())
-                if self._processors is not None:
-                    frame = self._processors.process_capture(frame)
-                discard = self._discard_input()
-                if discard and not discarding and self.user_state == UserState.SPEAKING:
-                    # the user is mid-utterance: silence would end it and the engine would
-                    # answer the fragment (cancelling the uninterruptible speech): drop it
-                    try:
-                        await conn.clear_input()
-                    except Exception as exc:
-                        logger.warning("engine clear_input failed: %s", exc)
-                    self._set_user_state(UserState.LISTENING)
-                discarding = discard
-                if discard:
-                    # uninterruptible speech is playing: the engine must not hear the user
-                    frame = AudioFrame(
-                        bytes(len(frame.data)), frame.sample_rate, frame.channels, frame.timestamp
-                    )
-                await conn.send_audio(frame)
-        except Exception as exc:
-            logger.exception("audio input failed")
-            self.emit("error", SessionError(exc, recoverable=False))
+        # a failure here is fatal: see _on_loop_done
+        async for frame in transport.audio_input():
+            if self._taps:
+                self._notify("user_audio", frame, now())
+            if self._processors is not None:
+                frame = self._processors.process_capture(frame)
+            discard = self._discard_input()
+            if discard and not discarding and self.user_state == UserState.SPEAKING:
+                # the user is mid-utterance: silence would end it and the engine would
+                # answer the fragment (cancelling the uninterruptible speech): drop it
+                try:
+                    await conn.clear_input()
+                except Exception as exc:
+                    logger.warning("engine clear_input failed: %s", exc)
+                self._set_user_state(UserState.LISTENING)
+            discarding = discard
+            if discard:
+                # uninterruptible speech is playing: the engine must not hear the user
+                frame = AudioFrame(
+                    bytes(len(frame.data)), frame.sample_rate, frame.channels, frame.timestamp
+                )
+            await conn.send_audio(frame)
         if self.options.close_on_disconnect and not self._closing:
             self._schedule_close("user_disconnected")
 
@@ -946,8 +1012,9 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         resp.segments.append((start, frame.duration))
         if resp.first_audio_at is None:
             resp.first_audio_at = t
-            if resp.turn is not None and resp.turn.first_audio_at is None:
-                resp.turn.first_audio_at = t
+            turn = resp.turn
+            if turn is not None and not turn.closed and turn.first_audio_at is None:
+                turn.first_audio_at = t
             self._set_agent_state(AgentState.SPEAKING)
         if self._processors is not None:
             self._processors.process_render(frame)
@@ -1062,6 +1129,8 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         self.history.append(call)
         self.emit("conversation_item", ConversationItemAdded(call))
         self.emit("tool_call", ToolCalled(call))
+        if resp is not None and resp.turn is not None and not resp.turn.closed:
+            resp.turn.tool_calls += 1  # now: the turn may close before the round completes
         tool = find_tool(self.agent.tools, call.name)
         task = self._tasks.spawn(self._run_tool(call), name=f"tool-{call.name}")
         run = _ToolRun(call, tool, task)
@@ -1074,8 +1143,6 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
             native = self.connection.capabilities.tool_mode != "blocking"
             self._tasks.spawn(self._deliver_later(run, native=native), name=f"tool-{call.name}")
             if native:  # the model does not wait: nothing to answer now
-                if resp is not None and resp.turn is not None:
-                    resp.turn.tool_calls += 1
                 return
             # the model waits for an output: acknowledge now, deliver the result later
             ack: asyncio.Future[FunctionCallOutput] = asyncio.get_running_loop().create_future()
@@ -1105,6 +1172,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         return True
 
     async def _run_tool(self, call: FunctionCall) -> FunctionCallOutput:
+        _OWNER_TASK.set(asyncio.current_task())  # (this task's own context)
         ctx: ToolContext[UserdataT] = ToolContext(call=call, session=self, userdata=self.userdata)
         tools = self.agent.tools
         tool = find_tool(tools, call.name)
@@ -1212,8 +1280,6 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
             logger.warning(
                 "max_tool_steps (%d) reached; not responding", self.options.max_tool_steps
             )
-        if resp.turn is not None:
-            resp.turn.tool_calls += len(resp.tool_runs)
         handoff = self._take_handoff(resp.tool_runs)
         if respond:
             await self._wait_asides()  # the follow-up response would cut a filler off
@@ -1386,6 +1452,8 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         metadata = {"background_result": True, **meta}
         msg = self.history.add_message("user", text, metadata=metadata)
         self.emit("conversation_item", ConversationItemAdded(msg))
+        if scheduling != "silent":
+            self._tool_steps = 0  # the response to a background result is a new chain
         await self.connection.send_text(text, respond=scheduling != "silent")
 
     async def _wait_for_quiet(self, *, interrupt: bool) -> None:
@@ -1418,7 +1486,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         resp.finished = True
         self._settle(resp)
         await self._release_barge_in(resp)
-        if resp.turn is not None:
+        if resp.turn is not None and not resp.turn.closed:  # its metrics are already out
             resp.turn.agent_speech += resp.played(now())
         if resp.tool_calls:
             return  # the turn continues once the tool results are sent back
@@ -1854,7 +1922,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
             resp.message.content = [heard.strip()]
             resp.message.interrupted = True
         self.emit("interrupted", Interrupted(resp.response_id, resp.item_id, played))
-        if resp.turn is not None:
+        if resp.turn is not None and not resp.turn.closed:
             resp.turn.interrupted = True
             resp.turn.agent_speech += played
             self._close_turn(resp.turn)

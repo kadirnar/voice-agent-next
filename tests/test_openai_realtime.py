@@ -562,6 +562,30 @@ async def test_tool_calls_from_response_done_and_late_events() -> None:
             assert error.recoverable and "try again" in str(error.error)
 
 
+async def test_audio_deltas_split_mid_sample_are_reassembled() -> None:
+    """Odd-length audio deltas: the partial sample is carried, never dropped (#138)."""
+    import base64
+
+    import numpy as np
+
+    samples = (np.arange(-400, 400) * 41).astype(np.int16)
+    raw = samples.tobytes()
+    async with FakeRealtimeServer() as server:
+        engine = OpenAIRealtimeEngine(base_url=server.url, api_key=KEY)
+        async with connected(engine) as (_, rec):
+            await server.push({"type": "response.created",
+                               "response": {"id": "resp_o", "status": "in_progress"}})  # fmt: skip
+            for a, b in [(0, 1), (1, 334), (334, 335), (335, 1000), (1000, len(raw))]:
+                delta = base64.b64encode(raw[a:b]).decode()
+                await server.push({"type": "response.output_audio.delta", "response_id": "resp_o",
+                                   "item_id": "item_o", "delta": delta})  # fmt: skip
+            await server.push({"type": "response.done",
+                               "response": {"id": "resp_o", "status": "completed"}})  # fmt: skip
+            await rec.wait(lambda: rec.of(ResponseDone))
+            got = b"".join(a.frame.data for a in rec.of(ResponseAudio))
+            np.testing.assert_array_equal(np.frombuffer(got, dtype=np.int16), samples)
+
+
 async def test_barge_in_cancels_and_truncates_to_the_played_audio() -> None:
     long_answer = "This answer is long enough to keep the speaker busy for quite a while. " * 2
     async with FakeRealtimeServer(replies=[long_answer], realtime_factor=0.25) as server:

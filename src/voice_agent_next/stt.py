@@ -248,8 +248,11 @@ class STTStream(ABC):
         """
         if self._input.closed:
             return
-        tail = self._resampler.flush()
+        # drain, not flush: the stream continues after a forced finalization, so the
+        # resampler keeps its filter history (no inserted silence, no clock drift)
+        tail = self._resampler.drain()
         if tail:
+            self._audio_duration += tail.duration
             self._input.send_nowait(tail)
         self._flush_time = now()
         self._input.send_nowait(_FLUSH)

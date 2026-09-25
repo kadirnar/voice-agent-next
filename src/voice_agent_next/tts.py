@@ -250,6 +250,23 @@ class _AudioEmitter:
         if not self._events.closed:
             self._events.send_nowait(item)
 
+    def _collected(self) -> bool:
+        """``True`` while this stream's coroutine is being closed from outside its task.
+
+        That only happens when the stream was dropped without ``aclose()`` while its task
+        was still pending: the unreachable task is garbage-collected and its coroutine is
+        closed wherever the collector happens to run (e.g. in the middle of another
+        request). Nothing may be reported from there — at a random time, possibly into
+        another request's listeners — so an abandoned stream reports no metrics.
+        """
+        task: asyncio.Task[None] | None = getattr(self, "_task", None)
+        if task is None:  # still inside ``create_task`` (eager task factory)
+            return False
+        try:
+            return asyncio.current_task() is not task
+        except RuntimeError:  # no running loop: collected after the loop is gone
+            return True
+
     def _emit_metrics(self) -> None:
         if not self._metrics_enabled:
             return
@@ -314,11 +331,13 @@ class ChunkedStream(_AudioEmitter, ABC):
             self._cancelled = True
             raise
         except Exception as exc:
-            logger.exception("%s failed", type(self).__name__)
+            if not self._collected():
+                logger.exception("%s failed", type(self).__name__)
             self._error = exc
         finally:
             self._events.close()
-            self._emit_metrics()
+            if not self._collected():
+                self._emit_metrics()
 
     async def collect(self) -> AudioFrame:
         """Wait for the whole synthesis and return it as one frame."""
@@ -404,11 +423,13 @@ class SynthesizeStream(_AudioEmitter, ABC):
             self._cancelled = True
             raise
         except Exception as exc:
-            logger.exception("%s failed", type(self).__name__)
+            if not self._collected():
+                logger.exception("%s failed", type(self).__name__)
             self._error = exc
         finally:
             self._events.close()
-            self._emit_metrics()
+            if not self._collected():
+                self._emit_metrics()
 
     async def aclose(self) -> None:
         self._input.close()

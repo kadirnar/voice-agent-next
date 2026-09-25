@@ -24,7 +24,9 @@ async def get_weather(city: str) -> str:
 The model calls the tool and waits for the result. All calls of one response run at the
 same time. Once the response is done and every call has finished, the outputs go back to
 the engine, and the last one triggers the follow-up response. `max_tool_steps` limits
-how many rounds can follow each other.
+how many rounds can follow each other within one request chain: a user turn (spoken, or
+typed with `generate_reply(user_input=...)`), a `generate_reply()` or a background result
+that asks for a response starts a new chain with a fresh budget.
 
 Timeouts: `SessionOptions.tool_timeout` (30 s) and `function_tool(timeout=...)` both apply,
 and the smaller one wins. A timeout, an exception or invalid arguments become an error
