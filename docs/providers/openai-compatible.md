@@ -1,8 +1,8 @@
 # OpenAI-compatible LLM servers
 
-Local servers (Ollama, llama.cpp, vLLM, LM Studio) and fast hosted APIs (Groq, Cerebras,
-Together, OpenRouter, DeepSeek, Fireworks, SambaNova) all speak OpenAI's Chat Completions
-protocol. Each has a small preconfigured provider, a subclass of `OpenAICompatibleLLM`,
+Local servers (Ollama, llama.cpp, vLLM, LM Studio, mlx-lm) and fast hosted APIs (Groq,
+Cerebras, Together, OpenRouter, DeepSeek, Fireworks, SambaNova) all speak OpenAI's Chat
+Completions protocol. Each has a small preconfigured provider, a subclass of `OpenAICompatibleLLM`,
 which is itself an [`OpenAILLM`](openai.md). Streaming, tool calls, usage, error mapping and
 every option documented there apply to all of them.
 
@@ -29,6 +29,7 @@ session = AgentSession(
 | `llamacpp` | `LlamaCppLLM` | `http://127.0.0.1:8080/v1` | optional, `LLAMA_API_KEY` | the loaded model |
 | `vllm` | `VllmLLM` | `http://127.0.0.1:8000/v1` | optional, `VLLM_API_KEY` | the served model |
 | `lmstudio` | `LMStudioLLM` | `http://127.0.0.1:1234/v1` | optional, `LM_API_TOKEN` | the first listed LLM |
+| `mlx_lm` | `MLXLMServerLLM` | `http://127.0.0.1:8080/v1` | none | the server's `--model` |
 | `groq` | `GroqLLM` | `https://api.groq.com/openai/v1` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` |
 | `cerebras` | `CerebrasLLM` | `https://api.cerebras.ai/v1` | `CEREBRAS_API_KEY` | `gpt-oss-120b` |
 | `together` | `TogetherLLM` | `https://api.together.ai/v1` | `TOGETHER_API_KEY` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` |
@@ -117,10 +118,15 @@ Start the server in the app (Developer tab) or with `lms server start`, then use
 `llm="lmstudio/<model key>"`. Models load on first use. If authentication is enabled in
 the server settings, set `LM_API_TOKEN`.
 
+### mlx-lm (Apple silicon)
+
+`python -m mlx_lm.server --model mlx-community/Qwen3.5-4B-4bit`, then `llm="mlx_lm"` (the
+server's model) or `llm="mlx_lm/<model>"` (loaded on demand). Thinking is off by default.
+Set `MLX_LM_BASE_URL` for another address. See [MLX on Apple silicon](mlx.md#llm-mlx-lm-server-mlx_lm).
+
 ### Any other server
 
-`openai` plus `base_url` works with any other compatible server: `mlx_lm.server`,
-LocalAI, a LiteLLM proxy, other hosted APIs... The `OPENAI_API_KEY` is never sent to a custom
+`openai` plus `base_url` works with any other compatible server: LocalAI, a LiteLLM proxy, other hosted APIs... The `OPENAI_API_KEY` is never sent to a custom
 `base_url`, so pass `api_key=` when the server needs one:
 
 ```python
@@ -128,7 +134,7 @@ import os
 
 from voice_agent_next import create
 
-llm = create("llm", "openai/mlx-community/Qwen3-4B-4bit", base_url="http://127.0.0.1:8080/v1")
+llm = create("llm", "openai/my-model", base_url="http://127.0.0.1:8080/v1")
 llm = create(
     "llm",
     "openai/<model>",

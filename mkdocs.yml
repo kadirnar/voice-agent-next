@@ -145,6 +145,7 @@ nav:
           - faster-whisper: providers/faster_whisper.md
           - Kokoro: providers/kokoro.md
           - Pocket TTS: providers/pocket-tts.md
+          - MLX (Apple silicon): providers/mlx.md
           - Silero VAD: providers/silero.md
           - Smart Turn: providers/smart_turn.md
   - Transports:
