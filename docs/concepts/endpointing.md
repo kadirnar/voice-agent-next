@@ -355,6 +355,28 @@ For users who pause between sentences (dictating, thinking aloud, older users), 
 `min_endpointing_delay` towards 1 s — with preemptive TTS the reply is ready when the
 silence ends — or switch to dictation mode while they read something out.
 
+## Semantic end of turn (issue #124)
+
+The remaining premature replies come from pauses after phrases the audio detector is sure
+are complete. A text detector fused with it ([`fused`](../providers/lm-turn.md)) moves
+the endpointing decision where the words disagree with the sound:
+
+* the fused probability replaces the detector's in every policy (fixed, dynamic,
+  dictation); `EndpointingMetrics.audio_probability` / `text_probability` show both
+  halves;
+* "I would like to book a table," (audio 0.88) and, with a punctuating STT, "Please change
+  my flight." read as unfinished: the fused probability falls under the threshold and the
+  fixed policy waits `max_endpointing_delay`;
+* the text half runs while the STT flushes and the reply is prepared (a held speculative
+  reply starts on the audio verdict, before the text half returns), so a complete turn
+  costs little more than with Smart Turn alone.
+
+SEMANTIC_TABLE
+
+What it does not fix: "Where is my order?" is a complete question to the ear *and* to
+the reader. Only waiting longer after every complete question (a 1.0 s minimum, see
+above) avoids answering it before "I placed it last week."
+
 ## Limitations
 
 * The hold delay only learns from pauses the VAD reports (≥ its `min_silence_duration`),
@@ -365,4 +387,5 @@ silence ends — or switch to dictation mode while they read something out.
   cut-off guard after a confident commit). Keep echo cancellation on.
 * Changing the policy or dictation mode affects the next pause, not a pending one.
 * The dynamic policy does not look at the transcript itself (trailing "and", digits…).
-  That is the turn detector's job.
+  That is the turn detector's job: use a text detector
+  ([`fused`](../providers/lm-turn.md)) for that.

@@ -29,7 +29,10 @@ from voice_agent_next import AgentSession
 from voice_agent_next.turn import FusedTurnDetector
 
 session = AgentSession(
-    stt=..., llm=..., tts=..., vad="silero",
+    stt=...,
+    llm=...,
+    tts=...,
+    vad="silero",
     turn_detector=FusedTurnDetector(audio="smart_turn", text="lm_turn"),
 )
 ```
