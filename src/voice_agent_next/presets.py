@@ -50,8 +50,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AUTO_ORDER",
+    "FUSED_TURN_DETECTOR",
     "LOCAL_TURN_TAKING",
     "PRESETS",
+    "QWEN_NO_THINKING",
     "Environment",
     "Preset",
     "Problem",
@@ -193,6 +195,12 @@ final transcript and cost 100-230 ms, with no fewer premature replies: see
 ``docs/benchmarks/results.md``."""
 
 
+QWEN_NO_THINKING: Mapping[str, Any] = {"provider": "ollama/qwen3.5:4b", "reasoning_effort": "none"}
+"""Qwen3.5-4B on Ollama without its thinking phase, the LLM of ``local-gpu`` (issue #155).
+Ollama lets Qwen3.5 reason before every answer unless told otherwise (seconds of silence
+in a voice call); ``reasoning_effort: none`` turns it off."""
+
+
 def _local_turn_taking(*, preemptive: bool = True) -> dict[str, Any]:
     cascade = dict(LOCAL_TURN_TAKING["cascade"])
     if not preemptive:  # speculative calls to a paid LLM cost money when discarded
@@ -228,10 +236,10 @@ _PRESETS: tuple[Preset, ...] = (
     ),
     Preset(
         name="local-gpu",
-        summary="Local on an NVIDIA GPU: faster-whisper large-v3-turbo on CUDA, Ollama 9B, Kokoro",
+        summary="Local on an NVIDIA GPU: faster-whisper large-v3-turbo on CUDA, Ollama 4B, Kokoro",
         config={
             "stt": "faster-whisper/large-v3-turbo",
-            "llm": "ollama/qwen3.5:9b",
+            "llm": dict(QWEN_NO_THINKING),
             "tts": "kokoro/v1.0-fp16",
             "vad": "silero",
             "turn_detector": "smart_turn",
@@ -242,10 +250,17 @@ _PRESETS: tuple[Preset, ...] = (
             "(CUDA float16) and the end-of-turn delay reaches its 400 ms floor; v2v p50 went "
             "from 1,523 to 969 ms (docs/hardware.md). large-v3-turbo keeps 99 languages at "
             "GPU speed (note 03 §9.2 names it the multilingual fallback of the 16 GB "
-            "profile). Qwen3.5-9B is note 03's LLM for a 16 GB GPU (tool calling: vendor "
-            "BFCL-V4 66.1, TAU2 79.1); Ollama puts it on the GPU. Kokoro stays the TTS (it "
-            "runs on CUDA too with onnxruntime-gpu, see docs/hardware.md). "
-            f"{_TURN_TAKING}). {_TURN_TAKING_NOTE}"
+            "profile). Qwen3.5-4B with thinking off (#155, docs/benchmarks/results.md): 64 % "
+            "pass@1 on the T6 tool-use smoke suite against 27 % for LFM2.5-1.2B, 35 % on T5 "
+            "(Big Bench Audio, 20 items) against 10 %, for ~60 ms TTFT on the GPU; its "
+            "longer first clauses cost ~0.4-0.6 s of voice-to-voice latency while Kokoro "
+            "renders them on the CPU. LFM2.5-2.6B always reasons first (~1 s TTFT, 2.7 s "
+            "v2v). `--llm '{provider: ollama/qwen3.5:9b, reasoning_effort: none}'` for note "
+            "03's 16 GB pick (not measured). Kokoro stays the TTS (it runs on CUDA too with "
+            "onnxruntime-gpu, see docs/hardware.md). "
+            f"{_TURN_TAKING}). Smart Turn alone: the fused detector waits for the batch "
+            "transcript here, +100-230 ms end-of-turn delay and no fewer premature replies "
+            f"(#155). {_TURN_TAKING_NOTE}"
         ),
         where="local",
         platforms=("linux", "win32"),
@@ -256,7 +271,7 @@ _PRESETS: tuple[Preset, ...] = (
         summary="Apple silicon on MLX: Parakeet streaming STT, mlx-lm (or Ollama), Kokoro",
         config={
             "stt": "mlx/parakeet-tdt-0.6b-v3",
-            "llm": ["mlx_lm/mlx-community/Qwen3.5-4B-4bit", "ollama/qwen3.5:4b"],
+            "llm": ["mlx_lm/mlx-community/Qwen3.5-4B-4bit", dict(QWEN_NO_THINKING)],
             "tts": "mlx_audio/kokoro",
             "vad": "silero",
             "turn_detector": "smart_turn",
@@ -693,6 +708,25 @@ def _ollama_problems(
     return []
 
 
+_OLLAMA_THINKERS = ("qwen3", "lfm2.5-thinking", "lfm2.5-2.6b", "deepseek-r1")
+"""Ollama model families that reason before answering unless told not to."""
+
+
+def _thinking_note(key: str, spec: Any) -> str | None:
+    """A note when an Ollama model that thinks by default runs with its thinking on."""
+    if key != "llm" or not isinstance(spec, (str, Mapping)):
+        return None
+    name, model, options = _split(spec)
+    if name != "ollama" or not model or "reasoning_effort" in options:
+        return None
+    if not any(family in model.lower() for family in _OLLAMA_THINKERS):
+        return None
+    return (
+        f"llm: {model} reasons before it answers (seconds of silence per turn); for voice "
+        f"use `{{provider: ollama/{model}, reasoning_effort: none}}` if the model allows it"
+    )
+
+
 def _mlx_lm_problems(
     key: str, model: str | None, options: Mapping[str, Any], env: Environment
 ) -> list[Problem]:
@@ -722,6 +756,7 @@ def _check_components(
             continue
         members = _members(spec)
         results = [(m, _member_problems(key, m, env)) for m in members]
+        notes += [n for m in members if (n := _thinking_note(key, m))]
         if len(members) == 1:
             problems += results[0][1]
             continue

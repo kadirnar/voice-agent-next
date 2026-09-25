@@ -234,9 +234,9 @@ def test_ollama_server_and_model_checks() -> None:
     assert any("ollama serve" in fix for fix in down.fixes())
     assert "ollama pull LiquidAI/lfm2.5-1.2b-instruct" in down.fixes()
 
-    no_model = check_preset("local-gpu", env=fake_env(ollama=["qwen3.5:4b"], gpus=["RTX"]))
-    assert [p.message for p in no_model.problems] == ["Ollama has no model qwen3.5:9b"]
-    assert no_model.fixes() == ["ollama pull qwen3.5:9b"]
+    no_model = check_preset("local-gpu", env=fake_env(ollama=["qwen3.5:9b"], gpus=["RTX"]))
+    assert [p.message for p in no_model.problems] == ["Ollama has no model qwen3.5:4b"]
+    assert no_model.fixes() == ["ollama pull qwen3.5:4b"]
 
     # ":latest" is implied, names are case-insensitive
     ok = fake_env(ollama=["liquidai/LFM2.5-1.2b-instruct:latest"])
@@ -260,6 +260,35 @@ def test_fused_turn_detector_halves_are_checked() -> None:
     assert check_config({"turn_detector": custom}, env=fake_env(missing=["tokenizers"])).ready
     unknown = check_config({"turn_detector": {"provider": "fused", "text": "nope"}}, env=fake_env())
     assert not unknown.ready and unknown.problems[0].component == "turn_detector"
+
+
+def test_local_llm_defaults() -> None:
+    # #155: LFM2.5-1.2B stays on the CPU preset (latency), Qwen3.5-4B without its thinking
+    # phase on the GPU (T5/T6 quality); the Ollama failover of `apple` does not think either
+    assert PRESETS["local-cpu"].config["llm"] == "ollama/LiquidAI/lfm2.5-1.2b-instruct"
+    gpu_llm = {"provider": "ollama/qwen3.5:4b", "reasoning_effort": "none"}
+    assert PRESETS["local-gpu"].config["llm"] == gpu_llm
+    assert PRESETS["apple"].config["llm"][1] == gpu_llm
+    assert PRESETS["local-gpu"].config["turn_detector"] == "smart_turn"
+    ready = check_preset("local-gpu", env=fake_env(gpus=["RTX"]))
+    assert ready.ready, ready.explain()
+    assert ready.config["llm"] == gpu_llm
+    assert not any("reasons before" in note for note in ready.notes)
+    cfg = load_preset("local-gpu", env=fake_env(gpus=["RTX"]))
+    assert cfg.llm == gpu_llm
+
+
+def test_thinking_models_get_a_note() -> None:
+    env = fake_env(gpus=["RTX"])
+    thinking = check_preset("local-gpu", overrides={"llm": "ollama/qwen3.5:9b"}, env=env)
+    assert thinking.ready  # a note, not a problem
+    assert any(
+        "qwen3.5:9b reasons before it answers" in n and "reasoning_effort: none" in n
+        for n in thinking.notes
+    )
+    quiet = {"provider": "ollama/qwen3.5:9b", "reasoning_effort": "none"}
+    assert not any("reasons" in n for n in check_config({"llm": quiet}, env=fake_env()).notes)
+    assert not any("reasons" in n for n in check_preset("local-cpu", env=fake_env()).notes)
 
 
 def test_ollama_url_follows_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
