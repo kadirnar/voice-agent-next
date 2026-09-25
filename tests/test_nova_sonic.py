@@ -479,6 +479,10 @@ async def test_connection_limit_rotates_before_it_is_hit(
     await wait_for(lambda: any(e.status == "reconnected" for e in events.of(EngineStatus)))
     first, second = fake.sessions
     assert first.graceful  # retired with the closing sequence, before the limit
+    # the new connection's age counts from when its stream opened (prepared ahead)
+    link = conn._link
+    assert link is not None and isinstance(conn.session, NovaSonicSessionConnection)
+    assert link.opened_at == conn.session.opened_at
     assert second.system == "Be nice."
     assert ("ASSISTANT", "Hello Ada") in second.history
     # the conversation goes on on the new connection

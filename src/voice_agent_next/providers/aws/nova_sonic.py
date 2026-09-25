@@ -711,6 +711,15 @@ class NovaSonicConnection(RotatingConnection):
             conn.on_finished = self._on_session_finished
         return link
 
+    async def _deliver(self, link: _Link) -> float:
+        replayed = await super()._deliver(link)
+        conn = link.conn
+        if isinstance(conn, NovaSonicSessionConnection):
+            # the 8-minute clock started when the stream opened, not at the switch: a
+            # connection prepared ahead has less time left than a fresh one
+            link.opened_at = conn.opened_at
+        return replayed
+
     def _on_session_finished(self, session: NovaSonicSessionConnection) -> None:
         self._closed_usage = _usage_sum(self._closed_usage, session.usage)
 
@@ -764,6 +773,8 @@ class NovaSonicSessionConnection(EngineConnection):
         self.prompt_name = str(uuid.uuid4())
         self.audio_content = str(uuid.uuid4())
         self.session_id: str | None = None
+        self.opened_at = now()
+        """When the stream was opened (the connection limit counts from here)."""
         """``sessionId`` reported by the service (from the first output event)."""
         self.usage = EngineUsage()
         """Cumulative token usage of this connection (latest ``usageEvent`` totals)."""
@@ -823,6 +834,7 @@ class NovaSonicSessionConnection(EngineConnection):
             raise
         except Exception as exc:
             raise map_aws_error(exc, e.provider) from exc
+        self.opened_at = now()
         self._reader = asyncio.create_task(self._read(self._stream), name="nova-sonic-read")
         await self._send_setup()
         self._started = True
