@@ -1276,6 +1276,34 @@ wheels = [
 ]
 
 [[package]]
+name = "hatch-fancy-pypi-readme"
+version = "25.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "hatchling" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f3/0f/aed57c301f339936eb91cb4d8c1e5088a101081854bd3ec18a889df32365/hatch_fancy_pypi_readme-25.1.0.tar.gz", hash = "sha256:9c58ed3dff90d51f43414ce37009ad1d5b0f08ffc9fc216998a06380f01c0045", size = 29701, upload-time = "2025-05-01T10:34:42.989Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/58/b4/ad71e051b34f1935783de37beffee16e343ff2514b204dc515f9e939d4af/hatch_fancy_pypi_readme-25.1.0-py3-none-any.whl", hash = "sha256:ce0134c40d63d874ac48f48ccc678b8f3b62b8e50e9318520d2bffc752eedaf3", size = 10046, upload-time = "2025-05-01T10:34:41.204Z" },
+]
+
+[[package]]
+name = "hatchling"
+version = "1.32.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pathspec" },
+    { name = "pluggy" },
+    { name = "tomlkit" },
+    { name = "trove-classifiers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f6/97/b5312f01a8c6daf729a9d272dd442e0c546dbcc630495788786c4b567ed0/hatchling-1.32.4.tar.gz", hash = "sha256:c4468f73144c054d2aab4ef0f0378c43b9878bf07f8ffd6b79690e970d375f07", size = 58065, upload-time = "2026-09-20T22:48:45.398Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5f/80/91f51f439c05d4ec4623c22928ce16a938d6d793bf709477830823497859/hatchling-1.32.4-py3-none-any.whl", hash = "sha256:08ecf7548fb48205e7f213d70c71e67b8271b7242093dc3f1da578b42c734a2c", size = 78748, upload-time = "2026-09-20T22:48:44.19Z" },
+]
+
+[[package]]
 name = "hf-xet"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1643,7 +1671,7 @@ name = "joblib"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cloudpickle" },
+    { name = "cloudpickle", marker = "python_full_version < '3.14' or (python_full_version == '3.14.*' and platform_machine != 'x86_64' and extra == 'extra-16-voice-agent-next-chatterbox') or (python_full_version == '3.14.*' and platform_machine != 'x86_64' and extra != 'extra-16-voice-agent-next-pocket-tts') or (python_full_version == '3.14.*' and platform_machine != 'x86_64' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version >= '3.15' and platform_machine != 'x86_64' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (python_full_version >= '3.15' and platform_machine != 'x86_64' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version >= '3.15' and platform_machine != 'x86_64' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version == '3.14.*' and sys_platform != 'darwin' and extra == 'extra-16-voice-agent-next-chatterbox') or (python_full_version == '3.14.*' and sys_platform != 'darwin' and extra != 'extra-16-voice-agent-next-pocket-tts') or (python_full_version == '3.14.*' and sys_platform != 'darwin' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version >= '3.15' and sys_platform != 'darwin' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (python_full_version >= '3.15' and sys_platform != 'darwin' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version >= '3.15' and sys_platform != 'darwin' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts') or (platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d5/1d/537ab090f302b838943a1b56497dd53059b9a9b46a074936470173a2e207/joblib-1.6.0.tar.gz", hash = "sha256:2ccc96785b12046c08fd6d55839c12857831b54a3c1673ffadd2f04bfc4eda03", size = 327903, upload-time = "2026-08-31T09:39:04.122Z" }
 wheels = [
@@ -1655,11 +1683,11 @@ name = "kokoro-onnx"
 version = "0.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "espeakng-loader" },
+    { name = "espeakng-loader", marker = "python_full_version < '3.14' or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts')" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts')" },
-    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts')" },
-    { name = "onnxruntime" },
-    { name = "phonemizer" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14') or (python_full_version < '3.12' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (python_full_version < '3.12' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version < '3.12' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version >= '3.14' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (python_full_version >= '3.14' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version >= '3.14' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts')" },
+    { name = "onnxruntime", marker = "python_full_version < '3.14' or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts')" },
+    { name = "phonemizer", marker = "python_full_version < '3.14' or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6b/ef/b58dedba0a1417f16352352787fbcfcbaa0b907e284c2ea3ebaf5541109a/kokoro_onnx-0.6.1.tar.gz", hash = "sha256:7bbdb66dd53775f71088a99999a9aefdad240740daf54cb09410d8bb1e294e35", size = 69799, upload-time = "2026-08-19T00:40:37.021Z" }
 wheels = [
@@ -2155,14 +2183,14 @@ name = "moonshine-voice"
 version = "0.1.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "filelock" },
-    { name = "google-crc32c" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts')" },
-    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts')" },
-    { name = "platformdirs" },
-    { name = "requests" },
-    { name = "sounddevice" },
-    { name = "tqdm" },
+    { name = "filelock", marker = "python_full_version >= '3.15' or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts') or platform_machine != 'x86_64' or sys_platform != 'darwin'" },
+    { name = "google-crc32c", marker = "python_full_version >= '3.15' or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts') or platform_machine != 'x86_64' or sys_platform != 'darwin'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and platform_machine != 'x86_64') or (python_full_version < '3.12' and sys_platform != 'darwin') or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts')" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and platform_machine != 'x86_64') or (python_full_version >= '3.15' and platform_machine == 'x86_64' and sys_platform == 'darwin') or (python_full_version < '3.12' and platform_machine != 'x86_64' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (python_full_version < '3.12' and platform_machine != 'x86_64' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version < '3.12' and platform_machine != 'x86_64' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version < '3.15' and platform_machine == 'x86_64' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (python_full_version < '3.15' and platform_machine == 'x86_64' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version < '3.15' and platform_machine == 'x86_64' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version >= '3.12' and sys_platform != 'darwin') or (sys_platform != 'darwin' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (sys_platform != 'darwin' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (sys_platform != 'darwin' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts')" },
+    { name = "platformdirs", marker = "python_full_version >= '3.15' or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts') or platform_machine != 'x86_64' or sys_platform != 'darwin'" },
+    { name = "requests", marker = "python_full_version >= '3.15' or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts') or platform_machine != 'x86_64' or sys_platform != 'darwin'" },
+    { name = "sounddevice", marker = "python_full_version >= '3.15' or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts') or platform_machine != 'x86_64' or sys_platform != 'darwin'" },
+    { name = "tqdm", marker = "python_full_version >= '3.15' or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts') or platform_machine != 'x86_64' or sys_platform != 'darwin'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/86/2a/9eca2f000e4990315d18aa360c6eb679417b29252e6307c273bcbef38461/moonshine_voice-0.1.5-py3-none-macosx_15_0_arm64.whl", hash = "sha256:9866b1956d12fff11923ad42f1140bcb314bf05bf8d8576fb7b3aa819ec40e51", size = 18589534, upload-time = "2026-08-24T20:50:28.184Z" },
@@ -2639,7 +2667,7 @@ name = "nvidia-cublas-cu12"
 version = "12.9.2.10"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cuda-nvrtc-cu12" },
+    { name = "nvidia-cuda-nvrtc-cu12", marker = "python_full_version >= '3.15' or (python_full_version < '3.15' and platform_machine != 'x86_64' and extra == 'extra-16-voice-agent-next-chatterbox') or (python_full_version < '3.15' and platform_machine != 'x86_64' and extra != 'extra-16-voice-agent-next-pocket-tts') or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (python_full_version < '3.15' and extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts') or sys_platform != 'darwin'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f7/a2/c96163a0fff1839c0c9548bbdeae7b853b867009e33b9b9264adc238b1cf/nvidia_cublas_cu12-12.9.2.10-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:5572131a59c3eebeeb1c4c8144f772d49372c20124916e072a0e3fc30df421d5", size = 575012079, upload-time = "2026-04-08T18:51:47.303Z" },
@@ -2981,10 +3009,10 @@ name = "phonemizer"
 version = "3.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "attrs" },
-    { name = "dlinfo" },
-    { name = "joblib" },
-    { name = "typing-extensions" },
+    { name = "attrs", marker = "python_full_version < '3.14' or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts')" },
+    { name = "dlinfo", marker = "python_full_version < '3.14' or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts')" },
+    { name = "joblib", marker = "python_full_version < '3.14' or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.14' or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-pocket-tts') or (extra == 'extra-16-voice-agent-next-chatterbox' and extra == 'extra-16-voice-agent-next-qwen-tts') or (extra == 'extra-16-voice-agent-next-pocket-tts' and extra == 'extra-16-voice-agent-next-qwen-tts')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/bc/7d/5a96ddb130552f6365a090b5fd12ace803a95a858e3f67258f2ad13dc51f/phonemizer-3.4.0.tar.gz", hash = "sha256:e13231980c50bc671ec0466379ba027260ad9d61929952d8ae9665b3d0f251eb", size = 93535, upload-time = "2026-07-31T15:53:17.329Z" }
 wheels = [
@@ -4898,6 +4926,15 @@ wheels = [
 ]
 
 [[package]]
+name = "tomlkit"
+version = "0.15.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/94/96/e07752635b98536177fa1f37671c8f3cdde2e724c6bcf6034b2cfb571565/tomlkit-0.15.1.tar.gz", hash = "sha256:e25bbf38843005246210a12982776f27f99cb9be67160e14434d0c0d21ee1e97", size = 180129, upload-time = "2026-07-17T01:48:04.562Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/13/bc/8c13eb66537dce1d2bd3a57132902f38d0e7f5bb46fa9f4daed9fe9d76ee/tomlkit-0.15.1-py3-none-any.whl", hash = "sha256:177a05aece5a8ca5266fd3c448abb47b8d352f09d477d3ca8332db4d89b24304", size = 49449, upload-time = "2026-07-17T01:48:05.728Z" },
+]
+
+[[package]]
 name = "torch"
 version = "2.14.0"
 source = { registry = "https://pypi.org/simple" }
@@ -5212,6 +5249,15 @@ wheels = [
 ]
 
 [[package]]
+name = "trove-classifiers"
+version = "2026.9.21.13"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/bf/93/af436dfaa845cab5d96f0adbc1e4f3730532d37fa249e4eb796fb1d7fc82/trove_classifiers-2026.9.21.13.tar.gz", hash = "sha256:0a9ebc8d4e2f3e8a22848c5258033035bec17a3012ac3fea16dbaa764489eb71", size = 17085, upload-time = "2026-09-21T13:29:07.301Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/30/81/0da8afb52a71d0a4f2bd3152357b1a441e393b286374802b9d3addab4ab5/trove_classifiers-2026.9.21.13-py3-none-any.whl", hash = "sha256:8b1ff4f9c191b1040b71c37f1e445ab99732911e3cd91de52838453a854d7a17", size = 14232, upload-time = "2026-09-21T13:29:06.123Z" },
+]
+
+[[package]]
 name = "truststore"
 version = "0.10.4"
 source = { registry = "https://pypi.org/simple" }
@@ -5433,6 +5479,8 @@ webrtc = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "hatch-fancy-pypi-readme" },
+    { name = "hatchling" },
     { name = "mypy" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-sdk" },
@@ -5504,6 +5552,8 @@ provides-extras = ["resample", "audio", "aec", "onnx", "cuda", "silero", "smart-
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "hatch-fancy-pypi-readme", specifier = ">=25.1" },
+    { name = "hatchling", specifier = ">=1.27" },
     { name = "mypy", specifier = ">=1.11" },
     { name = "opentelemetry-api", specifier = ">=1.27" },
     { name = "opentelemetry-sdk", specifier = ">=1.27" },
