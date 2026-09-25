@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from tests.test_session import Recorder, mock_cascade, speak, wait_for
+from tests.timing import LoopLag, assert_delay
 from voice_agent_next import Agent, AudioFrame, ChatMessage
 from voice_agent_next.events import InputCommitted, InputSpeechStopped
 from voice_agent_next.metrics import TurnMetrics
@@ -112,16 +113,17 @@ async def test_speech_end_time_comes_from_the_stt_without_a_vad() -> None:
     session = mock_cascade(stt=stt, vad=None, llm=MockLLM(responses=["Hi."]))
     rec = Recorder(session)
     transport = LoopbackTransport(realtime_playout=True)
-    await session.start(Agent("x"), transport)
-    stops = collect(session, InputSpeechStopped)
-    await transport.play_user_audio(synth_speech(0.5, 16_000))  # real time
-    await transport.play_user_audio(AudioFrame.silence(1.2, 16_000))
-    await wait_for(lambda: bool(rec.turn_metrics()), 5)
+    async with LoopLag() as lag:
+        await session.start(Agent("x"), transport)
+        stops = collect(session, InputSpeechStopped)
+        await transport.play_user_audio(synth_speech(0.5, 16_000))  # real time
+        await transport.play_user_audio(AudioFrame.silence(1.2, 16_000))
+        await wait_for(lambda: bool(rec.turn_metrics()), 5)
     await session.aclose()
     assert stops[0].audio_time == pytest.approx(0.5, abs=0.05)  # the STT's end_time
     m: TurnMetrics = rec.turn_metrics()[0]
     # the turn ended 0.8 s after speech: endpointing delay is measured from the real speech end
-    assert m.end_of_turn_delay == pytest.approx(0.8, abs=0.15)
+    assert_delay(m.end_of_turn_delay, 0.8, 0.15, lag)
 
 
 class WordTTS(MockTTS):

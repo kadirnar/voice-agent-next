@@ -64,3 +64,17 @@ class LoopLag:
         self._task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
+
+
+def assert_delay(
+    measured: float | None, designed: float, tol: float, lag: LoopLag | float = 0.0
+) -> None:
+    """``measured`` is the ``designed`` delay within ``tol``, and above it also within how
+    late this run's event loop was (``lag``): timers never fire much early, but a stalled
+    runner fires them late."""
+    late = lag.max if isinstance(lag, LoopLag) else lag
+    assert measured is not None
+    lo, hi = designed - tol, designed + tol + late
+    assert lo <= measured <= hi, (
+        f"{measured:.3f} s is not {designed:g} ± {tol:g} s (+ {late:.3f} s of loop lag)"
+    )

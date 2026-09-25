@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from tests.timing import LoopLag, assert_delay
 from voice_agent_next import Agent, AgentSession, AgentState, ChatMessage, function_tool
 from voice_agent_next.audio import AudioFrame
 from voice_agent_next.chat import FunctionCallOutput
@@ -1071,16 +1072,17 @@ async def test_session_voice_to_voice_matches_external_measurement(
     session = AgentSession(engine_for(server))
     rec = Recorder(session)
     transport = LoopbackTransport(realtime_playout=True)
-    await session.start(Agent("x"), transport)
-    await transport.play_user_audio(synth_speech(0.6, 16_000))  # real time
-    speech_end = now()
-    await transport.play_user_audio(AudioFrame.silence(1.0, 16_000))
-    await wait_for(lambda: bool(rec.turn_metrics()), 5)
+    async with LoopLag() as lag:
+        await session.start(Agent("x"), transport)
+        await transport.play_user_audio(synth_speech(0.6, 16_000))  # real time
+        speech_end = now()
+        await transport.play_user_audio(AudioFrame.silence(1.0, 16_000))
+        await wait_for(lambda: bool(rec.turn_metrics()), 5)
     await session.aclose()
 
     m = rec.turn_metrics()[0]
     heard = transport.played_log[0].start_time - speech_end  # what the simulated user measured
-    assert m.voice_to_voice == pytest.approx(0.4, abs=0.15)  # the fake server's VAD silence
+    assert_delay(m.voice_to_voice, 0.4, 0.15, lag)  # the fake server's VAD silence
     assert m.voice_to_voice == pytest.approx(heard, abs=0.08)
     (engine_metrics,) = [x for x in rec.of("metrics") if isinstance(x, EngineMetrics)]
     assert engine_metrics.ttfb == pytest.approx(m.voice_to_voice, abs=0.05)  # from speech end

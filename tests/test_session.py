@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from tests.timing import LoopLag, assert_delay
 from voice_agent_next import (
     Agent,
     AgentSession,
@@ -450,17 +451,18 @@ async def test_voice_to_voice_latency_matches_external_measurement(kind: str) ->
         expected = 0.4 + 0.3  # VAD silence + LLM time-to-first-token
     rec = Recorder(session)
     transport = LoopbackTransport(realtime_playout=True)
-    await session.start(Agent("x"), transport)
-    await transport.play_user_audio(synth_speech(0.6, 16_000))  # real time
-    speech_end = now()
-    await transport.play_user_audio(AudioFrame.silence(1.5, 16_000))
-    await wait_for(lambda: bool(rec.turn_metrics()), 5)
+    async with LoopLag() as lag:
+        await session.start(Agent("x"), transport)
+        await transport.play_user_audio(synth_speech(0.6, 16_000))  # real time
+        speech_end = now()
+        await transport.play_user_audio(AudioFrame.silence(1.5, 16_000))
+        await wait_for(lambda: bool(rec.turn_metrics()), 5)
     await session.aclose()
     m = rec.turn_metrics()[0]
     heard = transport.played_log[0].start_time - speech_end  # what the simulated user measured
-    assert m.voice_to_voice == pytest.approx(expected, abs=0.15)
+    assert_delay(m.voice_to_voice, expected, 0.15, lag)
     assert m.voice_to_voice == pytest.approx(heard, abs=0.08)
-    assert m.end_of_turn_delay is not None and m.end_of_turn_delay == pytest.approx(0.4, abs=0.1)
+    assert_delay(m.end_of_turn_delay, 0.4, 0.1, lag)
 
 
 async def test_cascade_turn_audio_keeps_pauses_and_audio_detector_runs_before_final() -> None:
