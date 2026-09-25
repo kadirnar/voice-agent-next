@@ -1,0 +1,192 @@
+# T6 tool-use smoke set (van bench tools --scenarios smoke). Pinned: the manifest records
+# the suite hash and a hash per scenario; bump `version` when anything below changes.
+#
+# Caller speech is synthetic by default (offline); `van bench tools --caller-tts <spec>`
+# renders the same text with a real TTS for systems that transcribe it. Order and booking
+# numbers are written the way a caller says them ("one oh four two"): the agent has to
+# turn them into the digits the tools need.
+name: tools-smoke
+version: 1
+description: >-
+  Eleven scripted customer-service calls (3-4 turns each) against deterministic mock tools:
+  order status, cancellation (allowed and refused by policy), a slow refund, an address
+  change, table bookings (free slot and an alternative time), a booking cancellation, an
+  account look-up by a spoken email, an escalation and a question that needs no tool.
+today: "2026-09-29"
+instructions: |-
+  You are the phone assistant of Northwind, an online store that also runs the Northwind
+  Bistro restaurant. Today is {today}. Your replies are spoken aloud: keep them to one or
+  two short sentences, without lists or markdown. Use the tools to look up and change
+  orders and table bookings. Never guess order details, and never say that you did
+  something unless a tool confirmed it. Ask for missing details. Before cancelling an
+  order, check it and ask the customer to confirm. The store's phone line and the bistro
+  are open from 9 am to 9 pm every day.
+sample_rate: 16000
+loudness_dbfs: -20.0
+lead_in: 0.5
+stimuli: synthetic
+reply_timeout: 12.0
+gap_after_reply: 1.0
+max_reply: 60.0
+tool_delay: 0.3
+database:
+  orders:
+    "1042": {status: shipped, items: [wireless headphones], total: 89.99,
+             delivery_date: "2026-10-02", address: "4 Elm Road, Springfield"}
+    "2077": {status: processing, items: [coffee grinder], total: 45.5,
+             delivery_date: "2026-10-06", address: "4 Elm Road, Springfield"}
+    "3150": {status: delivered, items: [blender], total: 64.0, delivery_date: "2026-09-25",
+             address: "77 Birch Lane, Riverside"}
+    "4410": {status: pending, items: [desk lamp], total: 32.0, delivery_date: "2026-10-08",
+             address: "9 Pine Avenue, Springfield"}
+    "5521": {status: shipped, items: [running shoes], total: 120.0,
+             delivery_date: "2026-10-01", address: "15 Cedar Drive, Lakeview"}
+  customers:
+    C-100: {name: Jane Doe, email: jane.doe@example.com, orders: ["5521"]}
+    C-200: {name: Sam Carter, email: sam.carter@example.com, orders: ["1042", "2077"]}
+  bookings:
+    "5170": {name: Alex Kim, date: "2026-10-05", time: "19:30", party_size: 2,
+             status: confirmed}
+  availability:
+    "2026-10-03 18:00": 1
+    "2026-10-03 19:00": 2
+    "2026-10-04 18:00": 1
+    "2026-10-04 20:00": 0
+    "2026-10-04 21:00": 3
+    "2026-10-05 19:30": 0
+  transfers: 0
+scenarios:
+  - id: order-status
+    tags: [read]
+    tools: [lookup_order]
+    turns:
+      - text: "Hi, I'd like to check on my order."
+      - text: "The order number is one oh four two."
+        expect_calls: [{name: lookup_order, args: {order_id: "1042"}}]
+      - text: "Okay. And when will it arrive?"
+      - text: "Great, thanks. That's all."
+    expect_said:
+      - [shipped, on its way, on the way, in transit]
+      - [october 2, october second, oct 2, 2nd of october, "10-02"]
+
+  - id: cancel-order
+    tags: [write, confirmation]
+    tools: [lookup_order, cancel_order]
+    turns:
+      - text: "Hello, I need to cancel an order."
+      - text: "It's order two oh seven seven."
+        expect_calls: [{name: lookup_order, args: {order_id: "2077"}, optional: true}]
+      - text: "Yes, please cancel it. I found it cheaper somewhere else."
+        expect_calls: [{name: cancel_order, args: {order_id: "2077"}}]
+      - text: "Thank you, bye."
+    expect_said: [[cancel]]
+
+  - id: cancel-shipped
+    tags: [policy]
+    tools: [lookup_order, cancel_order]
+    turns:
+      - text: "Hi, please cancel my order one oh four two."
+        expect_calls: [{name: lookup_order, args: {order_id: "1042"}}]
+      - text: "Oh. Are you sure you can't cancel it anymore?"
+      - text: "Okay, I understand. Goodbye."
+    expect_said: [[shipped, already been sent, on its way, on the way, in transit]]
+
+  - id: refund-slow
+    tags: [write, slow-tool, filler]
+    tools: [lookup_order, request_refund]
+    turns:
+      - text: "Hi, my blender arrived broken."
+      - text: "The order number is three one five oh."
+        expect_calls: [{name: lookup_order, args: {order_id: "3150"}, optional: true}]
+      - text: "I'd like a refund, please."
+        expect_calls: [{name: request_refund, args: {order_id: "3150"}}]
+      - text: "Thanks for your help."
+    expect_said: [["64", sixty-four, sixty four]]
+
+  - id: update-address
+    tags: [write, entity]
+    tools: [lookup_order, update_address]
+    turns:
+      - text: "I need to change the delivery address for my order."
+      - text: "The order number is four four one oh."
+        expect_calls: [{name: lookup_order, args: {order_id: "4410"}, optional: true}]
+      - text: "The new address is 12 Oak Street, Springfield."
+        expect_calls:
+          - {name: update_address, args: {order_id: "4410", address: "12 Oak Street, Springfield"}}
+      - text: "Perfect, thank you."
+
+  - id: book-table
+    tags: [write, entity, slot-filling]
+    tools: [check_availability, book_table]
+    turns:
+      - text: "Hi, I'd like to book a table for four people."
+      - text: "On October 3rd at 7 pm."
+        expect_calls:
+          - name: check_availability
+            args: {date: "2026-10-03", time: "19:00", party_size: 4}
+            optional: true
+      - text: "The name is Maria Lopez."
+        expect_calls:
+          - name: book_table
+            args: {name: Maria Lopez, date: "2026-10-03", time: "19:00", party_size: 4}
+      - text: "That's all, thank you."
+
+  - id: book-alternative
+    tags: [write, slot-filling]
+    tools: [check_availability, book_table]
+    turns:
+      - text: "Can I get a table for two on October 4th at 8 pm?"
+        expect_calls:
+          - {name: check_availability, args: {date: "2026-10-04", time: "20:00", party_size: 2}}
+      - text: "Hmm. What about 9 pm then?"
+        expect_calls:
+          - name: check_availability
+            args: {date: "2026-10-04", time: "21:00", party_size: 2}
+            optional: true
+      - text: "Great, please book it under Sam Carter."
+        expect_calls:
+          - name: book_table
+            args: {name: Sam Carter, date: "2026-10-04", time: "21:00", party_size: 2}
+      - text: "Thanks, bye."
+
+  - id: cancel-booking
+    tags: [write]
+    tools: [cancel_booking]
+    turns:
+      - text: "Hi, I need to cancel my dinner reservation."
+      - text: "The booking number is five one seven oh."
+      - text: "Yes, please cancel it."
+        expect_calls: [{name: cancel_booking, args: {booking_id: "5170"}}]
+      - text: "Thanks, goodbye."
+
+  - id: email-lookup
+    tags: [read, entity]
+    tools: [lookup_customer, lookup_order]
+    turns:
+      - text: "Hi, I forgot my order number. Can you find my order?"
+      - text: "Sure, my email is jane dot doe at example dot com."
+        expect_calls:
+          - {name: lookup_customer, args: {email: jane.doe@example.com}}
+          - {name: lookup_order, args: {order_id: "5521"}}
+      - text: "When will it arrive?"
+      - text: "Thank you!"
+    expect_said:
+      - [october 1, october first, oct 1, 1st of october, "10-01"]
+
+  - id: escalate
+    tags: [write, handoff]
+    tools: [lookup_order, transfer_to_human]
+    turns:
+      - text: "I was charged twice for my order and I want to talk to a person."
+      - text: "Yes, please transfer me to someone."
+        expect_calls: [{name: transfer_to_human}]
+      - text: "Thanks."
+
+  - id: store-hours
+    tags: [no-tool]
+    tools: [lookup_order, check_availability]
+    turns:
+      - text: "Hi, what time do you open tomorrow?"
+      - text: "And until when is the bistro open?"
+      - text: "Okay, thank you."
+    expect_said: [["9"]]
