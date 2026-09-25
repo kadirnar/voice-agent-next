@@ -29,14 +29,25 @@ class LoopLag:
 
     def __init__(self, tick: float = 0.005) -> None:
         self.tick = tick
-        self.max = 0.0
+        self.samples: list[tuple[float, float]] = []  # (wake-up time, lateness)
         self._task: asyncio.Task[None] | None = None
+
+    @property
+    def max(self) -> float:
+        """The worst lateness (s)."""
+        return self.max_since(float("-inf"))
+
+    def max_since(self, t: float) -> float:
+        """The worst lateness of the wake-ups after ``t`` (a :func:`now` time), e.g. to
+        leave out a stall the test caused on purpose."""
+        return max((late for at, late in self.samples if at - late - self.tick > t), default=0.0)
 
     async def _probe(self) -> None:
         while True:
             t = now()
             await asyncio.sleep(self.tick)
-            self.max = max(self.max, now() - t - self.tick)
+            woke = now()
+            self.samples.append((woke, max(0.0, woke - t - self.tick)))
 
     async def __aenter__(self) -> LoopLag:
         self._task = asyncio.create_task(self._probe())

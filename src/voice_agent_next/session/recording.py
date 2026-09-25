@@ -241,10 +241,13 @@ class SessionRecorder(SessionTap):
         if frame.sample_rate != self._user_rate:
             self._restart_user_stream(frame.sample_rate)
         rate = self._user_rate
-        # the frame was captured during [t - duration, t]; keep the stream contiguous
-        # unless it arrives clearly later than the previous one ended (a gap in the input)
+        # the frame was captured from its timestamp (when the transport stamped it: that
+        # holds even when the input loop falls behind), or at the latest during
+        # [t - duration, t]; keep the stream contiguous unless it starts clearly later
+        # than the previous one ended (a gap in the input)
         cursor = self._user_base + self._user_in / rate
-        start = t - frame.duration - self._origin
+        captured = t - frame.duration if frame.timestamp is None else min(frame.timestamp, t)
+        start = captured - self._origin
         if start > cursor + _JITTER:
             self._push_silence(start - cursor)
         elif cursor - start > _BACKLOG:
