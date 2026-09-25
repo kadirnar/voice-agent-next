@@ -63,7 +63,7 @@ from .tts import (
     TTSCapabilities,
     _AudioEmitter,
 )
-from .utils.aio import BackgroundTasks, ChanClosed, cancel_and_wait
+from .utils.aio import BackgroundTasks, ChanClosed, cancel_and_wait, closed_outside
 from .utils.clock import now
 from .utils.emitter import EventEmitter
 from .utils.log import logger
@@ -530,7 +530,8 @@ class _FallbackLLMStream(LLMStream):
             if not committed[0]:
                 commit()  # a legitimately empty answer
         finally:
-            await stream.aclose()
+            if not closed_outside(self._task):  # being garbage-collected: can't await
+                await stream.aclose()
 
     def _emit_metrics(self) -> None:
         """The providers' own metrics are forwarded instead (they name who served)."""
@@ -699,7 +700,8 @@ class _FallbackChunkedStream(ChunkedStream):
                 chain.succeeded(i)  # e.g. empty text: nothing to say
                 self.served_by = chain.labels[i]
         finally:
-            await inner.aclose()
+            if not closed_outside(self._task):  # being garbage-collected: can't await
+                await inner.aclose()
 
     def _emit_metrics(self) -> None:
         """The providers' own metrics are forwarded instead."""
@@ -850,8 +852,9 @@ class _FallbackSynthesizeStream(SynthesizeStream):
                 waiting.discard(pump_task)
         finally:
             self._disarm()
-            await cancel_and_wait(pump_task, fwd_task)
-            await inner.aclose()
+            if not closed_outside(self._task):  # being garbage-collected: can't await
+                await cancel_and_wait(pump_task, fwd_task)
+                await inner.aclose()
 
     def _emit_metrics(self) -> None:
         """The providers' own metrics are forwarded instead."""
@@ -1128,6 +1131,7 @@ class _FallbackSTTStream(STTStream):
                 waiting.discard(pump_task)
         finally:
             disarm()
-            await cancel_and_wait(pump_task, fwd_task)
-            with contextlib.suppress(Exception):
-                await inner.aclose()
+            if not closed_outside(self._task):  # being garbage-collected: can't await
+                await cancel_and_wait(pump_task, fwd_task)
+                with contextlib.suppress(Exception):
+                    await inner.aclose()

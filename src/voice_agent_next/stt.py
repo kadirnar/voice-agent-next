@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, ClassVar
 from .audio.frame import AudioFrame
 from .audio.resample import StreamResampler
 from .metrics import STTMetrics
-from .utils.aio import Chan, ChanClosed, cancel_and_wait
+from .utils.aio import Chan, ChanClosed, cancel_and_wait, closed_outside
 from .utils.clock import now
 from .utils.emitter import EventEmitter
 from .utils.ids import new_id
@@ -277,6 +277,8 @@ class STTStream(ABC):
         """Consume ``self._input`` and emit events with :meth:`_emit` until input ends."""
 
     def _emit(self, event: STTEvent) -> None:
+        if self._collected():
+            return  # nobody can receive it, and the metrics would land at a random time
         if event.type == STTEventType.FINAL_TRANSCRIPT and self._flush_time is not None:
             self._stt.emit(
                 "metrics",
@@ -300,10 +302,19 @@ class STTStream(ABC):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("%s failed", type(self).__name__)
+            if not self._collected():
+                logger.exception("%s failed", type(self).__name__)
             self._error = exc
         finally:
             self._events.close()
+
+    def _collected(self) -> bool:
+        """``True`` while a stream dropped without ``aclose()`` is garbage-collected.
+
+        Its coroutine is then closed from outside its task, at a random time: nothing
+        is reported from there (see :func:`~voice_agent_next.utils.aio.closed_outside`).
+        """
+        return closed_outside(getattr(self, "_task", None))
 
     # ------------------------------------------------------------------ consumer API
     def __aiter__(self) -> AsyncIterator[STTEvent]:
