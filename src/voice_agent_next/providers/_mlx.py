@@ -39,6 +39,7 @@ from ..errors import (
     VoiceAgentError,
 )
 from ..utils.deps import require
+from ..utils.env import is_offline
 
 __all__ = [
     "PLATFORMS",
@@ -121,7 +122,7 @@ def ensure_available(module: str, *, extra: str, package: str, provider: str) ->
 
 
 def offline(local_files_only: bool = False) -> bool:
-    return local_files_only or os.environ.get("VAN_OFFLINE", "").lower() in ("1", "true", "yes")
+    return local_files_only or is_offline()
 
 
 def snapshot(

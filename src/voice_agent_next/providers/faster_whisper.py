@@ -51,6 +51,7 @@ from ..stt import STT, STTCapabilities, STTEvent, STTEventType, STTStream, Trans
 from ..utils.aio import cancel_and_wait
 from ..utils.clock import now
 from ..utils.deps import is_installed, require
+from ..utils.env import is_offline
 from ..utils.ids import new_id
 from ..utils.log import logger
 from ._whisper_guard import HallucinationGuard
@@ -277,7 +278,7 @@ class FasterWhisperSTT(STT):
     def _model_path(self, fw: Any) -> str:
         if os.path.isdir(self.model):
             return self.model
-        offline = os.environ.get("VAN_OFFLINE", "").lower() in ("1", "true", "yes")
+        offline = is_offline()
         try:
             return str(
                 fw.download_model(
