@@ -446,6 +446,10 @@ class _WhisperAdapterStream(STTStream):
                 for ev in vad_stream.push_audio(item):
                     if ev.type == VADEventType.START_OF_SPEECH:
                         self._live = self._segment_id
+                        # the first decode comes after half an interval: the VAD has
+                        # already held back min_speech_duration, and the prefix padding
+                        # gives the decoder context
+                        self._since_step = self._whisper.resolved_interim_interval / 2
                         self._emit(
                             STTEvent(STTEventType.START_OF_SPEECH, segment_id=self._segment_id)
                         )
