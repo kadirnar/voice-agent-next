@@ -232,17 +232,18 @@ ARTIFACT_PATTERNS: tuple[str, ...] = (
     r".*\bdimatorzok\b.*",  # Russian "Субтитры сделал/создавал/добавил DimaTorzok"
     r"untertitel(ung)? (im auftrag )?(des|der) (zdf|ard|wdr|swr|ndr)\b.*",  # any year
     r"(copyright )?(zdf|ard|wdr|swr|ndr|mdr) \d{4}",
-    r"(ceviri ve )?altyazı m k",  # Turkish "Altyazı M.K.", accents stripped
+    r"(ceviri ve )?altyazi m ?k",  # Turkish "Altyazı M.K." (normalized: no dotless i)
     r"sous titres? (realises )?par .*",  # French credits: "Sous-titres par <name>"
-    r"sous titrage (st ?501|societe radio canada)",
+    r"sous titrage (st'? ?501|societe radio canada)",
     r"napisy (stworzone przez|by) .*",  # Polish subtitle credits
     r"字幕由.*提供",  # Chinese "字幕由Amara.org社区提供" and other credits
     r"中文字幕志愿者.*",
-    r".*打赏支持明镜.*",
+    r".*打[赏賞]支持明[镜鏡].*",  # "…打赏支持明镜与点点栏目", simplified or traditional
 )
 """Regular expressions for artifacts whose wording varies (years, names): a segment is
-dropped when one :func:`re.fullmatch` es its :func:`normalize` d text, so patterns are
-written in normalized form (lower case, no accents, no punctuation)."""
+dropped when one of them matches its whole :func:`normalized <normalize>` text, so patterns are
+written in normalized form (lower case, no accents, ``ı`` as ``i``, punctuation as
+spaces)."""
 
 
 def artifact_phrases(*languages: str) -> tuple[str, ...]:
@@ -456,9 +457,10 @@ _SPACE = re.compile(r"\s+")
 
 
 def normalize(text: str) -> str:
-    """Case-folded, accents removed, punctuation (except apostrophes) replaced by spaces,
-    whitespace collapsed: ``"Sous-titres réalisés"`` -> ``"sous titres realises"``."""
-    folded = unicodedata.normalize("NFKD", text.casefold().replace("’", "'"))
+    """Case-folded, accents removed (and the Turkish dotless ``ı`` folded to ``i``, as
+    ``I`` and ``İ`` are), punctuation (except apostrophes) replaced by spaces, whitespace
+    collapsed: ``"Sous-titres réalisés"`` -> ``"sous titres realises"``."""
+    folded = unicodedata.normalize("NFKD", text.casefold().replace("’", "'").replace("ı", "i"))
     bare = unicodedata.normalize("NFC", "".join(c for c in folded if not unicodedata.combining(c)))
     return _SPACE.sub(" ", _PUNCT.sub(" ", bare.replace("_", " "))).strip()
 

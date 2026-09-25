@@ -43,6 +43,8 @@ from voice_agent_next.stt import StreamAdapter, STTEventType
 from voice_agent_next.utils.download import DownloadError, download
 from voice_agent_next.vad import VAD
 
+from .whisper_helpers import LevelVAD, stream_paced
+
 # ------------------------------------------------------------------------ fakes
 
 
@@ -532,38 +534,6 @@ def test_cascade_wraps_it_in_a_stream_adapter(backend: FakeBackend) -> None:
 # --------------------------------------------------- interim transcripts
 
 
-class LevelVAD(VAD):
-    """Scripted VAD: ``probability`` on any 20 ms window louder than -40 dBFS, else 0."""
-
-    provider = "level"
-
-    def __init__(
-        self, probability: float = 0.95, *, min_silence: float = 0.25, activation: float = 0.5
-    ) -> None:
-        super().__init__(
-            sample_rate=16_000,
-            window_samples=320,
-            options=VADOptions(
-                activation_threshold=activation,
-                min_speech_duration=0.06,
-                min_silence_duration=min_silence,
-            ),
-        )
-        self.probability = probability
-
-    def _new_inference(self) -> Any:
-        probability = self.probability
-
-        class Inference:
-            def __call__(self, window: Any) -> float:
-                return probability if float(np.sqrt(np.mean(np.square(window)))) > 0.01 else 0.0
-
-            def reset(self) -> None:
-                pass
-
-        return Inference()
-
-
 def growing_text(audio: Any) -> list[FakeSegment]:
     """One word per 0.2 s of audio: interim decodes see the transcript grow."""
     words = " ".join(f"w{i}" for i in range(max(1, int(len(audio) / 16_000 / 0.2))))
@@ -577,31 +547,6 @@ def interim_calls(backend: FakeBackend) -> list[dict[str, Any]]:
 
 def final_calls(backend: FakeBackend) -> list[dict[str, Any]]:
     return [c for c in backend.calls if not c.get("without_timestamps")]
-
-
-async def stream_paced(
-    stream: Any, audio: AudioFrame, *, speed: float = 2.0, step: float = 0.02
-) -> list[tuple[float, Any]]:
-    """Push ``audio`` in ``step`` chunks paced at ``speed`` x real time, end the input and
-    return ``(audio time, event)`` pairs: the audio pushed when each event arrived."""
-    events: list[tuple[float, Any]] = []
-    pushed = 0.0
-
-    async def consume() -> None:
-        async for ev in stream:
-            events.append((pushed, ev))
-
-    consumer = asyncio.create_task(consume())
-    t0 = time.perf_counter()
-    for i, frame in enumerate(chunks(audio, step)):
-        delay = t0 + i * step / speed - time.perf_counter()
-        if delay > 0:
-            await asyncio.sleep(delay)
-        stream.push_audio(frame)
-        pushed += frame.duration
-    stream.end_input()
-    await consumer
-    return events
 
 
 def whisper_adapter(
