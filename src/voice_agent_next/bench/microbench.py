@@ -244,6 +244,42 @@ def _chan_roundtrip() -> Op:
     return op
 
 
+def _agent_transcript(tokens: int = 400) -> Op:
+    """The session's handling of one LLM text delta (history message kept up to date),
+    cycling through a ``tokens``-delta reply: the cost must not grow with the reply."""
+    import types
+
+    from ..chat import ChatContext
+    from ..events import ResponseText
+    from ..session.session import AgentSession, _Response
+
+    handle = AgentSession._on_response_text
+    deltas = [ResponseText(response_id="r", item_id="i", delta="word ") for _ in range(tokens)]
+    state: dict[str, Any] = {"i": 0}
+
+    def fresh() -> Any:
+        stub = types.SimpleNamespace(_responses={}, history=ChatContext(), emit=_ignore)
+        stub._responses["r"] = _Response("r", 0.0, None)
+        return stub
+
+    state["stub"] = fresh()
+
+    def op() -> object:
+        i = state["i"]
+        handle(state["stub"], deltas[i])
+        i += 1
+        if i == tokens:
+            state["stub"], i = fresh(), 0
+        state["i"] = i
+        return None
+
+    return op
+
+
+def _ignore(*args: object) -> None:
+    return None
+
+
 def default_micro_benchmarks() -> list[MicroBenchmark]:
     """The hot paths timed by ``van bench overhead`` (section ``micro``)."""
     return [
@@ -291,6 +327,10 @@ def default_micro_benchmarks() -> list[MicroBenchmark]:
         MicroBenchmark(
             "tts_text_filter", "tts_clean() per sentence (markdown/emoji removal)",
             _text_filter, unit="sentence", frame_ms=None,
+        ),
+        MicroBenchmark(
+            "agent_transcript", "AgentSession handling one LLM text delta (400-token reply)",
+            _agent_transcript, unit="token", frame_ms=None,
         ),
         MicroBenchmark(
             "event_emit", "EventEmitter.emit() to two handlers", _event_emit, unit="event",

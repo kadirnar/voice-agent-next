@@ -18,7 +18,9 @@ Quick start::
 
 from __future__ import annotations
 
+import importlib
 from importlib.metadata import PackageNotFoundError, version
+from typing import TYPE_CHECKING, Any
 
 from . import events
 from .audio import AudioBuffer, AudioFormat, AudioFrame, Resampler, read_wav, resample, write_wav
@@ -59,6 +61,32 @@ from .tts import TTS, ChunkedStream, SynthesizedAudio, SynthesizeStream, TTSCapa
 from .turn import TurnDetector
 from .vad import VAD, VADEvent, VADEventType, VADOptions
 
+if TYPE_CHECKING:
+    from .app import build_agent, build_session
+    from .config import AppConfig, load_config
+    from .presets import load_preset, session_from_preset
+
+_LAZY = {
+    "AppConfig": ".config",
+    "load_config": ".config",
+    "build_agent": ".app",
+    "build_session": ".app",
+    "load_preset": ".presets",
+    "session_from_preset": ".presets",
+}
+"""Config/preset entry points, imported on first use (pydantic and the preset catalog
+stay out of ``import voice_agent_next``)."""
+
+
+def __getattr__(name: str) -> Any:
+    module = _LAZY.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(importlib.import_module(module, __name__), name)
+    globals()[name] = value
+    return value
+
+
 try:
     __version__ = version("voice-agent-next")
 except PackageNotFoundError:  # pragma: no cover - running from a source tree
@@ -72,6 +100,7 @@ __all__ = [
     "Agent",
     "AgentSession",
     "AgentState",
+    "AppConfig",
     "AudioBuffer",
     "AudioContent",
     "AudioFormat",
@@ -123,12 +152,17 @@ __all__ = [
     "VADOptions",
     "VoiceAgentError",
     "__version__",
+    "build_agent",
+    "build_session",
     "create",
     "events",
     "function_tool",
     "list_providers",
+    "load_config",
+    "load_preset",
     "read_wav",
     "register_provider",
     "resample",
+    "session_from_preset",
     "write_wav",
 ]

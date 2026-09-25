@@ -269,10 +269,12 @@ def build_models(
 
 def build_app_config(sources: SourceOptions) -> Any:
     """The :class:`~voice_agent_next.config.AppConfig` served by the AgentSession
-    protocols (``websocket``, ``webrtc``, telephony): exactly one of ``--preset``,
-    ``--config``, ``--engine`` or cascade flags (nothing: the mock engine)."""
+    protocols (``websocket``, ``webrtc``, telephony): one agent, layered like ``van run``
+    as ``--preset`` < ``--config`` and validated once, or made from ``--engine`` or
+    cascade flags (nothing given: the mock engine). A ``--preset`` is checked for
+    readiness."""
     from ..bench.system import parse_component_spec
-    from ..config import AppConfig, load_config
+    from ..config import AppConfig, layer_config
     from ..errors import ConfigurationError
 
     engines = list(sources.engines)
@@ -283,41 +285,37 @@ def build_app_config(sources: SourceOptions) -> Any:
     cascade = any(
         v is not None for v in (sources.stt, sources.llm, sources.tts, sources.turn_detector)
     )
-    given = len(configs) + len(specs) + (sources.preset is not None) + cascade
-    if given > 1:
+    base = sources.preset is not None or bool(configs)
+    if len(configs) > 1 or len(specs) > 1 or (specs and cascade) or (base and (specs or cascade)):
         raise ConfigurationError(
-            "this protocol serves one agent: pass one of --preset, --config, --engine or "
-            "cascade flags"
+            "this protocol serves one agent: pass --preset and/or one --config (layered "
+            "in that order), or --engine, or cascade flags"
         )
     if any(_NAMED.match(e.strip()) for e in specs):
         raise ConfigurationError("NAME=SOURCE model names only apply to --protocol openai-realtime")
+    overrides: dict[str, Any] = {}
+    if specs:
+        overrides["engine"] = parse_component_spec(specs[0])
+    for key in ("stt", "llm", "tts", "vad", "turn_detector"):
+        value = getattr(sources, key)
+        if value is not None:
+            overrides[key] = parse_component_spec(value)
+    if not base:  # the flags alone make the agent
+        if cascade and sources.llm is None:  # --tts is optional for audio-output LLMs
+            raise ConfigurationError("a cascade needs at least --llm and --tts (and --stt)")
+        if sources.vad is not None and not cascade:
+            raise ConfigurationError("--vad belongs to a cascade (--stt/--llm/--tts)")
+        if not overrides:
+            overrides["engine"] = "mock"
+    raw = layer_config(
+        preset=sources.preset, file=configs[0] if configs else None, overrides=overrides
+    )
     if sources.preset is not None:
         from ..presets import load_preset
 
-        cfg = load_preset(sources.preset)
-    elif configs:
-        path = Path(configs[0])
-        if not path.is_file():
-            raise ConfigurationError(f"config file not found: {path}")
-        cfg = load_config(path)
-    elif cascade:
-        if sources.llm is None:  # --tts is optional for audio-output LLMs
-            raise ConfigurationError("a cascade needs at least --llm and --tts (and --stt)")
-        cfg = AppConfig.model_validate(
-            {
-                "stt": parse_component_spec(sources.stt),
-                "llm": parse_component_spec(sources.llm),
-                "tts": parse_component_spec(sources.tts),
-                "vad": parse_component_spec(sources.vad),
-                "turn_detector": parse_component_spec(sources.turn_detector),
-            }
-        )
+        cfg = load_preset(sources.preset, **{k: v for k, v in raw.items() if k != "extends"})
     else:
-        if sources.vad is not None:
-            raise ConfigurationError("--vad belongs to a cascade (--stt/--llm/--tts)")
-        cfg = AppConfig.model_validate(
-            {"engine": parse_component_spec(specs[0]) if specs else "mock"}
-        )
+        cfg = AppConfig.model_validate(raw)
     if sources.instructions is not None:
         cfg.agent.instructions = sources.instructions
     if sources.voice is not None:

@@ -33,6 +33,7 @@ import platformdirs
 
 from ..errors import VoiceAgentError
 from .deps import is_installed
+from .env import is_offline
 from .log import logger
 
 __all__ = [
@@ -67,8 +68,7 @@ def cache_dir() -> Path:
     return path
 
 
-def _offline() -> bool:
-    return os.environ.get("VAN_OFFLINE", "").lower() in ("1", "true", "yes")
+_offline = is_offline  # the historical private name (kept for callers of it)
 
 
 def _sha256(path: Path) -> str:
@@ -111,7 +111,9 @@ def download(
             return target
         logger.warning("checksum mismatch for cached %s; re-downloading", target)
     if _offline():
-        raise DownloadError(f"{name} is not cached and VAN_OFFLINE is set (url: {url})")
+        raise DownloadError(
+            f"{name} is not cached and offline mode is on (VAN_OFFLINE/HF_HUB_OFFLINE) (url: {url})"
+        )
     logger.info("downloading %s -> %s", url, target)
     own_client = client is None
     http = client or httpx.Client(follow_redirects=True, timeout=timeout)

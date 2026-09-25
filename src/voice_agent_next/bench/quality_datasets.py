@@ -44,6 +44,7 @@ import httpx
 
 from ..utils.deps import require
 from ..utils.download import DownloadError, cache_dir
+from ..utils.env import is_offline
 from .asr_datasets import _AUDIO_KEYS, _file_sha256, _manifest_rows, _pick, _write_atomic
 from .quality_scoring import SCORINGS, infer_scoring, parse_choices
 
@@ -224,10 +225,6 @@ def builtin_quality_datasets() -> dict[str, dict[str, Any]]:
     return datasets
 
 
-def _offline() -> bool:
-    return os.environ.get("VAN_OFFLINE", "").lower() in ("1", "true", "yes")
-
-
 def _fetch_files(
     spec: Mapping[str, Any],
     missing: list[dict[str, Any]],
@@ -302,8 +299,10 @@ def load_builtin_quality_dataset(
         or _file_sha256(directory / item["file"]) != item["sha256"]
     ]
     if missing:
-        if _offline():
-            raise DownloadError(f"dataset {name} is not cached and VAN_OFFLINE is set")
+        if is_offline():
+            raise DownloadError(
+                f"dataset {name} is not cached and offline mode is on (VAN_OFFLINE/HF_HUB_OFFLINE)"
+            )
         kind = spec["source"]["type"]
         if progress is not None:
             progress(f"fetching {len(missing)} file(s) of {name} ({kind})")

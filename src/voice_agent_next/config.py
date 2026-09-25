@@ -30,7 +30,11 @@ change only what differs::
     stt: {language: en}             # a mapping without `provider:` tweaks the preset's STT
     agent: {instructions: You are a pirate.}
 
-Strings of the form ``${ENV_VAR}`` or ``${ENV_VAR:-default}`` are expanded.
+Strings of the form ``${ENV_VAR}`` or ``${ENV_VAR:-default}`` are expanded (before
+``extends:`` is resolved, so the preset name may come from the environment).
+
+On the command line the layers are ``--preset`` < ``--config`` file < flags
+(:func:`layer_config`), validated once after merging.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ import json
 import os
 import re
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -53,8 +58,11 @@ __all__ = [
     "AgentConfig",
     "AppConfig",
     "ComponentSpec",
+    "expand_env",
+    "layer_config",
     "load_config",
     "merge_config",
+    "read_config_file",
     "resolve_callable",
     "resolve_extends",
 ]
@@ -128,16 +136,15 @@ def _expand_env(value: Any) -> Any:
     return value
 
 
-def load_config(source: str | os.PathLike[str] | dict[str, Any]) -> AppConfig:
-    """Load and validate a config file (``.yaml``/``.yml``/``.toml``/``.json``) or dict."""
-    if isinstance(source, dict):
-        data = source
-    else:
-        path = Path(source)
-        if not path.exists():
-            raise ConfigurationError(f"config file not found: {path}")
-        text = path.read_text(encoding="utf-8")
-        suffix = path.suffix.lower()
+def read_config_file(path: str | os.PathLike[str]) -> dict[str, Any]:
+    """The raw mapping of a ``.yaml``/``.yml``/``.toml``/``.json`` config file: not
+    expanded (``${ENV}``), not merged with its ``extends:`` preset and not validated."""
+    path = Path(path)
+    if not path.is_file():
+        raise ConfigurationError(f"config file not found: {path}")
+    text = path.read_text(encoding="utf-8")
+    suffix = path.suffix.lower()
+    try:
         if suffix in (".yaml", ".yml"):
             data = yaml.safe_load(text) or {}
         elif suffix == ".toml":
@@ -146,12 +153,71 @@ def load_config(source: str | os.PathLike[str] | dict[str, Any]) -> AppConfig:
             data = json.loads(text)
         else:
             raise ConfigurationError(f"unsupported config format: {suffix}")
+    except (yaml.YAMLError, tomllib.TOMLDecodeError, json.JSONDecodeError) as exc:
+        raise ConfigurationError(f"{path}: invalid {suffix[1:].upper()}: {exc}") from exc
     if not isinstance(data, dict):
-        raise ConfigurationError("config root must be a mapping")
-    data = resolve_extends(data)
-    cfg = AppConfig.model_validate(_expand_env(data))
+        raise ConfigurationError(f"{path}: config root must be a mapping")
+    return data
+
+
+def expand_env(data: Any) -> Any:
+    """``data`` with ``${ENV_VAR}`` / ``${ENV_VAR:-default}`` in its strings expanded
+    (once: an expanded value is not expanded again)."""
+    return _expand_env(data)
+
+
+def load_config(source: str | os.PathLike[str] | Mapping[str, Any]) -> AppConfig:
+    """Load and validate a config file (``.yaml``/``.yml``/``.toml``/``.json``) or mapping.
+
+    ``${ENV}`` strings are expanded first (so ``extends: ${PRESET}`` works), then the
+    ``extends:`` preset is merged underneath, then the result is validated."""
+    data = dict(source) if isinstance(source, Mapping) else read_config_file(source)
+    data = resolve_extends(_expand_env(data))
+    cfg = AppConfig.model_validate(data)
     cfg.validate_components()
     return cfg
+
+
+def layer_config(
+    *,
+    preset: str | None = None,
+    file: str | os.PathLike[str] | Mapping[str, Any] | None = None,
+    overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The raw config of ``preset`` < ``file`` < ``overrides``, as ``van run``/``serve``/
+    ``bench`` combine ``--preset``, ``--config`` and flags. Not validated: the file may
+    hold only tweaks (``stt: {language: en}``) that make sense on top of the preset.
+
+    ``${ENV}`` in the file is expanded before its own ``extends:`` is read; that preset
+    is used when ``preset`` is not given (both given and different is an error). The
+    result has ``extends:`` set to the preset used, if any. See :func:`merge_config`
+    for how two layers combine."""
+    if file is None:
+        data: dict[str, Any] = {}
+    elif isinstance(file, Mapping):
+        data = _expand_env(dict(file))
+    else:
+        data = _expand_env(read_config_file(file))
+    extends = data.pop("extends", None)
+    if extends is not None and not isinstance(extends, str):
+        raise ConfigurationError(f"`extends:` must be a preset name, got {extends!r}")
+    from .presets import get_preset  # the presets module imports this one
+
+    name: str | None = None
+    if preset is not None:
+        name = get_preset(preset).name
+        if extends is not None and get_preset(extends).name != name:
+            where = f" in {file}" if not isinstance(file, Mapping) else ""
+            raise ConfigurationError(f"preset {preset} conflicts with `extends: {extends}`{where}")
+    elif extends is not None:
+        name = get_preset(extends).name
+    raw: dict[str, Any] = dict(get_preset(name).config) if name is not None else {}
+    raw = merge_config(raw, data)
+    if overrides:
+        raw = merge_config(raw, dict(overrides))
+    if name is not None:
+        raw["extends"] = name
+    return raw
 
 
 _COMPONENT_KEYS = ("engine", "stt", "llm", "tts", "vad", "turn_detector")

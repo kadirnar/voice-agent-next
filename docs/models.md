@@ -31,8 +31,11 @@ catalog's models use there, but it deletes from it only when you pass `--include
 If you pass a custom `download_root` to faster-whisper, the model manager cannot see
 that model.
 
-Set `VAN_OFFLINE=1` to turn off all downloads. Providers then use only cached files, and
-`van models download` fails for models that are not cached.
+Set `VAN_OFFLINE=1` to turn off all downloads (`HF_HUB_OFFLINE=1` does the same, so an
+environment already set up for offline Hugging Face use needs nothing else). Providers then
+use only cached files, benchmark datasets must already be cached, and
+`van models download` fails for models that are not cached. `van doctor` reports when
+offline mode is on.
 
 ## Commands
 

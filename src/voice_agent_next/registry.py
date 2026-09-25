@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.metadata
+import logging
 import os
 import pkgutil
 import sys
@@ -104,6 +105,13 @@ class ProviderSpec:
 _REGISTRY: dict[tuple[ComponentKind, str], ProviderSpec] = {}
 _ALIASES: dict[str, str] = {}
 _ENTRY_POINTS_LOADED = False
+"""Every entry point of the group loaded successfully (a failed one is retried)."""
+_EP_DONE: set[str] = set()
+"""Entry points loaded successfully (``name=value``)."""
+_EP_ACTIVE: set[str] = set()
+"""Entry points being loaded now (a plugin may look providers up while it loads)."""
+_EP_ERRORS: dict[str, str] = {}
+"""Entry point name -> why it failed to load (the last attempt)."""
 
 
 def _normalize(name: str) -> str:
@@ -175,19 +183,42 @@ def parse_spec(spec: str) -> tuple[str, str | None]:
 
 
 def _load_entry_points() -> None:
+    """Load the provider plugins not loaded yet. The group counts as loaded only once
+    every plugin loaded: a failed one is retried on the next lookup miss (its error is
+    kept for :func:`get_provider`'s message), and a plugin that looks providers up while
+    it loads gets the other plugins loaded instead of an empty answer."""
     global _ENTRY_POINTS_LOADED
     if _ENTRY_POINTS_LOADED:
         return
-    _ENTRY_POINTS_LOADED = True
     try:
         eps = importlib.metadata.entry_points(group=ENTRY_POINT_GROUP)
     except Exception:  # pragma: no cover - broken metadata
+        logger.warning("cannot read the %s entry points", ENTRY_POINT_GROUP, exc_info=True)
         return
+    complete = True
     for ep in eps:
+        key = f"{ep.name}={ep.value}"
+        if key in _EP_DONE:
+            continue
+        if key in _EP_ACTIVE:  # loading further up the stack
+            complete = False
+            continue
+        _EP_ACTIVE.add(key)
         try:
             ep.load()
-        except Exception:
-            logger.warning("failed to load provider entry point %s", ep.name, exc_info=True)
+        except Exception as exc:
+            complete = False
+            level = logging.DEBUG if ep.name in _EP_ERRORS else logging.WARNING
+            _EP_ERRORS[ep.name] = f"{type(exc).__name__}: {exc}"
+            logger.log(
+                level, "failed to load provider plugin %s (%s)", ep.name, ep.value, exc_info=True
+            )
+        else:
+            _EP_DONE.add(key)
+            _EP_ERRORS.pop(ep.name, None)
+        finally:
+            _EP_ACTIVE.discard(key)
+    _ENTRY_POINTS_LOADED = complete
 
 
 def _import_provider_module(name: str) -> None:
@@ -216,9 +247,13 @@ def get_provider(kind: ComponentKind, name: str) -> ProviderSpec:
         return _REGISTRY[(kind, key_name)]
     except KeyError:
         known = sorted(n for (k, n) in _REGISTRY if k == kind)
+        failed = "".join(
+            f" Provider plugin {plugin!r} failed to load ({why})."
+            for plugin, why in sorted(_EP_ERRORS.items())
+        )
         raise ProviderNotFoundError(
             f"no {kind} provider named {name!r}. Registered {kind} providers: "
-            f"{', '.join(known) or '(none loaded)'}. Run `van providers` to list all."
+            f"{', '.join(known) or '(none loaded)'}.{failed} Run `van providers` to list all."
         ) from None
 
 
