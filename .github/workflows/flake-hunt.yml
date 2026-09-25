@@ -10,8 +10,6 @@ on:
         description: "Extra pytest arguments (e.g. a test path or -k expression)"
         required: false
         default: ""
-  push:
-    branches: [fix/flake-hunt]
 
 concurrency:
   group: flake-hunt-${{ github.ref }}
@@ -56,10 +54,12 @@ jobs:
       - name: pytest
         shell: bash
         continue-on-error: true
+        env:
+          PYTEST_ARGS: ${{ inputs.pytest-args }}
+        # PYTEST_ARGS is split into words on purpose
         run: >-
           uv run pytest -q -p no:cacheprovider
-          --junitxml "junit-${{ runner.os }}-${{ matrix.run }}.xml"
-          ${{ github.event.inputs.pytest-args }}
+          --junitxml "junit-${{ runner.os }}-${{ matrix.run }}.xml" $PYTEST_ARGS
       - uses: actions/upload-artifact@v4
         if: always()
         with:

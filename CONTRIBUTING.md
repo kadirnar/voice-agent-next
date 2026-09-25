@@ -51,7 +51,7 @@ Rules:
   * lower bounds are exact when the delay is: mock latencies and tool delays use `utils.clock.sleep_for` / `sleep_until`, which never return early (a plain `asyncio.sleep` can be ~16 ms short on Windows);
   * upper bounds allow for how late *this run's* event loop was: `async with tests.timing.LoopLag() as lag: ...` then `assert measured <= designed + margin + lag.max`;
   * compare with timestamps measured in the same run (or count samples) rather than with wall-clock constants.
-* Hunting flaky tests: the manual **flake-hunt** workflow (Actions → flake-hunt → Run workflow) runs the whole suite 5× on Linux, Windows and macOS and lists every test that failed at least once (optional extra pytest arguments, e.g. a test path). A flaky test is fixed at its root cause, never skipped or loosened until it can no longer fail on a mutation of the behaviour it checks.
+* Hunting flaky tests: the manual **flake-hunt** workflow (Actions → flake-hunt → Run workflow, or `gh workflow run flake-hunt --ref <branch>`) runs the whole suite 5× on Linux (all extras), Windows and macOS and lists every test that failed at least once in the job summary (optional extra pytest arguments, e.g. a test path). It costs ~15 runner jobs, macOS included. A flaky test is fixed at its root cause, never skipped or loosened until it can no longer fail on a mutation of the behaviour it checks.
 
 ## Code conventions
 
