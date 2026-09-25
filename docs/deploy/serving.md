@@ -203,8 +203,9 @@ in your own application.
 * `--api-key` applies to `openai-realtime` only. Put the other protocols behind an
   authenticating reverse proxy, and use TLS (`wss://`) in production.
 * The telephony protocols serve the media-stream WebSocket only. Your webhook answers the
-  call with markup (TwiML and similar) that points at it. See
-  `voice_agent_next.transports.telephony.markup`.
+  call with markup (TwiML and similar) that points at it and carries the call's stream
+  token. Set `VAN_TELEPHONY_SECRET` to the secret shared with the webhook; the server
+  does not start without it. See [telephony security](../transports/telephony.md#security).
 * A prewarmed connection is used for one call only. Engines that hold GPU memory per
   connection keep N of those allocated while idle.
 * With a shared engine, engine-level usage metrics (`session.usage`) are not attributed to
