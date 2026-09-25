@@ -87,6 +87,24 @@ sherpa-onnx = [
   "sherpa-onnx>=1.13.3",
   "sherpa-onnx-core>=1.13.3; platform_machine != 'armv7l'",
 ]
+# MLX on Apple silicon (macOS arm64 only; see docs/providers/mlx.md): parakeet-mlx STT,
+# mlx-audio TTS, and mlx-lm for `python -m mlx_lm.server` (the `mlx_lm` LLM is its client).
+# Kokoro's English G2P (misaki) without misaki[en]'s spacy-curated-transformers, which
+# would pull torch in; misaki caps Requires-Python <3.13.
+mlx = [
+  "parakeet-mlx>=0.5.2; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "mlx-audio>=0.5.6; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "sentencepiece>=0.2; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "misaki>=0.9.4; python_version < '3.13' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "spacy>=3.8; python_version < '3.13' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "num2words>=0.5; python_version < '3.13' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "phonemizer-fork>=3.3; python_version < '3.13' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "espeakng-loader>=0.2; python_version < '3.13' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "mlx-lm>=0.31.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "openai>=2.0",
+]
+# Whisper on MLX (99 languages); mlx-whisper depends on torch (for checkpoint conversion)
+mlx-whisper = ["mlx-whisper>=0.4.3; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 # --- local speech-to-speech servers ------------------------------------------------
 # Kyutai's Ogg/Opus codec (Rust, bundled libopus): byte-compatible with moshi-server
 moshi = ["sphn>=0.2,<0.3"]
