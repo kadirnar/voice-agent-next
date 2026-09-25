@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, TypeAlias
 
@@ -31,6 +31,7 @@ __all__ = [
     "TurnMetrics",
     "UsageSummary",
     "VADMetrics",
+    "finite",
     "metrics_to_dict",
     "percentile",
     "summarize",
@@ -292,24 +293,36 @@ def metrics_to_dict(m: Metrics) -> dict[str, Any]:
     return asdict(m)
 
 
-def percentile(values: Sequence[float], q: float) -> float:
-    """Linear-interpolated percentile (``q`` in 0..100). NaN for empty input."""
-    xs = sorted(v for v in values if v is not None and not math.isnan(v))
+def finite(values: Iterable[float | None]) -> list[float]:
+    """The finite values of ``values``, as floats: ``None``, NaN and ±inf are dropped.
+
+    A missing (``None``/NaN) or unbounded (inf, e.g. "never happened") sample is not a
+    measurement: it is counted separately by the caller, never interpolated with."""
+    return [float(v) for v in values if v is not None and math.isfinite(v)]
+
+
+def percentile(values: Iterable[float | None], q: float) -> float:
+    """Linear-interpolated percentile (``q`` in 0..100) of the finite values.
+
+    The one definition used everywhere (session metrics, benchmark summaries, the
+    regression gate and the micro-benchmarks); it equals ``numpy.percentile`` (method
+    ``linear``). ``None``, NaN and ±inf are ignored (see :func:`finite`); NaN when no
+    finite value is left. ``q`` outside 0..100 raises ``ValueError``.
+    """
+    if not 0.0 <= q <= 100.0:
+        raise ValueError(f"percentile q must be in 0..100, got {q!r}")
+    xs = sorted(finite(values))
     if not xs:
         return math.nan
-    if len(xs) == 1:
-        return xs[0]
     k = (len(xs) - 1) * (q / 100.0)
     lo = math.floor(k)
-    hi = math.ceil(k)
-    if lo == hi:
-        return xs[lo]
+    hi = min(lo + 1, len(xs) - 1)
     return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
 
 
 def summarize(values: Iterable[float | None]) -> dict[str, float]:
-    """count/mean/min/p50/p90/p95/p99/max of the non-None values."""
-    xs = [v for v in values if v is not None and not math.isnan(v)]
+    """count/mean/min/p50/p90/p95/p99/max of the finite values (see :func:`finite`)."""
+    xs = finite(values)
     if not xs:
         return {"count": 0}
     return {

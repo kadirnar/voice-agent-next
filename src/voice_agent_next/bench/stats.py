@@ -1,17 +1,19 @@
 """Distribution statistics for benchmark results: percentiles and bootstrap CIs.
 
-Percentiles use linear interpolation between order statistics (numpy's default and
-:func:`voice_agent_next.metrics.percentile`). Confidence intervals are percentile
+Percentiles are :func:`voice_agent_next.metrics.percentile` (linear interpolation between
+order statistics, numpy's default; ``None``/NaN/inf ignored) — the one definition shared
+with the session metrics and the micro-benchmarks. Confidence intervals are percentile
 bootstrap intervals with a fixed seed, so re-summarizing the same items is reproducible.
 """
 
 from __future__ import annotations
 
-import math
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable
 
 import numpy as np
 import numpy.typing as npt
+
+from ..metrics import finite, percentile
 
 __all__ = [
     "CI_STATISTICS",
@@ -28,16 +30,8 @@ _CHUNK = 256  # bootstrap resamples evaluated per vectorized batch (bounds memor
 
 
 def clean(values: Iterable[float | None]) -> list[float]:
-    """Drop ``None`` and non-finite values."""
-    return [float(v) for v in values if v is not None and math.isfinite(v)]
-
-
-def percentile(values: Sequence[float], q: float) -> float:
-    """Linear-interpolated percentile (``q`` in 0..100); NaN for empty input."""
-    xs = clean(values)
-    if not xs:
-        return math.nan
-    return float(np.percentile(np.asarray(xs, dtype=np.float64), q))
+    """Drop ``None`` and non-finite values (:func:`voice_agent_next.metrics.finite`)."""
+    return finite(values)
 
 
 def describe(values: Iterable[float | None]) -> dict[str, float | int]:
@@ -52,8 +46,8 @@ def describe(values: Iterable[float | None]) -> dict[str, float | int]:
         "std": float(x.std(ddof=1)) if len(xs) > 1 else 0.0,
         "min": float(x.min()),
     }
-    for q, v in zip(PERCENTILES, np.percentile(x, PERCENTILES), strict=True):
-        out[f"p{q}"] = float(v)
+    for q in PERCENTILES:
+        out[f"p{q}"] = percentile(xs, q)
     out["max"] = float(x.max())
     return out
 

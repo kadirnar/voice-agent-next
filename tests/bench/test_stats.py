@@ -28,6 +28,53 @@ def test_percentile_by_hand() -> None:
     assert math.isnan(percentile([], 50))
 
 
+def test_one_percentile_definition_everywhere() -> None:
+    """Session metrics, bench summaries and micro-benchmarks share one implementation."""
+    from voice_agent_next.bench import microbench, stats
+
+    assert stats.percentile is metrics.percentile
+    assert microbench.percentile is metrics.percentile
+    rng = np.random.default_rng(0)
+    xs = rng.lognormal(size=257).tolist()
+    for q in (0, 0.5, 25, 50, 90, 99, 99.9, 100):
+        assert metrics.percentile(xs, q) == pytest.approx(float(np.percentile(xs, q)))
+    r = microbench.MicroResult("x", "", "op", None, 1, xs)
+    assert r.median_us == metrics.percentile(xs, 50)
+    assert describe(xs)["p90"] == metrics.summarize(xs)["p90"] == metrics.percentile(xs, 90)
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ([1.0, 2.0, 3.0, float("inf")], 2.0),  # inf is not a measurement: dropped
+        ([1.0, 2.0, 3.0, float("-inf")], 2.0),
+        ([1.0, float("nan"), 2.0, 3.0, None], 2.0),
+        ([float("inf"), float("nan"), None], math.nan),  # nothing finite left
+        ([], math.nan),
+        ([7.0], 7.0),
+    ],
+)
+def test_percentile_non_finite_values(values: list[float | None], expected: float) -> None:
+    got = metrics.percentile(values, 50)
+    if math.isnan(expected):
+        assert math.isnan(got)
+    else:
+        assert got == expected
+    assert (describe(values).get("p50", math.nan) == got) or math.isnan(got)
+    assert (metrics.summarize(values).get("p50", math.nan) == got) or math.isnan(got)
+
+
+def test_summarize_drops_inf_like_describe() -> None:
+    s = metrics.summarize([1.0, float("inf"), 3.0])
+    assert s["count"] == 2 and s["max"] == 3.0 and s["mean"] == 2.0
+
+
+@pytest.mark.parametrize("q", [-1, 100.5, float("nan")])
+def test_percentile_rejects_q_out_of_range(q: float) -> None:
+    with pytest.raises(ValueError):
+        metrics.percentile([1.0, 2.0], q)
+
+
 def test_describe_ignores_missing_values() -> None:
     xs = [4.0, None, 1.0, float("nan"), 3.0, 2.0, float("inf")]
     assert clean(xs) == [4.0, 1.0, 3.0, 2.0]
