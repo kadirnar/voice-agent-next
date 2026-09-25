@@ -153,6 +153,7 @@ nav:
           - sherpa-onnx: providers/sherpa-onnx.md
           - Moonshine: providers/moonshine.md
           - faster-whisper: providers/faster_whisper.md
+          - NeMo-Speech.cpp: providers/nemo-speech-cpp.md
           - Kokoro: providers/kokoro.md
           - Pocket TTS: providers/pocket-tts.md
           - Chatterbox: providers/chatterbox.md
