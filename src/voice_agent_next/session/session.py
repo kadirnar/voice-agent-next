@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import dataclasses
 import functools
 import inspect
@@ -118,6 +119,13 @@ _IDLE_POLL = 0.05
 """Poll interval (s) of the watchdog and of result delivery waiting for a quiet moment."""
 _IDLE_SETTLE = 0.15
 """The conversation must stay idle this long before a background result is delivered."""
+
+_OWNER_TASK: contextvars.ContextVar[asyncio.Task[Any] | None] = contextvars.ContextVar(
+    "voice_agent_next_session_owner_task", default=None
+)
+"""The session's background task running a tool or delegated work. Code it runs may sit in
+an inner task (``asyncio.wait_for`` creates one on Python 3.11); ``aclose()`` called from
+there must not cancel the owner it is awaited by."""
 
 DEFAULT_TOOL_FILLERS: tuple[str, ...] = (
     "One moment, let me check that.",
@@ -596,12 +604,13 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         current = asyncio.current_task()
         if task is current:
             return  # called from a hook during the close (e.g. ``Agent.on_exit``)
-        if current is not None and not task.done():
-            self._close_callers.add(current)
+        callers = {t for t in (current, _OWNER_TASK.get()) if t is not None}
+        if not task.done():
+            self._close_callers.update(callers)
         try:
             await asyncio.shield(task)
         finally:
-            self._close_callers.discard(current)
+            self._close_callers.difference_update(callers)
 
     async def _close(self, reason: str) -> None:
         try:
@@ -867,6 +876,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         coro = work() if callable(work) else work
 
         async def run() -> Any:
+            _OWNER_TASK.set(asyncio.current_task())
             return await (asyncio.wait_for(coro, timeout) if timeout is not None else coro)
 
         task: asyncio.Task[Any] = self._tasks.spawn(run(), name=f"delegate-{name}")
@@ -1155,6 +1165,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         return True
 
     async def _run_tool(self, call: FunctionCall) -> FunctionCallOutput:
+        _OWNER_TASK.set(asyncio.current_task())  # (this task's own context)
         ctx: ToolContext[UserdataT] = ToolContext(call=call, session=self, userdata=self.userdata)
         tools = self.agent.tools
         tool = find_tool(tools, call.name)
