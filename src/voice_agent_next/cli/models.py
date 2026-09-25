@@ -120,7 +120,10 @@ def download(
         list[str] | None,
         typer.Option(
             "--for",
-            help="Everything a config file, 'stt=...,tts=...' or a spec needs (repeatable)",
+            help=(
+                "Everything a config file, preset:NAME, 'stt=...,tts=...' or a spec needs "
+                "(repeatable)"
+            ),
         ),
     ] = None,
     force: Annotated[bool, typer.Option("--force", help="Download again even if cached")] = False,
