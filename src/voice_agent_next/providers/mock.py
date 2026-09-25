@@ -47,7 +47,7 @@ from ..stt import STT, STTCapabilities, STTEvent, STTEventType, STTStream, Trans
 from ..tools import FunctionTool
 from ..tts import TTS, ChunkedStream, NormalizeOption, SynthesizeStream, TTSCapabilities
 from ..turn import TurnDetector
-from ..utils.clock import now
+from ..utils.clock import now, sleep_for
 from ..utils.ids import new_id
 from ..vad import VADEventType, VADOptions
 from .energy import EnergyVAD
@@ -171,7 +171,7 @@ class MockSTT(STT):
 
     async def _recognize(self, audio: AudioFrame, *, language: str | None) -> Transcript:
         if self.latency:
-            await asyncio.sleep(self.latency)
+            await sleep_for(self.latency)
         return Transcript(text=self.next_transcript(audio), language=language, confidence=1.0)
 
     def _create_stream(self, *, language: str | None) -> STTStream:
@@ -190,7 +190,7 @@ class _MockSTTStream(STTStream):
             if self.is_flush(item):
                 if frames:
                     if stt.latency:
-                        await asyncio.sleep(stt.latency)
+                        await sleep_for(stt.latency)
                     text = stt.next_transcript(AudioFrame.concat(frames))
                     self._emit(
                         STTEvent(
@@ -291,7 +291,7 @@ class _MockLLMStream(LLMStream):
         llm: MockLLM = self._llm  # type: ignore[assignment]
         response = llm.script.next(self.ctx)
         if llm.ttft:
-            await asyncio.sleep(llm.ttft)
+            await sleep_for(llm.ttft)
         prompt_tokens = sum(len(m.text.split()) for m in self.ctx.messages())
         if isinstance(response, (MockToolCall, list)):
             calls = [response] if isinstance(response, MockToolCall) else response
@@ -302,7 +302,7 @@ class _MockLLMStream(LLMStream):
             words = re.findall(r"\S+\s*", response)
             for i, word in enumerate(words):
                 if i and llm.token_delay:
-                    await asyncio.sleep(llm.token_delay)
+                    await sleep_for(llm.token_delay)
                 self._push(ChatChunk(self.request_id, delta=word))
             completion, finish = len(words), "stop"
         self._push(
@@ -374,7 +374,7 @@ class MockTTS(TTS):
         if duration <= 0:
             return
         if self.ttfb:
-            await asyncio.sleep(self.ttfb)
+            await sleep_for(self.ttfb)
         audio = synth_speech(
             duration, self.sample_rate, frequency=self.frequency, amplitude=self.amplitude
         )
@@ -443,7 +443,7 @@ class MockTurnDetector(TurnDetector):
     async def _predict(self, *, audio: AudioFrame | None, chat_ctx: ChatContext | None) -> float:
         self.calls += 1
         if self.delay:
-            await asyncio.sleep(self.delay)
+            await sleep_for(self.delay)
         if self.probability is not None:
             return self.probability
         last = chat_ctx.last_message("user") if chat_ctx else None
@@ -666,7 +666,7 @@ class MockEngineConnection(EngineConnection):
         self._emit(ResponseStarted(response_id=rid))
         try:
             if engine.response_delay:
-                await asyncio.sleep(engine.response_delay)
+                await sleep_for(engine.response_delay)
             if verbatim is not None:
                 text, calls = verbatim, []
             else:

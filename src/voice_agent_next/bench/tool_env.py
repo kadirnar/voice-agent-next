@@ -23,7 +23,6 @@ compared *semantically* by parameter kind (``"October 3rd"`` = ``"2026-10-03"``,
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import hashlib
 import json
@@ -40,7 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ..chat import ChatContext, FunctionCall, FunctionCallOutput
 from ..errors import ConfigurationError, ToolError
 from ..tools import FunctionTool
-from ..utils.clock import now
+from ..utils.clock import now, sleep_until
 from .stimuli import Scenario, TurnSpec
 
 __all__ = [
@@ -917,7 +916,7 @@ def _bind(
         log.append(rec)
         try:
             if delay > 0:
-                await asyncio.sleep(delay)
+                await sleep_until(rec.started + delay)  # never short (Windows timers)
             before = state_hash(db)
             result = tool.run(db, canonical_args(tool, kwargs, year=year))
             rec.ok = True

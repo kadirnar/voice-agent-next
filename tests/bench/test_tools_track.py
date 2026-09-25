@@ -379,7 +379,7 @@ def test_reference_engine_passes_every_check(tmp_path: Path) -> None:
     # the tool round = speech end -> call -> 50 ms mock tool -> speech
     item = results.items[0]
     round0 = item["turn_details"][0]
-    assert round0["tool_round"] and round0["tool_exec_ms"][0] >= 35  # 40 ms tool; Windows timers
+    assert round0["tool_round"] and round0["tool_exec_ms"][0] >= 50  # the 50 ms mock tool
     assert round0["tool_round_latency_ms"] >= round0["pre_tool_ms"]
     assert item["calls_detail"][0]["name"] == "cancel_order"
     assert "tool F1" in tools_markdown_table(results)
