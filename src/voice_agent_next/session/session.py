@@ -1044,7 +1044,10 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         run = _ToolRun(call, tool, task)
         self._tool_runs[call.call_id] = run
         task.add_done_callback(functools.partial(self._forget_run, run))
-        if tool is not None and not tool.blocking:
+        # a delegating engine (GPT-Live) keeps the conversation going while its backend
+        # waits: every result is delivered when ready, whatever the tool's ``blocking``
+        delegated = self.connection.capabilities.tool_mode == "delegation"
+        if (tool is not None and not tool.blocking) or delegated:
             native = self.connection.capabilities.tool_mode != "blocking"
             self._tasks.spawn(self._deliver_later(run, native=native), name=f"tool-{call.name}")
             if native:  # the model does not wait: nothing to answer now
