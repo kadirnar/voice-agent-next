@@ -30,6 +30,9 @@ from voice_agent_next.providers.openai.realtime import (
 from voice_agent_next.utils import now
 
 FAST = RotationPolicy(quiet_period=0.1)
+EARLY = 0.035
+"""How early a loop timer may fire, measured with ``now()``: on Windows the loop clock
+ticks every 15.6 ms and a timer fires up to one clock resolution early (two ticks)."""
 
 
 @function_tool
@@ -137,9 +140,10 @@ async def test_rotation_waits_until_the_answer_was_played() -> None:
         await rec.wait(lambda: rec.of(ResponseAudio))
         conn.rotate("test")
         await rec.wait(lambda: rec.of(ResponseDone), timeout=10)
-        done_at = now()
+        done_at = rec.of(ResponseDone)[0].timestamp
         played = sum(a.frame.duration for a in rec.of(ResponseAudio))
-        await rec.wait(lambda: metrics, timeout=10)
+        # metrics are emitted synchronously; the collector may not have the status yet
+        await rec.wait(lambda: metrics and statuses(rec)[-1:] == ["reconnected"], timeout=10)
         switched = rec.of(EngineStatus)[0].timestamp
         # generation ran at 2x real time: the switch waited for the playout to finish
         assert switched - rec.of(ResponseAudio)[0].timestamp >= played - 0.1
@@ -192,7 +196,10 @@ async def test_drop_reconnects_with_history_and_buffered_audio() -> None:
         await rec.wait(lambda: statuses(rec)[-1:] == ["reconnected"])
         (m,) = metrics
         assert not m.planned and m.attempts == 1 and m.lost_audio == 0
-        assert m.buffered_audio == pytest.approx(0.4, abs=0.01) and m.gap >= 0.3
+        assert m.buffered_audio == pytest.approx(0.4, abs=0.01)
+        assert m.gap >= 0.3 - EARLY  # the backoff
+        # the new session's seed may still be on its way to the server (Windows' Proactor)
+        await wait_for(lambda: len(created_items(server, mark)) >= 3)
         texts = [item["content"][0]["text"] for item in created_items(server, mark)]
         assert texts == ["remember blue", "Blue it is.", "still there?"]
         new = server.connections[-1]
@@ -221,6 +228,8 @@ async def test_tools_in_flight_block_rotation_and_survive_a_drop() -> None:
         mark = len(server.received)
         await server.drop()
         await rec.wait(lambda: metrics)
+        # the reconnect does not wait for the server to read the seed: wait for delivery
+        await wait_for(lambda: len(created_items(server, mark)) >= 2)
         items = created_items(server, mark)
         assert [i["type"] for i in items] == ["message", "function_call"]
         assert items[1]["call_id"] == call.call_id
@@ -229,8 +238,8 @@ async def test_tools_in_flight_block_rotation_and_survive_a_drop() -> None:
         assert server.events("conversation.item.create")[-1]["item"]["type"] == (
             "function_call_output"
         )
-        await asyncio.sleep(0.4)  # the pending rotation was satisfied by the reconnect
-        assert len(metrics) == 1
+        await asyncio.sleep(0.4)  # the pending rotation was satisfied by the reconnect:
+        assert len(metrics) == 1 and len(server.handshakes) == 3  # no new standby either
 
 
 async def test_carry_over_strategy_is_pluggable() -> None:

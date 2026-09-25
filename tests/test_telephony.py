@@ -15,7 +15,7 @@ import pytest
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
-from voice_agent_next import Agent, AgentSession, AudioFrame
+from voice_agent_next import Agent, AgentSession, AgentState, AudioFrame
 from voice_agent_next.audio.codecs import alaw_encode, mulaw_decode, mulaw_encode
 from voice_agent_next.providers.mock import MockEngine, synth_speech
 from voice_agent_next.session import Interrupted, SessionClosed
@@ -757,6 +757,10 @@ async def test_phone_call_audio_both_ways_and_dtmf(provider: str) -> None:
         greeting_bytes = len("Welcome.") / 15 * rate * 2
         await wait_for(lambda: len(carrier.audio()) >= greeting_bytes * 0.85)
         await wait_for(lambda: transport.buffered_duration() == 0.0 and carrier.echoed)
+        # ... and the session is done with it: its playback clock may end a timer tick after
+        # the transport's mark-based estimate, and speech before that is a barge-in
+        session = calls.sessions[0]
+        await wait_for(lambda: session.agent_state == AgentState.LISTENING)
 
         await carrier.press("7")
         await carrier.press("#")
@@ -770,7 +774,6 @@ async def test_phone_call_audio_both_ways_and_dtmf(provider: str) -> None:
         answer_audio = (len(carrier.audio()) - heard_before) / 2 / rate
         assert answer_audio == pytest.approx(len(answer) / 15, abs=0.1)
 
-        session = calls.sessions[0]
         texts = [(m.role, m.text) for m in session.history.messages()]
         assert texts == [("assistant", "Welcome."), ("user", "hello"), ("assistant", answer)]
         assert carrier.clears == 0 and not calls.interruptions
