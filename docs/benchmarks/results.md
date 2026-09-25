@@ -66,6 +66,16 @@ These runs use the same scenario (`latency-local*.yaml`) and the same LLM and TT
 
 Audio-streaming TTS removes the clause-rendering wait. It is the largest single CPU improvement measured so far.
 
+**Local TTS on the RTX 5070 Ti (#79):** full local pipeline with faster-whisper on CUDA + Ollama + each TTS. Other agents' workloads ran on the machine at the same time.
+
+| TTS | first audio / RTF | v2v p50 |
+|---|---:|---:|
+| **Qwen3-TTS 0.6B** (CUDA, audio streaming, CUDA-graph code predictor) | **~115 ms / 0.44** | **715 ms** |
+| Qwen3-TTS 1.7B (CUDA) | ~118 ms / 0.46 | 875 ms |
+| Chatterbox Nano (CUDA) | 466 ms / 0.15 | 1,053 ms |
+| Chatterbox Turbo (CUDA) | 980 ms / 0.29 | 1,436 ms (10 % dead air) |
+| Kokoro v1.0 (CPU) | 1,727 ms / 0.41 | 1,036 ms |
+
 **What this shows:** with a streaming or GPU recognizer, the end-of-turn delay reaches the cascade's fixed 0.4 s minimum endpointing delay. The next levers are:
 - a lower minimum delay for streaming STT;
 - speculative generation (#27, merged; it saves 190–290 ms on mock stacks with cloud-like LLM latencies, and is off by default);
