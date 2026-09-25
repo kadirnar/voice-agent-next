@@ -223,13 +223,18 @@ def _pct(counts: EditCounts) -> float | None:
 
 
 def _clip_answer(run: _SessionRun) -> AudioFrame:
-    """Agent channel from the user's speech onset to the end of the session."""
+    """Agent channel from its first audio after the question's onset (minus 0.1 s) to the
+    end of the session. The silence while the question plays is left out: ASR models
+    hallucinate words ("you you...") in long silences."""
     rec = run.call.recording
     agent = rec.agent_audio()
     if not run.call.turns:
         return agent
-    start = max(0.0, rec.to_offset(run.call.turns[0].speech_start))
-    return agent.slice(min(start, agent.duration), None)
+    turn = run.call.turns[0]
+    start = rec.to_offset(turn.speech_start)
+    if turn.reply_start is not None:
+        start = max(start, rec.to_offset(turn.reply_start) - 0.1)
+    return agent.slice(min(max(0.0, start), agent.duration), None)
 
 
 def summarize_quality(
@@ -352,15 +357,15 @@ _ITEM_COLUMNS = (
 _METHOD = """\
 * Every question is played to a **fresh session** on one engine instance (warmed up
   once) by the real-time caller over the loopback transport ({chunk_ms:g} ms chunks,
-  questions normalized to {loudness} and trimmed to their speech). The answer ends when
+  questions normalized to {loudness}). The answer ends when
   the agent is idle and quiet for {gap:g} s; no agent speech {timeout:g} s after the
   question ends is a missed answer.
-* The agent's audio (from the question onset to the end of the session) is transcribed
-  after all sessions by **{asr}** and scored: {normalizer} normalizer; closed answers are
-  read from the transcript (the first label/number/letter after the last "answer", else
-  the label the reply starts with, else the last one mentioned); `contains`: the
-  reference appears as whole words; `refusal`: VoiceBench's AdvBench refusal phrases.
-  Empty answers count as wrong.
+* The agent's audio (from its first sound after the question onset to the end of the
+  session) is transcribed after all sessions by **{asr}** and scored: {normalizer}
+  normalizer; closed answers are read from the transcript (the first label/number/letter
+  after the last "answer", else the label the reply starts with, else the last one
+  mentioned); `contains`: the reference appears as whole words; `refusal`: VoiceBench's
+  AdvBench refusal phrases. Empty answers count as wrong.
 * Judge: {judge}.
 * Accuracy CIs: 95 % percentile bootstrap of the mean ({resamples} resamples, seed
   {seed}). `answer latency` = agent onset (reference VAD) − end of the question.

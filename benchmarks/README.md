@@ -502,15 +502,17 @@ van bench quality --preset local-cpu -d my-questions.jsonl --asr faster-whisper/
 ```
 
 **How it runs.** Each question gets a **fresh session**, so no answer sees an earlier
-question. All sessions run on one engine instance, warmed up once. The question is loudness-normalized
-(−20 dBFS) and streamed in real time by the T1 caller over the loopback transport. The
-answer is over when the agent is idle and has been quiet for `--answer-gap` (1.5 s; reasoning
-answers pause between sentences). If the agent says nothing for `--reply-timeout` (20 s)
-after the question ends, the question counts as *missed*. The agent channel, from the
-question's onset to the end of the session, is transcribed **after** all sessions by
-`--asr` (default `faster-whisper/small.en`). The ASR therefore never competes with a local
-system for the CPU. Keep the same ASR for every comparison. Recordings are saved per
-question in `artifacts/session-NNN/` (`--no-audio` to skip).
+question. All sessions run on one engine instance, warmed up once. The question is
+loudness-normalized (−20 dBFS) and streamed in real time by the T1 caller over the
+loopback transport. The answer is over when the agent is idle and has been quiet for
+`--answer-gap` (1.5 s; reasoning answers pause between sentences). If the agent says
+nothing for `--reply-timeout` (20 s) after the question ends, the question counts as
+*missed*. The agent channel, from its first sound after the question's onset to the end of
+the session, is transcribed **after** all sessions by `--asr` (default
+`faster-whisper/small.en`). The ASR therefore never competes with a local system for the
+CPU. The silence during the question is left out, because ASR models hallucinate words in
+long silences. Keep the same ASR for every comparison. Recordings are saved per question
+in `artifacts/session-NNN/` (`--no-audio` to skip).
 
 ### T5 metrics
 
