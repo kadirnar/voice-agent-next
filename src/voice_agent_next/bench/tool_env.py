@@ -73,31 +73,91 @@ BUILTIN_TOOL_SUITES: dict[str, Path] = {"smoke": _DATA_DIR / "tools_smoke.yaml"}
 
 # ------------------------------------------------------------------ normalization
 
-_UNITS = (
-    "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen "
-    "fifteen sixteen seventeen eighteen nineteen"
-).split()
-_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
-         "eighty": 80, "ninety": 90}  # fmt: skip
+_UNITS = [
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+]
+_TENS = {
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
 _NUMBER_WORDS: dict[str, int] = {w: i for i, w in enumerate(_UNITS)} | _TENS | {"oh": 0}
 _ORDINALS = {
-    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7,
-    "eighth": 8, "ninth": 9, "tenth": 10, "eleventh": 11, "twelfth": 12, "thirteenth": 13,
-    "fourteenth": 14, "fifteenth": 15, "sixteenth": 16, "seventeenth": 17, "eighteenth": 18,
-    "nineteenth": 19, "twentieth": 20, "thirtieth": 30,
-}  # fmt: skip
+    "first": 1,
+    "second": 2,
+    "third": 3,
+    "fourth": 4,
+    "fifth": 5,
+    "sixth": 6,
+    "seventh": 7,
+    "eighth": 8,
+    "ninth": 9,
+    "tenth": 10,
+    "eleventh": 11,
+    "twelfth": 12,
+    "thirteenth": 13,
+    "fourteenth": 14,
+    "fifteenth": 15,
+    "sixteenth": 16,
+    "seventeenth": 17,
+    "eighteenth": 18,
+    "nineteenth": 19,
+    "twentieth": 20,
+    "thirtieth": 30,
+}
 _MONTHS = {
     m: i + 1
     for i, names in enumerate(
-        [("january", "jan"), ("february", "feb"), ("march", "mar"), ("april", "apr"),
-         ("may",), ("june", "jun"), ("july", "jul"), ("august", "aug"),
-         ("september", "sep", "sept"), ("october", "oct"), ("november", "nov"),
-         ("december", "dec")]
+        [
+            ("january", "jan"),
+            ("february", "feb"),
+            ("march", "mar"),
+            ("april", "apr"),
+            ("may",),
+            ("june", "jun"),
+            ("july", "jul"),
+            ("august", "aug"),
+            ("september", "sep", "sept"),
+            ("october", "oct"),
+            ("november", "nov"),
+            ("december", "dec"),
+        ]
     )
     for m in names
-}  # fmt: skip
-_ABBREVIATIONS = {"st": "street", "ave": "avenue", "rd": "road", "dr": "drive", "apt": "apartment",
-                  "blvd": "boulevard", "ln": "lane"}  # fmt: skip
+}
+_ABBREVIATIONS = {
+    "st": "street",
+    "ave": "avenue",
+    "rd": "road",
+    "dr": "drive",
+    "apt": "apartment",
+    "blvd": "boulevard",
+    "ln": "lane",
+}
 
 
 def words_to_digits(text: str) -> str:
@@ -287,8 +347,9 @@ def _set_order(db: dict[str, Any], order_id: str, **changes: Any) -> None:
 
 def _lookup_order(db: dict[str, Any], a: dict[str, Any]) -> Any:
     order = _order(db, a["order_id"])
-    return {k: order[k] for k in ("order_id", "status", "items", "total", "delivery_date")
-            if k in order}  # fmt: skip
+    return {
+        k: order[k] for k in ("order_id", "status", "items", "total", "delivery_date") if k in order
+    }
 
 
 def _cancel_order(db: dict[str, Any], a: dict[str, Any]) -> Any:
@@ -304,20 +365,27 @@ def _cancel_order(db: dict[str, Any], a: dict[str, Any]) -> Any:
 def _request_refund(db: dict[str, Any], a: dict[str, Any]) -> Any:
     order = _order(db, a["order_id"])
     if order["status"] != "delivered":
-        raise ToolError(f"Order {order['order_id']} is {order['status']}: only delivered "
-                        "orders can be refunded.")  # fmt: skip
+        raise ToolError(
+            f"Order {order['order_id']} is {order['status']}: only delivered "
+            "orders can be refunded."
+        )
     if order.get("refund"):
         raise ToolError(f"A refund for order {order['order_id']} was already requested.")
     _set_order(db, a["order_id"], refund="requested")
-    return {"order_id": order["order_id"], "refund": "requested", "amount": order.get("total"),
-            "processing_days": 5}  # fmt: skip
+    return {
+        "order_id": order["order_id"],
+        "refund": "requested",
+        "amount": order.get("total"),
+        "processing_days": 5,
+    }
 
 
 def _update_address(db: dict[str, Any], a: dict[str, Any]) -> Any:
     order = _order(db, a["order_id"])
     if order["status"] not in ("pending", "processing"):
-        raise ToolError(f"Order {order['order_id']} is {order['status']}: the address can no "
-                        "longer be changed.")  # fmt: skip
+        raise ToolError(
+            f"Order {order['order_id']} is {order['status']}: the address can no longer be changed."
+        )
     if not a["address"]:
         raise ToolError("The new address is empty.")
     _set_order(db, a["order_id"], address=a["address"])
@@ -345,8 +413,13 @@ def _check_availability(db: dict[str, Any], a: dict[str, Any]) -> Any:
     alternatives = sorted(
         s.split(" ")[1] for s, n in slots.items() if s.startswith(a["date"]) and n > 0 and s != key
     )
-    return {"date": a["date"], "time": a["time"], "party_size": party, "available": free > 0,
-            "alternative_times": alternatives}  # fmt: skip
+    return {
+        "date": a["date"],
+        "time": a["time"],
+        "party_size": party,
+        "available": free > 0,
+        "alternative_times": alternatives,
+    }
 
 
 def _book_table(db: dict[str, Any], a: dict[str, Any]) -> Any:
@@ -363,11 +436,19 @@ def _book_table(db: dict[str, Any], a: dict[str, Any]) -> Any:
     digest = hashlib.sha256(f"{a['name']}|{key}|{party}".encode()).hexdigest()
     booking_id = str(1000 + int(digest[:6], 16) % 9000)  # deterministic: same booking, same id
     db.setdefault("bookings", {})[booking_id] = {
-        "name": a["name"], "date": a["date"], "time": a["time"], "party_size": party,
+        "name": a["name"],
+        "date": a["date"],
+        "time": a["time"],
+        "party_size": party,
         "status": "confirmed",
-    }  # fmt: skip
-    return {"booking_id": booking_id, "status": "confirmed", "date": a["date"], "time": a["time"],
-            "party_size": party}  # fmt: skip
+    }
+    return {
+        "booking_id": booking_id,
+        "status": "confirmed",
+        "date": a["date"],
+        "time": a["time"],
+        "party_size": party,
+    }
 
 
 def _cancel_booking(db: dict[str, Any], a: dict[str, Any]) -> Any:
@@ -547,8 +628,11 @@ class ToolScenario(BaseModel):
 
     @property
     def expected_calls(self) -> list[ExpectedCall]:
-        return [c.model_copy(update={"turn": i}) for i, t in enumerate(self.turns)
-                for c in t.expect_calls]  # fmt: skip
+        return [
+            c.model_copy(update={"turn": i})
+            for i, t in enumerate(self.turns)
+            for c in t.expect_calls
+        ]
 
     def turn_id(self, index: int) -> str:
         return self.turns[index].id or f"t{index}"
@@ -591,8 +675,9 @@ class ToolSuite(BaseModel):
         for s in self.scenarios:
             for name in s.tools:
                 if name not in TOOL_LIBRARY:
-                    raise ValueError(f"{s.id}: unknown tool {name!r} (known: "
-                                     f"{', '.join(TOOL_LIBRARY)})")  # fmt: skip
+                    raise ValueError(
+                        f"{s.id}: unknown tool {name!r} (known: {', '.join(TOOL_LIBRARY)})"
+                    )
             for call in s.expected_calls:
                 if call.name not in s.tools:
                     raise ValueError(f"{s.id}: expected call {call.name!r} is not offered")
@@ -622,9 +707,13 @@ class ToolSuite(BaseModel):
 
     def scenario_sha256(self, scenario: ToolScenario) -> str:
         return _sha256_json(
-            {"scenario": scenario.model_dump(mode="json"), "database": self.initial_db(scenario),
-             "instructions": self.instructions_for(scenario), "tool_delay": self.tool_delay}
-        )  # fmt: skip
+            {
+                "scenario": scenario.model_dump(mode="json"),
+                "database": self.initial_db(scenario),
+                "instructions": self.instructions_for(scenario),
+                "tool_delay": self.tool_delay,
+            }
+        )
 
     def long_date(self) -> str:
         from datetime import date
@@ -670,20 +759,44 @@ class ToolSuite(BaseModel):
                 ) from exc
         return db
 
-    def stimulus_scenario(self, scenario: ToolScenario) -> Scenario:
-        """The scenario's caller turns as a T1 :class:`~voice_agent_next.bench.stimuli.Scenario`."""
+    def stimulus_scenario(self, scenarios: Sequence[ToolScenario] | None = None) -> Scenario:
+        """The caller turns of ``scenarios`` (default: all) as one T1
+        :class:`~voice_agent_next.bench.stimuli.Scenario`; turn ids are
+        ``<scenario>/<turn>``."""
         turns = []
-        for i, t in enumerate(scenario.turns):
-            duration = t.duration
-            if self.stimuli == "synthetic" and duration is None:
-                duration = round(min(1.2, max(0.5, len(t.text) / 25.0)), 2)
-            turns.append(TurnSpec(id=scenario.turn_id(i), text=t.text, duration=duration))
+        for scenario in self.scenarios if scenarios is None else scenarios:
+            for i, t in enumerate(scenario.turns):
+                duration = t.duration
+                if self.stimuli == "synthetic" and duration is None:
+                    duration = round(min(1.2, max(0.5, len(t.text) / 25.0)), 2)
+                turns.append(
+                    TurnSpec(
+                        id=f"{scenario.id}/{scenario.turn_id(i)}", text=t.text, duration=duration
+                    )
+                )
         return Scenario(
-            name=f"{self.name}/{scenario.id}", version=self.version, sample_rate=self.sample_rate,
-            chunk=self.chunk, loudness_dbfs=self.loudness_dbfs, lead_in=self.lead_in,
-            stimuli=self.stimuli, tts=self.tts, reply_timeout=self.reply_timeout,
-            gap_after_reply=self.gap_after_reply, max_reply=self.max_reply, turns=turns,
-        )  # fmt: skip
+            name=self.name,
+            version=self.version,
+            sample_rate=self.sample_rate,
+            chunk=self.chunk,
+            loudness_dbfs=self.loudness_dbfs,
+            lead_in=self.lead_in,
+            stimuli=self.stimuli,
+            tts=self.tts,
+            reply_timeout=self.reply_timeout,
+            gap_after_reply=self.gap_after_reply,
+            max_reply=self.max_reply,
+            turns=turns,
+        )
+
+    def with_caller(self, tts: str | dict[str, Any] | None) -> ToolSuite:
+        """A copy whose caller speaks with ``tts`` (a TTS spec), or synthetic speech for
+        ``"synthetic"``; ``None`` keeps the suite's setting."""
+        if tts is None:
+            return self
+        if tts == "synthetic":
+            return self.model_copy(update={"stimuli": "synthetic", "tts": None})
+        return self.model_copy(update={"stimuli": "tts", "tts": tts})
 
 
 def _sha256_json(data: Any) -> str:
@@ -733,8 +846,9 @@ def canonical_args(tool: ToolDef, args: Mapping[str, Any], *, year: int) -> dict
                 raise ToolError(f"missing required argument {name!r}")
             out[name] = None
             continue
-        out[name] = str(value).strip() if spec.kind == "free" else canonical(value, spec.kind,
-                                                                             year=year)  # fmt: skip
+        out[name] = (
+            str(value).strip() if spec.kind == "free" else canonical(value, spec.kind, year=year)
+        )
     return out
 
 
@@ -761,9 +875,10 @@ class CallRecord:
             "changed_state": self.changed_state,
             "output": self.output[:300],
             "t_s": round(self.started - origin, 3),
-            "duration_ms": None if self.ended is None else round(
-                (self.ended - self.started) * 1000.0, 1),
-        }  # fmt: skip
+            "duration_ms": None
+            if self.ended is None
+            else round((self.ended - self.started) * 1000.0, 1),
+        }
 
 
 def build_tools(
@@ -898,4 +1013,3 @@ def db_diff(actual: Any, expected: Any, path: str = "", limit: int = 10) -> list
     elif actual != expected:
         out.append(f"{path}: {actual!r} != {expected!r}")
     return out[:limit]
-

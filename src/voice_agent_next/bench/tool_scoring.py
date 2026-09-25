@@ -182,9 +182,7 @@ def ungrounded_facts(agent_text: str, sources: Sequence[str]) -> list[str]:
     return out
 
 
-def say_do_violations(
-    agent_text: str, tools: Sequence[str], done: set[str]
-) -> list[str]:
+def say_do_violations(agent_text: str, tools: Sequence[str], done: set[str]) -> list[str]:
     """Sentences claiming a write tool's action although no successful call of that tool
     (``done``) happened."""
     out: list[str] = []
@@ -257,21 +255,31 @@ class ScenarioScore:
 
     def summary(self) -> dict[str, Any]:
         return {
-            "passed": self.passed, "state_ok": self.state_ok, "outputs_ok": self.outputs_ok,
-            "missing_outputs": self.missing_outputs, "state_diff": self.state_diff,
-            "required_calls": self.required_calls, "matched_required": self.matched_required,
-            "matched_calls": self.matched_calls, "calls": self.calls,
-            "tool_precision": _round(self.precision), "tool_recall": _round(self.recall),
-            "args_correct": self.args_correct, "args_total": self.args_total,
-            "arg_acc": _round(self.arg_acc), "entities_correct": self.entities_correct,
+            "passed": self.passed,
+            "state_ok": self.state_ok,
+            "outputs_ok": self.outputs_ok,
+            "missing_outputs": self.missing_outputs,
+            "state_diff": self.state_diff,
+            "required_calls": self.required_calls,
+            "matched_required": self.matched_required,
+            "matched_calls": self.matched_calls,
+            "calls": self.calls,
+            "tool_precision": _round(self.precision),
+            "tool_recall": _round(self.recall),
+            "args_correct": self.args_correct,
+            "args_total": self.args_total,
+            "arg_acc": _round(self.arg_acc),
+            "entities_correct": self.entities_correct,
             "entities_total": self.entities_total,
             "unnecessary_calls": self.unnecessary_calls,
-            "unexpected_writes": self.unexpected_writes, "tool_errors": self.tool_errors,
-            "wrong_args": self.wrong_args, "missing_calls": self.missing_calls,
+            "unexpected_writes": self.unexpected_writes,
+            "tool_errors": self.tool_errors,
+            "wrong_args": self.wrong_args,
+            "missing_calls": self.missing_calls,
             "say_do_violations": self.say_do,
             "hallucinations": [t for v in self.ungrounded.values() for t in v],
             "turns_to_completion": self.turns_to_completion,
-        }  # fmt: skip
+        }
 
 
 def _round(value: float | None) -> float | None:
@@ -337,8 +345,9 @@ def score_scenario(
         unexpected_writes=sum(calls[j].changed_state for j in unmatched),
         tool_errors=sum(not c.ok for c in calls),
         wrong_args=[f"{m.expected.name}: {w}" for m in matches for w in m.wrong_args],
-        missing_calls=[f"{m.expected.name}({m.expected.args})" for m in required
-                       if m.actual is None],  # fmt: skip
+        missing_calls=[
+            f"{m.expected.name}({m.expected.args})" for m in required if m.actual is None
+        ],
         say_do=say_do,
         say_do_turns=say_do_turns,
         ungrounded=ungrounded,
