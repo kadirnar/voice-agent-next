@@ -6,8 +6,10 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
+from voice_agent_next import CascadeOptions, SessionOptions
 from voice_agent_next.bench.results import load_run
 from voice_agent_next.bench.stimuli import (
     Scenario,
@@ -24,7 +26,11 @@ from voice_agent_next.bench.tracks.turn_taking import (
     run_turn_taking_benchmark,
     turn_taking_markdown_table,
 )
+from voice_agent_next.engines.cascade import CascadeEngine
 from voice_agent_next.errors import ConfigurationError
+from voice_agent_next.presets import LOCAL_TURN_TAKING
+from voice_agent_next.providers.energy import EnergyVAD
+from voice_agent_next.providers.mock import MockLLM, MockSTT, MockTTS, MockTurnDetector
 
 REPLY = "Sure, we open at nine every day."  # 32 chars: ~2.1 s of mock speech
 
@@ -163,3 +169,73 @@ def test_patient_mock_engine_waits_through_pauses() -> None:
     assert s.rates["premature_rate"] == 0.0
     v2v = s.metrics["v2v_ms"]
     assert v2v.n == 1 and v2v.p50 is not None and v2v.p50 == pytest.approx(1000, abs=150)
+
+
+# ------------------------------------------ smoke battery on the mock cascade (issue #113)
+
+CASCADE_REPLY = "Sure, we open at nine every day, weekends too."  # ~3 s of mock speech
+CASCADE_BATTERY = {
+    "name": "battery-mock-cascade",
+    "lead_in": 0.3,
+    "reply_timeout": 4.0,
+    "gap_after_reply": 0.3,
+    "turns": [
+        {"id": "hello", "duration": 0.5},
+        {"id": "order", "parts": [{"duration": 0.5, "pause": 0.3}, {"duration": 0.5}]},
+        {"id": "policy", "duration": 0.6},
+        {"id": "uh-huh", "duration": 0.4, "barge_in": 0.8, "expect_reply": False,
+         "category": "backchannel"},
+        {"id": "hours", "duration": 0.6},
+        {"id": "stop", "duration": 1.2, "barge_in": 0.8, "category": "interruption"},
+    ],
+}  # fmt: skip
+
+
+def _voiced_seconds(audio: Any) -> float:
+    x = np.abs(audio.to_float32())
+    win = audio.sample_rate // 50
+    frames = x[: len(x) // win * win].reshape(-1, win)
+    return float((frames.max(axis=1) >= 0.01).sum() * 0.02)
+
+
+def _hear(audio: Any) -> str:
+    """The mock STT's transcripts: what small streaming ASR models make of the stimuli —
+    a short reaction comes out as a wrong word pair (NeMo: "Uh-huh." -> "but high")."""
+    return "but high" if _voiced_seconds(audio) < 0.5 else "Where is my order?"
+
+
+class _MockCascade(BenchSystem):
+    """Mock STT/LLM/TTS + energy VAD + mock turn detector, with the local presets'
+    turn-taking settings."""
+
+    def build_engine(self) -> Any:
+        return CascadeEngine(
+            stt=MockSTT(transcripts=_hear, default_text=""),  # no interim words
+            llm=MockLLM(default_response=CASCADE_REPLY),
+            tts=MockTTS(),
+            vad=EnergyVAD(),
+            turn_detector=MockTurnDetector(),
+            options=CascadeOptions(**LOCAL_TURN_TAKING["cascade"]),
+        )
+
+    def session_options(self) -> SessionOptions:
+        return SessionOptions(**LOCAL_TURN_TAKING["session"])
+
+
+def test_mock_cascade_battery_smoke() -> None:
+    """CI smoke version of the T4 battery on a cascade: no premature reply in a short
+    pause, no false barge-in on a mis-transcribed backchannel, no dead air."""
+    base = BenchSystem.from_options(stt="mock", llm="mock", tts="mock", vad="energy")
+    system = _MockCascade(base.config, "mock-cascade")
+    results = asyncio.run(
+        run_turn_taking_benchmark(
+            system, load_scenario(CASCADE_BATTERY), TurnTakingOptions(save_audio=False)
+        )
+    )
+    s = results.summary
+    assert s.counts["backchannels"] == 1 and s.counts["interruptions"] == 1
+    assert s.rates["premature_rate"] == 0.0
+    assert s.rates["false_barge_in_rate_backchannel"] == 0.0
+    assert s.rates["backchannel_yield_rate"] == 1.0 and s.rates["resume_rate"] == 1.0
+    assert s.rates["interrupted_rate"] == 1.0 and s.rates["stop_within_500ms_rate"] == 1.0
+    assert s.rates["dead_air_rate"] == 0.0 and s.rates["missed_rate"] == 0.0

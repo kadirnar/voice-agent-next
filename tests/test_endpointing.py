@@ -334,15 +334,21 @@ async def test_confident_false_commit_raises_the_confident_delay() -> None:
 
 
 async def test_no_commit_while_resumed_speech_is_unconfirmed() -> None:
-    """The VAD confirms speech ~0.1 s after its onset (``min_speech_duration``): a user who
-    resumes just before the commit must not be answered in the gap."""
-    session = cascade(min_endpointing_delay=0.45)  # VAD only: commit 0.45 s after the end
+    """The VAD confirms speech only after ``min_speech_duration`` (0.3 s here): a user who
+    resumes just before the commit must not be answered in that gap."""
+    session = AgentSession(
+        stt=MockSTT(latency=0.01),
+        llm=MockLLM(responses=lambda ctx: "Okay."),
+        tts=MockTTS(chars_per_second=200.0),
+        vad=EnergyVAD(min_speech_duration=0.3),
+        cascade_options=CascadeOptions(min_endpointing_delay=0.5),  # VAD only
+    )
     rec = Recorder(session)
     transport = LoopbackTransport()
     await session.start(Agent("x"), transport)
     await transport.play_user_audio(synth_speech(0.4, SR), realtime=False)
-    await transport.play_user_audio(AudioFrame.silence(0.35, SR))  # resumes 0.1 s early...
-    await transport.play_user_audio(synth_speech(0.4, SR))  # ...in real time: confirmed late
+    await transport.play_user_audio(AudioFrame.silence(0.35, SR))  # resumes 0.15 s early...
+    await transport.play_user_audio(synth_speech(0.5, SR))  # ...confirmed ~0.15 s too late
     await transport.play_user_audio(AudioFrame.silence(0.8, SR), realtime=False)
     await wait_for(lambda: bool(rec.turn_metrics()), 6)
     await asyncio.sleep(0.5)
