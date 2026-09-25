@@ -10,6 +10,9 @@ it) and by ``van serve``:
   telephony providers). Any other website is refused with HTTP 403, which stops
   cross-site WebSocket hijacking: a page a user happens to visit cannot drive the agent
   (and spend its engine) from their browser;
+* :class:`ApiKeys` — bearer-token authentication shared by the servers (``Authorization:
+  Bearer``, an ``api-key`` header or a browser subprotocol; constant-time comparison) and
+  :func:`generate_api_key`;
 * :func:`is_loopback_host` / :func:`exposure_warning` — binding a non-loopback address
   without authentication is flagged (``van serve`` refuses it for OpenAI Realtime unless
   ``--insecure`` is given);
@@ -23,9 +26,13 @@ See the security section of ``docs/deploy/serving.md``.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hmac
 import ipaddress
 import logging
-from collections.abc import Iterable
+import secrets
+from collections.abc import Callable, Iterable, Sequence
 from typing import Final
 from urllib.parse import urlsplit
 
@@ -33,6 +40,8 @@ from ..utils.ids import new_id
 from ..utils.log import logger
 
 __all__ = [
+    "KEY_SUBPROTOCOL",
+    "ApiKeys",
     "DEFAULT_IDLE_TIMEOUT",
     "DEFAULT_MAX_SESSIONS",
     "DEFAULT_MAX_SESSION_DURATION",
@@ -43,6 +52,7 @@ __all__ = [
     "OUTBOX_LOW",
     "OriginPolicy",
     "exposure_warning",
+    "generate_api_key",
     "header_origin",
     "is_loopback_host",
     "report_error",
@@ -165,6 +175,99 @@ class OriginPolicy:
             scheme == w_scheme and port == w_port and host.endswith("." + w_host)
             for w_scheme, w_host, w_port in self._wildcards
         )
+
+
+KEY_SUBPROTOCOL: Final = "van-key."
+"""Browsers cannot set headers on a WebSocket: they pass the key as the subprotocol
+``van-key.<key>`` (``new WebSocket(url, ["van-key." + key])``). The key must then be a
+valid subprotocol token (letters, digits and ``-._~!#$%&'*+^`|``; :func:`generate_api_key`
+keys are)."""
+
+
+def generate_api_key() -> str:
+    """A random API key (``van_`` + 32 URL-safe characters, ~190 bits)."""
+    return "van_" + secrets.token_urlsafe(24)
+
+
+class ApiKeys:
+    """The accepted API keys of a server (empty: no authentication).
+
+    A request is authorized when it presents one of the keys as ``Authorization: Bearer
+    <key>``, in an ``api-key`` header, as the password of ``Authorization: Basic`` (what
+    ``https://user:<key>@host/`` URLs send), as a ``van-key.<key>`` WebSocket subprotocol
+    (:data:`KEY_SUBPROTOCOL`, for browsers) or — only where the caller allows it, for
+    telephony webhooks whose URL is all a carrier lets you configure — in a ``key`` query
+    parameter. Keys are compared in constant time and never logged.
+    """
+
+    def __init__(self, keys: str | Iterable[str] | None = ()) -> None:
+        values = [keys] if isinstance(keys, str) else list(keys or ())
+        if any(not isinstance(k, str) or not k for k in values):
+            raise ValueError("API keys must be non-empty strings")
+        self._keys = tuple(k.encode() for k in values)
+
+    def __bool__(self) -> bool:
+        return bool(self._keys)
+
+    def __len__(self) -> int:
+        return len(self._keys)
+
+    def __repr__(self) -> str:  # never the keys themselves
+        return f"ApiKeys(<{len(self._keys)} key(s)>)"
+
+    def matches(self, candidate: str | None) -> bool:
+        """``candidate`` is one of the keys (constant time, no early exit)."""
+        if not candidate:
+            return False
+        given = candidate.encode(errors="replace")
+        matched = False
+        for key in self._keys:
+            matched |= hmac.compare_digest(given, key)
+        return matched
+
+    def authorized(
+        self,
+        header: Callable[[str], Sequence[str]],
+        *,
+        query_key: str | None = None,
+    ) -> bool:
+        """Whether a request presents a valid key (always ``True`` without keys).
+
+        ``header(name)`` returns every value of a request header (case-insensitive);
+        ``query_key`` is the ``key`` query parameter where it is accepted.
+        """
+        if not self._keys:
+            return True
+        return any(self.matches(c) for c in request_credentials(header, query_key=query_key))
+
+
+def request_credentials(
+    header: Callable[[str], Sequence[str]], *, query_key: str | None = None
+) -> list[str]:
+    """Every credential a request presents (see :class:`ApiKeys`)."""
+    found: list[str] = []
+    for value in header("Authorization"):
+        scheme, _, token = value.strip().partition(" ")
+        token = token.strip()
+        if not token:
+            continue
+        if scheme.lower() == "bearer":
+            found.append(token)
+        elif scheme.lower() == "basic":
+            try:
+                decoded = base64.b64decode(token, validate=True).decode()
+            except (binascii.Error, UnicodeDecodeError):
+                continue
+            found.append(decoded.partition(":")[2])
+    found.extend(v.strip() for v in header("api-key") if v.strip())
+    for value in header("Sec-WebSocket-Protocol"):
+        for proto in value.split(","):
+            proto = proto.strip()
+            if proto.startswith(KEY_SUBPROTOCOL):
+                found.append(proto[len(KEY_SUBPROTOCOL) :])
+    if query_key:
+        found.append(query_key)
+    return found
 
 
 def header_origin(values: list[str]) -> str | None:
