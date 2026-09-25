@@ -67,6 +67,7 @@ SMOKE_SHA256 = "b23497dcf43d72354805410ef827b23f7c5e19c1e1fa92c50ef9985c55dd77ca
         ("Jane.Doe@Example.com", "email", "jane.doe@example.com"),
         ("one oh four two", "id", "1042"),
         ("#1042", "id", "1042"),
+        ("four four one O", "id", "4410"),
         ("order 1042", "id", "1042"),
         ("four", "int", "4"),
         (4.0, "int", "4"),
@@ -254,6 +255,22 @@ def test_say_do_violations_and_hallucinations() -> None:
     assert ungrounded_facts("Your table is at 7 pm.", ['{"time": "19:00"}']) == []
     assert ungrounded_facts("It was delivered, total $45.", [*user]) == ["45", "delivered"]
     assert ungrounded_facts("Your order 4410 is on its way.", ["four four one oh"]) == []
+
+
+def test_status_words_need_a_stated_status() -> None:
+    assert ungrounded_facts("It has shipped.", []) == ["shipped"]
+    assert ungrounded_facts("It is currently in transit.", []) == ["in transit"]
+    assert ungrounded_facts("It will be delivered on Friday.", []) == []
+    assert ungrounded_facts("It has shipped.", ['{"status": "shipped"}']) == []
+
+
+def test_caller_voice_override() -> None:
+    suite = load_tool_suite("smoke")
+    assert suite.stimuli == "synthetic" and suite.with_caller(None) is suite
+    voiced = suite.with_caller({"provider": "kokoro"})
+    assert voiced.stimuli == "tts" and voiced.tts == {"provider": "kokoro"}
+    assert voiced.with_caller("synthetic").tts is None
+    assert voiced.stimulus_scenario().tts == {"provider": "kokoro"}
 
 
 def _turns(texts: list[str], agent: list[str], states: list[str | None]) -> list[TurnObservation]:
@@ -457,3 +474,7 @@ def test_cli_runs_the_reference_on_a_suite_file(tmp_path: Path) -> None:
     assert (tmp_path / "t6" / "report.md").exists()
     bad = CliRunner().invoke(app, ["bench", "tools", "-s", str(path), "--only", "nope"])
     assert bad.exit_code != 0
+    preset = CliRunner().invoke(app, ["bench", "tools", "--preset", "no-such-preset"])
+    assert preset.exit_code == 2
+    both = CliRunner().invoke(app, ["bench", "tools", "--preset", "local-cpu", "-c", str(path)])
+    assert both.exit_code == 2
