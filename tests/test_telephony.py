@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -34,15 +35,19 @@ from voice_agent_next.transports.telephony import (
     VonageSerializer,
     VonageTransport,
     create_serializer,
+    plivo_signature_v3,
     plivo_stream_xml,
     stream_token,
     telnyx_stream_texml,
     twilio_signature,
     twilio_stream_twiml,
+    validate_plivo_signature_v3,
     validate_twilio_signature,
     verify_stream_token,
+    verify_vonage_jwt,
     vonage_ncco,
 )
+from voice_agent_next.transports.telephony.auth import vonage_jwt
 from voice_agent_next.transports.telephony.serializers import (
     AudioCleared,
     AudioReceived,
@@ -1277,3 +1282,237 @@ async def test_twilio_handshake_signature_is_checked_with_a_public_url() -> None
             async with Carrier("twilio", calls.url, headers=good) as carrier:
                 await carrier.start()
                 await wait_for(lambda n=n: len(calls.sessions) == n)  # type: ignore[misc]
+
+
+# ------------------------------------------------ answer webhook and carrier checks (#156)
+ANSWER_KEY = "answer-key"
+PLIVO_TOKEN = "plivo-auth-token"
+VONAGE_SIGNATURE_SECRET = "vonage-signature-secret"
+ANSWER_QUERY = {
+    "twilio": f"CallSid={CALL_SID}&From=%2B15550100",
+    "telnyx": f"CallControlId={TELNYX_CALL}",
+    "vonage": f"uuid={VONAGE_CALL}&to=447700900000",
+    "plivo": f"CallUUID={PLIVO_CALL}",
+}
+
+
+def served_calls(provider: str, **server_options: Any) -> Calls:
+    """:class:`Calls` whose server gets extra :class:`TelephonyServer` options."""
+    calls = Calls(provider)
+    options = {
+        "twilio": {"account_sid": TWILIO_ACCOUNT, "auth_token": "twilio-auth-token"},
+        "plivo": {"auth_id": PLIVO_ACCOUNT, "auth_token": PLIVO_TOKEN},
+    }.get(provider, {})
+    calls.server = TelephonyServer(
+        calls.server.session_factory, calls.server.agent_factory, provider=provider, port=0,
+        serializer_options=options, **server_options,
+    )  # fmt: skip
+    return calls
+
+
+async def get_answer(
+    calls: Calls, query: str, headers: dict[str, str] | None = None
+) -> httpx.Response:
+    async with httpx.AsyncClient(trust_env=False) as client:
+        return await client.get(
+            f"http://127.0.0.1:{calls.server.port}/answer?{query}", headers=headers
+        )
+
+
+def markup_token(provider: str, body: str) -> str:
+    """The stream token in served markup."""
+    if provider == "vonage":
+        return str(json.loads(body)[0]["endpoint"][0]["headers"][TOKEN_PARAMETER])
+    match = re.search(TOKEN_PARAMETER + r'(?:" value="|=)([0-9a-f]{64})', body)
+    assert match is not None, body
+    return match.group(1)
+
+
+def test_plivo_signature_v3_matches_plivos_sdk() -> None:
+    # vectors computed with plivo-python's plivo/utils/signature_v3.py (validate_v3_signature)
+    assert plivo_signature_v3("tok", "wss://agent.example.com/", "12345") == (
+        "CTTSfjGa3eEPI7GfKbTIBdizW8SzMxeyc3FqkTIvUDs="
+    )
+    url = "https://h.example/answer?CallUUID=abc&From=%2B1555&key=x"
+    assert plivo_signature_v3("tok", url, "12345") == (
+        "znomfr4tfpVCoeNpXI70Yf/jOu6lwzfSgD9oVBOoi+E="
+    )
+    # query parameters are sorted: the order Plivo sends them in does not matter
+    reordered = "https://h.example/answer?key=x&From=%2B1555&CallUUID=abc"
+    assert plivo_signature_v3("tok", reordered, "12345") == plivo_signature_v3("tok", url, "12345")
+    good = plivo_signature_v3("tok", url, "n")
+    assert validate_plivo_signature_v3("tok", url, "n", good)
+    assert validate_plivo_signature_v3("tok", url, "n", f"old-signature, {good}")  # rotation
+    for token, nonce, signature in (("other", "n", good), ("tok", "m", good), ("tok", "n", None),
+                                    ("tok", None, good), ("", "n", good)):  # fmt: skip
+        assert not validate_plivo_signature_v3(token, url, nonce, signature)
+
+
+def test_vonage_jwt_verification() -> None:
+    now = 1_700_000_000.0
+    claims = {"iat": int(now) - 10, "jti": "x", "iss": "Vonage", "api_key": "abc"}
+    token = vonage_jwt(VONAGE_SIGNATURE_SECRET, claims)
+    assert verify_vonage_jwt(token, VONAGE_SIGNATURE_SECRET, now=now) == claims
+    assert verify_vonage_jwt(f"Bearer {token}", VONAGE_SIGNATURE_SECRET, now=now) == claims
+    assert verify_vonage_jwt(token, "wrong-secret", now=now) is None
+    assert verify_vonage_jwt(token, VONAGE_SIGNATURE_SECRET, now=now + 3600) is None  # too old
+    assert verify_vonage_jwt(token, VONAGE_SIGNATURE_SECRET, now=now - 3600) is None  # future
+    expired = vonage_jwt(VONAGE_SIGNATURE_SECRET, {"iat": int(now), "exp": int(now) - 120})
+    assert verify_vonage_jwt(expired, VONAGE_SIGNATURE_SECRET, now=now) is None
+    no_iat = vonage_jwt(VONAGE_SIGNATURE_SECRET, {"jti": "x"})
+    assert verify_vonage_jwt(no_iat, VONAGE_SIGNATURE_SECRET, now=now) is None
+    # "alg": "none" and tampered payloads are refused
+    header, payload, signature = token.split(".")
+    none_header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
+    assert verify_vonage_jwt(f"{none_header}.{payload}.", VONAGE_SIGNATURE_SECRET, now=now) is None
+    forged = base64.urlsafe_b64encode(b'{"iat":1700000000}').rstrip(b"=").decode()
+    assert verify_vonage_jwt(f"{header}.{forged}.{signature}", VONAGE_SIGNATURE_SECRET,
+                             now=now) is None  # fmt: skip
+    for junk in ("", "a.b", "a.b.c", "Bearer"):
+        assert verify_vonage_jwt(junk, VONAGE_SIGNATURE_SECRET, now=now) is None
+
+
+def test_vonage_ncco_asks_vonage_to_sign_the_upgrade() -> None:
+    ncco = vonage_ncco("wss://a.example/", secret=SECRET, call_id=VONAGE_CALL,
+                       authorization={"type": "vonage"})  # fmt: skip
+    endpoint = ncco[0]["endpoint"][0]
+    assert endpoint["authorization"] == {"type": "vonage"}
+    assert endpoint["headers"]["uuid"] == VONAGE_CALL
+    assert "authorization" not in vonage_ncco("wss://a.example/")[0]["endpoint"][0]
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+async def test_answer_webhook_serves_markup_with_the_stream_token(provider: str) -> None:
+    calls = served_calls(provider, answer_path="/answer", api_keys=[ANSWER_KEY])
+    async with calls:
+        response = await get_answer(calls, f"{ANSWER_QUERY[provider]}&key={ANSWER_KEY}",
+                                    headers={"Host": "agent.example.com"})  # fmt: skip
+        assert response.status_code == 200, response.text
+        expected = "application/json" if provider == "vonage" else "text/xml"
+        assert response.headers["content-type"].startswith(expected)
+        assert response.headers["cache-control"] == "no-store"
+        body = response.text
+        assert "wss://agent.example.com/" in body
+        token = markup_token(provider, body)
+        assert token == stream_token(SECRET, CALL_IDS[provider])
+        # the carrier connects with that markup's token: the call starts
+        async with Carrier(provider, calls.url, token=token) as carrier:
+            await carrier.start()
+            await wait_for(lambda: calls.sessions)
+            assert calls.transports[0].authenticated
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+async def test_answer_webhook_needs_the_key_and_a_valid_call_id(provider: str) -> None:
+    calls = served_calls(provider, answer_path="/answer", api_keys=[ANSWER_KEY])
+    async with calls:
+        query = ANSWER_QUERY[provider]
+        for refused in (query, f"{query}&key=wrong"):
+            assert (await get_answer(calls, refused)).status_code == 403
+        bearer = await get_answer(calls, query, {"Authorization": f"Bearer {ANSWER_KEY}"})
+        assert bearer.status_code == 200
+        basic = base64.b64encode(f"twilio:{ANSWER_KEY}".encode()).decode()
+        assert (await get_answer(calls, query, {"Authorization": f"Basic {basic}"})).is_success
+        missing = await get_answer(calls, f"key={ANSWER_KEY}")
+        assert missing.status_code == 400 and "GET" in missing.text
+        bad_id = {"twilio": "CallSid=CAxyz", "telnyx": "CallControlId=nope",
+                  "vonage": "uuid=%3Cscript%3E", "plivo": "CallUUID=not-a-uuid"}[provider]  # fmt: skip
+        assert (await get_answer(calls, f"{bad_id}&key={ANSWER_KEY}")).status_code == 400
+        bad_host = await get_answer(calls, f"{query}&key={ANSWER_KEY}", {"Host": "a b<c>"})
+        assert bad_host.status_code == 400
+        assert calls.sessions == []
+
+
+def test_answer_webhook_must_be_authenticated(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ConfigurationError, match="mints stream tokens"):
+        TelephonyServer(_noop_factory, _noop_factory, provider="twilio", answer_path="/answer")
+    with pytest.raises(ConfigurationError, match="answer_path"):
+        TelephonyServer(_noop_factory, _noop_factory, answer_path="answer", api_keys="k")
+    # a carrier signature check is enough
+    TelephonyServer(_noop_factory, _noop_factory, provider="vonage", answer_path="/answer",
+                    signature_secret=VONAGE_SIGNATURE_SECRET)  # fmt: skip
+    with pytest.raises(ConfigurationError, match="Vonage"):
+        TelephonyServer(_noop_factory, _noop_factory, provider="twilio",
+                        signature_secret=VONAGE_SIGNATURE_SECRET)  # fmt: skip
+    with pytest.raises(ConfigurationError, match="public_url"):
+        TelephonyServer(_noop_factory, _noop_factory, provider="telnyx", public_url="http://a")
+    server = TelephonyServer(_noop_factory, _noop_factory, provider="telnyx", api_keys="k",
+                             answer_path="/answer", public_url="wss://a.example")  # fmt: skip
+    assert server.verifier is None  # no signature check for Telnyx: the key protects it
+    assert server.answer_url() == "https://a.example/answer"
+
+
+async def test_twilio_answer_webhook_and_stream_are_signed() -> None:
+    public, auth_token = "wss://agent.example.com", "twilio-auth-token"
+    calls = served_calls("twilio", answer_path="/answer", public_url=public)
+    async with calls:
+        path = f"/answer?{ANSWER_QUERY['twilio']}"
+        good = twilio_signature(auth_token, "https://agent.example.com" + path)
+        assert (await get_answer(calls, ANSWER_QUERY["twilio"])).status_code == 403
+        wrong = {
+            "X-Twilio-Signature": twilio_signature("other", "https://agent.example.com" + path)
+        }
+        assert (await get_answer(calls, ANSWER_QUERY["twilio"], wrong)).status_code == 403
+        response = await get_answer(calls, ANSWER_QUERY["twilio"], {"X-Twilio-Signature": good})
+        assert response.status_code == 200
+        assert 'url="wss://agent.example.com/"' in response.text  # the public URL
+        signed = {"X-Twilio-Signature": twilio_signature(auth_token, public + "/stream")}
+        token = markup_token("twilio", response.text)
+        async with Carrier("twilio", calls.url, token=token, headers=signed) as carrier:
+            await carrier.start()
+            await wait_for(lambda: calls.sessions)
+
+
+async def test_plivo_signature_is_checked_on_the_upgrade_and_the_webhook() -> None:
+    public = "wss://agent.example.com"
+    calls = served_calls("plivo", answer_path="/answer", public_url=public)
+
+    def signed(url: str, token: str = PLIVO_TOKEN, nonce: str = "83617260") -> dict[str, str]:
+        return {"X-Plivo-Signature-V3": plivo_signature_v3(token, url, nonce),
+                "X-Plivo-Signature-V3-Nonce": nonce}  # fmt: skip
+
+    async with calls:
+        for headers in (None, signed(public + "/stream", token="other"),
+                        {"X-Plivo-Signature-V3": "bogus", "X-Plivo-Signature-V3-Nonce": "1"}):  # fmt: skip
+            with pytest.raises(InvalidStatus) as refused:
+                async with Carrier("plivo", calls.url, headers=headers):
+                    pass
+            assert refused.value.response.status_code == 403
+        answer = "https://agent.example.com/answer?" + ANSWER_QUERY["plivo"]
+        assert (await get_answer(calls, ANSWER_QUERY["plivo"])).status_code == 403
+        response = await get_answer(calls, ANSWER_QUERY["plivo"], signed(answer))
+        assert response.status_code == 200
+        token = markup_token("plivo", response.text)
+        async with Carrier("plivo", calls.url, token=token,
+                           headers=signed(public + "/stream")) as carrier:  # fmt: skip
+            await carrier.start()
+            await wait_for(lambda: calls.sessions)
+            assert calls.transports[0].authenticated
+
+
+async def test_vonage_jwt_is_checked_on_the_upgrade_and_the_webhook() -> None:
+    import time
+
+    calls = served_calls("vonage", answer_path="/answer",
+                         signature_secret=VONAGE_SIGNATURE_SECRET)  # fmt: skip
+
+    def bearer(secret: str = VONAGE_SIGNATURE_SECRET, age: float = 0.0) -> dict[str, str]:
+        claims = {"iat": int(time.time() - age), "jti": "j", "iss": "Vonage", "api_key": "k"}
+        return {"Authorization": f"Bearer {vonage_jwt(secret, claims)}"}
+
+    async with calls:
+        for headers in (None, bearer("other"), bearer(age=3600)):
+            with pytest.raises(InvalidStatus) as refused:
+                async with Carrier("vonage", calls.url, headers=headers):
+                    pass
+            assert refused.value.response.status_code == 403
+            assert (await get_answer(calls, ANSWER_QUERY["vonage"], headers)).status_code == 403
+        response = await get_answer(calls, ANSWER_QUERY["vonage"], bearer())
+        assert response.status_code == 200
+        endpoint = response.json()[0]["endpoint"][0]
+        assert endpoint["authorization"] == {"type": "vonage"}
+        assert endpoint["content-type"] == "audio/l16;rate=16000"
+        token = markup_token("vonage", response.text)
+        async with Carrier("vonage", calls.url, token=token, headers=bearer()) as carrier:
+            await carrier.start()
+            await wait_for(lambda: calls.sessions)
