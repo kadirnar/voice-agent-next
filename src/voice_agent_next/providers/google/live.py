@@ -1691,6 +1691,18 @@ class GeminiLiveConnection(EngineConnection):
         gen.ended_at = now()
         if self._gen is gen:
             self._gen = None
+        gen.pcm.reset()
+        if status == "completed":
+            # the resampler's filter tail (group delay) belongs to this generation's audio
+            tail = self._out_resampler.drain()
+            if tail:
+                if gen.first_audio_at is None:
+                    gen.first_audio_at = now()
+                self._emit(
+                    ResponseAudio(response_id=gen.response_id, item_id=gen.item_id, frame=tail)
+                )
+        else:
+            self._out_resampler.flush()  # discard: a cut-off tail must not open the next one
         self._end_hold()  # transcript deltas always precede ResponseDone
         self._sync_assistant(gen)
         usage = self._turn_usage
