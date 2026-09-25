@@ -183,7 +183,8 @@ async def test_mock_tts_chunked_synthesis_and_metrics() -> None:
     assert tts.requests == ["Twenty characters!"]
     assert audio.sample_rate == 24_000
     assert audio.duration == pytest.approx(18 / 20, abs=0.05)
-    assert metrics[0].ttfb is not None and metrics[0].ttfb >= 0.01
+    # the injected 10 ms delay is observed (Windows' loop clock can wake ~0.3 ms early)
+    assert metrics[0].ttfb is not None and metrics[0].ttfb >= 0.008
     assert metrics[0].audio_duration == pytest.approx(audio.duration)
 
 
