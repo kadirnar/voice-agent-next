@@ -110,18 +110,22 @@ nav:
       - Your first agent: getting-started/first-agent.md
       - Presets: presets.md
       - The van CLI: getting-started/cli.md
+      - van doctor: cli/doctor.md
       - Examples: examples.md
   - Concepts:
       - Architecture: ARCHITECTURE.md
       - Engines and events: concepts/engines.md
       - The cascade: concepts/cascade.md
+      - Text normalization: concepts/text-normalization.md
       - Turn-taking: concepts/turn-taking.md
       - Endpointing: concepts/endpointing.md
       - Session rotation: concepts/session-rotation.md
       - Interruptions: concepts/interruptions.md
       - Preemptive generation: concepts/preemptive-generation.md
       - Tools: concepts/tools.md
+      - Handoffs and flows: concepts/handoffs.md
       - Failover: concepts/failover.md
+      - Session rotation: concepts/session-rotation.md
       - Observability: concepts/observability.md
       - Audio processing: audio-processing.md
   - Providers:

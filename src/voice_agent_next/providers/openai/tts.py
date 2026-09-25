@@ -33,7 +33,7 @@ from ...audio.frame import AudioFrame
 from ...audio.resample import StreamResampler
 from ...errors import ConfigurationError, ProviderError
 from ...registry import register_provider
-from ...tts import TTS, ChunkedStream, TTSCapabilities
+from ...tts import TTS, ChunkedStream, NormalizeOption, TTSCapabilities
 from ...utils.log import logger
 from ._http import (
     OPENAI_BASE_URL,
@@ -92,6 +92,8 @@ class OpenAITTS(TTS):
         keepalive_expiry: seconds an idle connection stays open; long enough to reuse the
             TLS connection from one turn to the next.
         http_client: an ``httpx.AsyncClient`` to use (not closed by :meth:`aclose`).
+        normalize: spoken-form text normalization (see :class:`~voice_agent_next.tts.TTS`),
+            off by default: the service normalizes text itself.
     """
 
     provider = "openai"
@@ -138,6 +140,7 @@ class OpenAITTS(TTS):
         keepalive_expiry: float = 120.0,
         http_client: httpx.AsyncClient | None = None,
         clean_text: bool = True,
+        normalize: NormalizeOption = None,
         trim_silence: bool = True,
     ) -> None:
         resolved_model = model or self.DEFAULT_MODEL
@@ -158,6 +161,7 @@ class OpenAITTS(TTS):
             capabilities=TTSCapabilities(streaming=False),
             voice=voice or self._default_voice(resolved_model),
             clean_text=clean_text,
+            normalize=normalize,
             trim_silence=trim_silence,
         )
         self.endpoint = APIEndpoint.resolve(

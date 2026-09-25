@@ -42,7 +42,9 @@ The same in a config file: `stt:`, `llm:`, `tts:`, `vad:`, `turn_detector:` and 
 4. **Response.** The LLM streams text. A `SentenceSegmenter` releases complete sentences,
    with a short first chunk for fast first audio (`first_sentence_min_chars`,
    `first_sentence_max_chars`). Each sentence is cleaned (`text_filter`, markdown and emoji
-   removal by default) and pushed into the TTS stream.
+   removal by default) and pushed into the TTS stream. TTS engines that need it rewrite
+   numbers, amounts, dates and addresses into words
+   ([text normalization](text-normalization.md)); the transcript keeps the LLM's text.
 5. **Speech.** TTS audio becomes `ResponseAudio`; the text of each sentence is emitted with
    its audio offset, so an interruption knows exactly which words were heard.
 

@@ -60,7 +60,7 @@ from ..errors import ConfigurationError, MissingDependencyError, ProviderError, 
 from ..models import ModelFile, register_model
 from ..registry import register_provider
 from ..stt import STT, STTCapabilities, STTEvent, STTEventType, STTStream, Transcript, WordTiming
-from ..tts import TTS, ChunkedStream
+from ..tts import TTS, ChunkedStream, NormalizeOption
 from ..utils.aio import Chan, ChanClosed
 from ..utils.clock import now
 from ..utils.deps import is_installed, require
@@ -1521,9 +1521,13 @@ class SherpaOnnxTTS(TTS):
         chunk_duration: duration of the emitted audio chunks (s).
         clean_text: strip markdown/emoji before synthesis.
         trim_silence: trim per-sentence leading/trailing silence when streaming.
+        normalize: rewrite numbers, amounts, dates, e-mails, URLs... into words before
+            synthesis (:mod:`voice_agent_next.text.normalize`). Default: on for
+            models whose language is known (``en_US``-style names, ``lang``, Kokoro voices).
     """
 
     provider = _PROVIDER
+    normalize_by_default = True
 
     def __init__(
         self,
@@ -1543,6 +1547,7 @@ class SherpaOnnxTTS(TTS):
         chunk_duration: float = 0.05,
         clean_text: bool = True,
         trim_silence: bool = True,
+        normalize: NormalizeOption = None,
     ) -> None:
         _check_installed()
         if not 0.25 <= speed <= 4.0:
@@ -1566,6 +1571,7 @@ class SherpaOnnxTTS(TTS):
             voice=voice or (spec.default_voice if spec is not None else None) or "0",
             clean_text=clean_text,
             trim_silence=trim_silence,
+            normalize=normalize,
         )
         self.kind = ref.kind
         self.speed = float(speed)
@@ -1601,6 +1607,24 @@ class SherpaOnnxTTS(TTS):
                 f"sherpa-onnx voice {value!r}: {self.model} has {self.num_speakers} speaker(s)"
             )
         return sid
+
+    def text_language(self, voice: str | None) -> str | None:
+        """``lang``, else the locale in the model name (``piper-en_US-...``), else the
+        language of a Kokoro voice name; ``None`` (no normalization) when unknown."""
+        if self.lang:
+            return self.lang
+        m = re.search(r"(?:^|[-_/])([a-z]{2,3})_[A-Z]{2}(?:$|[-_])", self.model)
+        if m:
+            return m.group(1)
+        if self.kind != "tts-kokoro":
+            return None
+        name = (voice or self.voice or "").strip()
+        if name.isdigit() and int(name) < len(self.speakers):
+            name = self.speakers[int(name)]
+        if name[1:3] in ("f_", "m_"):  # "af_heart": the first letter is the language
+            return {"a": "en", "b": "en", "e": "es", "f": "fr", "h": "hi", "i": "it",
+                    "j": "ja", "p": "pt", "z": "zh"}.get(name[:1])  # fmt: skip
+        return None
 
     def _synthesize(self, text: str, *, voice: str | None) -> ChunkedStream:
         return _SherpaChunkedStream(self, text, voice=voice)

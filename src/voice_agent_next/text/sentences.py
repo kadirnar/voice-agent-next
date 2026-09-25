@@ -27,6 +27,33 @@ _PARAGRAPH = re.compile(r"\n\s*\n|\n(?=\s*(?:[-*•]|\d+[.)])\s)")
 _CLAUSE = re.compile(r"[,;:—–]\s+|\s+-\s+")
 
 
+def _clause_ends(text: str) -> list[int]:
+    """Clause boundaries in ``text``, except between two numbers ("July 14, 2025") or
+    after a number whose continuation is not known yet."""
+    return [
+        m.end()
+        for m in _CLAUSE.finditer(text)
+        if not (
+            m.start() > 0
+            and text[m.start() - 1].isdigit()
+            and (m.end() == len(text) or text[m.end()].isdigit())
+        )
+    ]
+
+
+def _last_space(text: str) -> int:
+    """Last whitespace in ``text`` that is not next to a number ("4:30 PM", "5 kg",
+    "July 14, 2025"); any last whitespace if there is none."""
+    for i in range(len(text) - 1, 1, -1):
+        if not text[i].isspace():
+            continue
+        before = text[i - 1] if text[i - 1] not in ",:" else text[i - 2]
+        after = text[i + 1] if i + 1 < len(text) else ""
+        if not before.isdigit() and not after.isdigit():
+            return i
+    return text.rfind(" ")
+
+
 def _is_abbreviation(text: str, dot_index: int) -> bool:
     """True if the '.' at ``dot_index`` ends an abbreviation or an initial."""
     j = dot_index - 1
@@ -135,9 +162,9 @@ class SentenceSegmenter:
         span = buf[:sentence_end] if sentence_end is not None else buf
         if len(span.strip()) <= limit:
             return None
-        cut = next((m.end() for m in _CLAUSE.finditer(span) if m.end() >= min_len), None)
+        cut = next((end for end in _clause_ends(span) if end >= min_len), None)
         if cut is None and len(span) > 2 * limit:  # no clause in sight: word boundary
-            space = span.rfind(" ", 0, 2 * limit)
+            space = _last_space(span[: 2 * limit])
             cut = space if space >= min_len else None
         if cut is None or (sentence_end is not None and cut >= sentence_end):
             return None
@@ -160,11 +187,11 @@ class SentenceSegmenter:
                 return seg
         if len(buf) > self.max_chars:
             window = buf[: self.max_chars]
-            clauses = list(_CLAUSE.finditer(window))
-            if clauses and clauses[-1].end() >= min_len:
-                cut = clauses[-1].end()
+            clauses = _clause_ends(window)
+            if clauses and clauses[-1] >= min_len:
+                cut = clauses[-1]
             else:
-                cut = window.rfind(" ")
+                cut = _last_space(window)
                 if cut < min_len:
                     cut = self.max_chars
             seg = buf[:cut].strip()

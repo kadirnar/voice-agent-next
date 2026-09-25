@@ -80,6 +80,16 @@ EXPECTED: dict[str, list[str]] = {
         "registered: llm/faq",
         "agent: We are open from nine to six, Monday to Saturday.",
     ],
+    "11_handoffs.py": [
+        "-> tool transfer_to_billing",
+        "== handoff front -> billing (history=summary)",
+        "agent: Done: 25 euros are on their way back to you.",
+        "refunds=[25.0]",
+        "<- 'We take tables for 1 to 10 people.'",
+        "== handoff party -> confirm (history=full)",
+        "agent: A table for four tonight. See you soon!",
+        "flow path: greet -> party -> confirm",
+    ],
 }
 
 BENCHMARK_DOC = EXAMPLES / "09_benchmark.md"

@@ -261,6 +261,8 @@ class TurnMetrics:
     agent_speech_duration: float = 0.0
     interrupted: bool = False
     tool_calls: int = 0
+    agent: str | None = None
+    """Name of the agent that answered the turn (see agent handoffs)."""
     timestamp: float = field(default_factory=_ts)
     type: Literal["turn"] = "turn"
 
