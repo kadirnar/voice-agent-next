@@ -180,6 +180,18 @@ class STT(ABC, EventEmitter):
     def _create_stream(self, *, language: str | None) -> STTStream:
         raise NotImplementedError
 
+    def _create_adapter_stream(
+        self, adapter: StreamAdapter, *, language: str | None
+    ) -> STTStream | None:
+        """Hook for batch recognizers: the stream :class:`StreamAdapter` runs for them.
+
+        ``None`` (the default) uses the adapter's own stream: one final transcript per
+        VAD-cut utterance. A recognizer that can do more on the VAD's segments (interim
+        transcripts, VAD-aware filtering) returns its own :class:`STTStream` and sets
+        ``capabilities.interim_results`` accordingly.
+        """
+        return None
+
     async def warmup(self) -> None:
         """Load models / open connections ahead of the first request (optional)."""
 
@@ -308,15 +320,19 @@ class StreamAdapter(STT):
     """Makes a batch-only :class:`STT` streamable by segmenting audio with a :class:`VAD`.
 
     Emits START_OF_SPEECH / END_OF_SPEECH from the VAD and one FINAL_TRANSCRIPT per
-    detected utterance (or per :meth:`STTStream.flush`).
+    detected utterance (or per :meth:`STTStream.flush`). A recognizer may run its own
+    stream over the VAD's segments instead (:meth:`STT._create_adapter_stream`), e.g. to
+    add interim transcripts; then ``capabilities.interim_results`` is the wrapped one's.
     """
 
     def __init__(self, stt: STT, vad: VAD) -> None:
+        # interim transcripts only come from a recognizer that runs its own adapter stream
+        own_stream = type(stt)._create_adapter_stream is not STT._create_adapter_stream
         super().__init__(
             model=stt.model,
             capabilities=STTCapabilities(
                 streaming=True,
-                interim_results=False,
+                interim_results=own_stream and stt.capabilities.interim_results,
                 word_timestamps=stt.capabilities.word_timestamps,
                 language_detection=stt.capabilities.language_detection,
             ),
@@ -332,7 +348,8 @@ class StreamAdapter(STT):
         return await self.wrapped._recognize(audio, language=language)
 
     def _create_stream(self, *, language: str | None) -> STTStream:
-        return _AdapterStream(self, language=language)
+        stream = self.wrapped._create_adapter_stream(self, language=language)
+        return stream if stream is not None else _AdapterStream(self, language=language)
 
     async def warmup(self) -> None:
         await self.wrapped.warmup()
