@@ -605,6 +605,7 @@ van bench tools                                    # scripted reference engine, 
 van bench tools --preset local-cpu                 # local cascade; the caller speaks via Kokoro
 van bench tools --preset local-cpu --llm ollama/qwen3.5:4b --trials 3
 van bench tools -c agent.yaml -s my-tools.yaml --only cancel-order --caller-tts kokoro
+van bench tools --preset local-cpu --caller llm:ollama/qwen3.5:4b   # an LLM plays the caller
 ```
 
 Scripted customer-service calls against **deterministic mock tools**, on the T1 harness
@@ -626,6 +627,21 @@ an escalation to a human and a question that needs no tool. Numbers are spoken t
 callers say them ("order one oh four two"). The caller is **scripted**: it says its next
 line once the agent has answered and been quiet for `gap_after_reply`, whatever the agent
 said, so scripts give information in a natural order.
+
+**LLM-driven caller** (`--caller llm:<llm spec>`, optional; `scripted` stays the
+default). An LLM plays the caller, τ-bench style, and *reacts* to the agent: it reads what
+the agent said (its transcript) and decides what to say next, or hangs up by answering
+`<END>`. Its prompt has a **persona** (`persona:` of the scenario, else a polite customer
+of the suite's business), a **goal** (`goal:`, else the scenario's `description`) and the
+scripted lines as the details it knows, to be said in its own words and only when the
+conversation gets there, so the expected calls and final state still apply. It runs at
+temperature 0 with a fixed seed (sent to OpenAI-compatible servers), at most the script's
+turns + 3 lines (`--caller-max-turns`). Each line is voiced like a scripted one (the
+caller TTS, or synthetic speech for the reference engine) while the microphone keeps
+streaming silence, so the time the caller model takes is a user pause, not agent
+latency. Scoring is unchanged; every exchange is in the item's `caller_lines` and the
+manifest's `caller_policy` names the caller model. Use it as a robustness check next to
+the scripted run: the conversations are no longer identical across systems.
 
 Without a system, `van bench tools` runs the **reference engine**: a scripted mock that
 hears the script and makes exactly the expected calls, so every rate is 100 %. It checks
