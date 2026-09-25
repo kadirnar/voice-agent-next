@@ -53,11 +53,13 @@ from .errors import (
     VoiceAgentError,
 )
 from .llm import LLM, ChatChunk, LLMCapabilities, LLMStream, ToolChoice
+from .metrics import TTSMetrics
 from .stt import STT, STTCapabilities, STTEvent, STTEventType, STTStream, Transcript, WordTiming
 from .tools import FunctionTool
 from .tts import (
     TTS,
     ChunkedStream,
+    SentenceStreamAdapter,
     SynthesizedAudio,
     SynthesizeStream,
     TTSCapabilities,
@@ -613,6 +615,12 @@ class FallbackTTS(TTS):
     def _create_stream(self, *, voice: str | None) -> SynthesizeStream:
         return _FallbackSynthesizeStream(self, voice=voice)
 
+    def stream(self, *, voice: str | None = None) -> SynthesizeStream:
+        if self.capabilities.streaming:
+            return super().stream(voice=voice)
+        # sentence by sentence, with the usage attributed to the provider of each sentence
+        return _FallbackSentenceStream(self, voice=voice or self.voice)
+
     async def warmup(self) -> None:
         await self._chain.warmup()
 
@@ -640,6 +648,8 @@ def _forward_audio(
 
 class _FallbackChunkedStream(ChunkedStream):
     served_by: str | None = None
+    served_index: int | None = None
+    """Position in the chain of the provider that served the request."""
 
     async def _run(self) -> None:
         fb: FallbackTTS = self._tts  # type: ignore[assignment]
@@ -691,20 +701,83 @@ class _FallbackChunkedStream(ChunkedStream):
                 if item.frame and not heard[0]:
                     heard[0] = True
                     chain.succeeded(i)
-                    self.served_by = chain.labels[i]
+                    self.served_by, self.served_index = chain.labels[i], i
                 _forward_audio(self, rs, item.frame, item.words)
             tail = rs.flush()
             if tail:
                 self._push_audio(tail)
             if not heard[0]:
                 chain.succeeded(i)  # e.g. empty text: nothing to say
-                self.served_by = chain.labels[i]
+                self.served_by, self.served_index = chain.labels[i], i
         finally:
             if not closed_outside(self._task):  # being garbage-collected: can't await
                 await inner.aclose()
 
     def _emit_metrics(self) -> None:
         """The providers' own metrics are forwarded instead."""
+
+
+@dataclass
+class _Served:
+    """Usage of one provider within a sentence-by-sentence request."""
+
+    characters: int = 0
+    audio_duration: float = 0.0
+
+
+class _FallbackSentenceStream(SentenceStreamAdapter):
+    """The sentence adapter over a :class:`FallbackTTS`: sentences may be served by
+    different providers, so the request's usage is reported per serving provider (one
+    :class:`TTSMetrics` each, in the order they first served) instead of under
+    ``"fallback"``. The characters that belong to no sentence (separators, text of
+    sentences no provider could serve) go to the first provider, so the total is still
+    the text pushed, counted once."""
+
+    def __init__(self, tts: FallbackTTS, *, voice: str | None) -> None:
+        self._served: dict[int, _Served] = {}
+        super().__init__(tts, voice=voice)
+
+    async def _play_sentence(self, stream: ChunkedStream, on_chunk: Callable[[], None]) -> None:
+        start = self._audio_duration
+        try:
+            await super()._play_sentence(stream, on_chunk)
+        finally:
+            i = getattr(stream, "served_index", None)
+            if i is not None:
+                served = self._served.setdefault(i, _Served())
+                served.characters += len(stream.text)
+                served.audio_duration += self._audio_duration - start
+
+    def _emit_metrics(self) -> None:
+        if not self._metrics_enabled or not self._served:
+            super()._emit_metrics()  # nothing was served: reported as the fallback chain
+            return
+        fb: FallbackTTS = self._tts  # type: ignore[assignment]
+        ttfb = None
+        if self._first_audio_time is not None:
+            ttfb = self._first_audio_time - (self._first_text_time or self._start_time)
+        served = list(self._served.items())
+        unattributed = self._characters - sum(u.characters for _, u in served)
+        audio_left = self._audio_duration - sum(u.audio_duration for _, u in served)
+        duration = now() - self._start_time
+        for k, (i, u) in enumerate(served):
+            first, last = k == 0, k == len(served) - 1
+            provider = fb.providers[i]
+            fb.emit(
+                "metrics",
+                TTSMetrics(
+                    provider=provider.provider,
+                    model=provider.model,
+                    request_id=self._request_id,
+                    ttfb=ttfb if first else None,
+                    duration=duration,
+                    audio_duration=u.audio_duration + (audio_left if first else 0.0),
+                    characters=u.characters + (max(0, unattributed) if first else 0),
+                    streamed=True,
+                    cancelled=self._cancelled and last,
+                    error=None if self._error is None or not last else repr(self._error),
+                ),
+            )
 
 
 class _FallbackSynthesizeStream(SynthesizeStream):
