@@ -9,7 +9,7 @@ splits the decision into signals of increasing cost and meaning:
 |---|---|---|---|
 | Voice activity | VAD (`silero`, `sherpa_onnx`, `energy`) | < 1 ms per 32 ms window on CPU | someone is speaking / silence |
 | Semantic end of turn | turn detector (`smart_turn`) | tens of ms per pause | the utterance *sounds* finished (audio) or *reads* finished (text) |
-| Provider turn events | STT with `end_of_turn` (Deepgram Flux, AssemblyAI, Cartesia Ink) | included in the STT | end of turn, eager end of turn, turn resumed |
+| Provider turn events | STT with `end_of_turn` (Deepgram Flux, AssemblyAI, Cartesia Ink, Soniox, Speechmatics) | included in the STT | end of turn, eager end of turn, turn resumed |
 | Server turn detection | native engines (OpenAI `semantic_vad` / `server_vad`, Gemini Live) | included in the engine | the engine commits turns itself |
 
 Background and measurements: research note
@@ -58,7 +58,8 @@ STTs that detect turns themselves set `STTCapabilities.end_of_turn` and emit:
 
 Leave out `vad=` to let the provider decide both speech and turns, or keep a local VAD for
 fast barge-in detection. The provider pages ([Deepgram](../providers/deepgram.md),
-[AssemblyAI](../providers/assemblyai.md), [Cartesia](../providers/cartesia.md)) show both
+[AssemblyAI](../providers/assemblyai.md), [Cartesia](../providers/cartesia.md),
+[Soniox](../providers/soniox.md), [Speechmatics](../providers/speechmatics.md)) show both
 setups.
 
 ## Native engines
