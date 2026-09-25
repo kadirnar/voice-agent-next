@@ -65,6 +65,7 @@ With `--for`, you download everything a deployment needs:
 | `--for` value | Meaning |
 |---|---|
 | `agent.yaml` / `.toml` / `.json` | every component of the config (failover lists included) |
+| `preset:local-cpu` | every component of a [preset](presets.md) (failover lists included) |
 | `stt=whisper/small,vad=silero,turn=smart-turn` | these components (default models when no model is given) |
 | `kokoro/v1.0-int8`, `sherpa-onnx` | a spec: that model, or the provider's default model of every kind |
 
@@ -79,6 +80,8 @@ ENV VAN_CACHE_DIR=/models HF_HOME=/models/hf
 RUN van models download --for /app/agent.yaml
 ENV VAN_OFFLINE=1
 ```
+
+The project's images bake models in with a build argument ([Docker](deploy/docker.md#models-bake-them-in-or-keep-them-on-a-volume)).
 
 Copy the model cache (and the Hugging Face cache, if you use faster-whisper) to the
 offline machine, point `VAN_CACHE_DIR` / `HF_HOME` at the copies and set `VAN_OFFLINE=1`.

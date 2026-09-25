@@ -420,6 +420,19 @@ def test_models_for_specs_and_configs() -> None:
         models.models_for("stt:whisper,x=y")
 
 
+def test_models_for_preset() -> None:
+    req = models.models_for("preset:local-cpu")
+    assert [m.name for m in req.models] == [
+        "sherpa-onnx/zipformer-en-kroko",
+        "kokoro/v1.0-fp16",
+        "silero/v6.2",
+        "smart-turn/smart-turn-v3.2-cpu",
+    ]
+    assert any("ollama" in n for n in req.notes)
+    with pytest.raises(ConfigurationError, match="unknown preset"):
+        models.models_for("preset:nope")
+
+
 def test_models_for_config_file(tmp_path: Path) -> None:
     path = tmp_path / "agent.yaml"
     path.write_text("stt: faster-whisper/tiny.en\nllm: ollama/llama3.2\ntts: kokoro\n")

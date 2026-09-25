@@ -1,0 +1,94 @@
+# A fully local voice agent: Ollama + `van serve` (local-cpu stack) + the browser demos.
+#
+#   docker compose -f docker/compose.yaml up --build     # then open http://localhost:8080
+#
+# First start: Ollama pulls the LLM (~0.7 GB) and `models` downloads the STT/TTS/VAD/turn
+# models (~0.25 GB) into named volumes; later starts are offline. On an NVIDIA GPU add
+# `-f docker/compose.gpu.yaml`. Details: docs/deploy/docker.md.
+name: voice-agent-next
+
+x-agent: &agent
+  image: ${VAN_IMAGE:-ghcr.io/kadirnar/voice-agent-next:latest}
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+    target: cpu
+  environment:
+    OLLAMA_HOST: http://ollama:11434
+    OLLAMA_MODEL: ${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}
+    VAN_OFFLINE: "1" # every model is in the volume already: never download in a call
+  volumes:
+    - models:/models
+    - ./config/local-cpu.yaml:/config/agent.yaml:ro
+  depends_on:
+    models:
+      condition: service_completed_successfully
+    ollama-pull:
+      condition: service_completed_successfully
+  restart: unless-stopped
+
+services:
+  ollama:
+    image: ollama/ollama:${OLLAMA_VERSION:-0.34.4}
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+    restart: unless-stopped
+
+  # One-shot: pull the LLM into the Ollama volume (a no-op once it is there).
+  ollama-pull:
+    image: ollama/ollama:${OLLAMA_VERSION:-0.34.4}
+    environment:
+      OLLAMA_HOST: ollama:11434
+    command: ["pull", "${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+  # One-shot: download every model the agent config needs into the `models` volume.
+  models:
+    <<: *agent
+    command: ["models", "download", "--for", "/config/agent.yaml"]
+    environment:
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}
+    depends_on: []
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  # van-ws/1 WebSocket agent (examples/web). Python clients: ws://127.0.0.1:8765/
+  agent-ws:
+    <<: *agent
+    command: ["--protocol", "websocket", "--port", "8765", "--config", "/config/agent.yaml",
+              "--max-sessions", "4"]
+    ports:
+      - "127.0.0.1:8765:8765"
+
+  # WebRTC agent (examples/webrtc): signalling through `web`, media over UDP (see the docs).
+  agent-webrtc:
+    <<: *agent
+    command: ["--protocol", "webrtc", "--port", "8080", "--config", "/config/agent.yaml",
+              "--max-sessions", "4"]
+
+  # The two browser demos on one origin: http://localhost:8080/websocket/ and /webrtc/
+  web:
+    image: nginx:${NGINX_VERSION:-1.30-alpine}
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    volumes:
+      - ./nginx/demo.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../examples/web/index.html:/usr/share/nginx/html/websocket/index.html:ro
+      - ../examples/webrtc/index.html:/usr/share/nginx/html/webrtc/index.html:ro
+    depends_on:
+      - agent-ws
+      - agent-webrtc
+    restart: unless-stopped
+
+volumes:
+  models:
+  ollama:

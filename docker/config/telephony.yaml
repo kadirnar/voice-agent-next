@@ -1,0 +1,11 @@
+# The phone agent served by docker/compose.telephony.yaml (mounted at /config/agent.yaml).
+# The local-cpu stack; swap in cloud components for lower latency on real calls, e.g.
+# `extends: cloud-fast` (and pass the API keys in the compose file's environment).
+extends: local-cpu
+
+llm: ollama/${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}
+
+agent:
+  instructions: >-
+    You are a friendly phone assistant. Keep every answer to one or two short sentences.
+  greeting: Hello! Thanks for calling. How can I help?

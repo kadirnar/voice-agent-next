@@ -2,7 +2,7 @@
 
 **Real-time speech-to-speech voice agents in Python — native S2S models and streaming cascades, local and cloud, on Linux, macOS and Windows, with a built-in benchmark suite.**
 
-> Status: **alpha** — 52 providers (local and cloud), native speech-to-speech engines and streaming cascades behind one runtime, a benchmark suite; APIs may still change. See the [roadmap](ROADMAP.md) and the [research report](docs/research/REPORT.md).
+> Status: **alpha** — 60+ providers (local and cloud), native speech-to-speech engines and streaming cascades behind one runtime, a benchmark suite; APIs may still change. See the [roadmap](ROADMAP.md) and the [research report](docs/research/REPORT.md).
 
 **Documentation:** [kadirnar.github.io/voice-agent-next](https://kadirnar.github.io/voice-agent-next/) (build it locally: `uv sync --group docs && uv run mkdocs serve`).
 
@@ -96,19 +96,19 @@ Every component is addressed by a `provider/model` spec and installed through an
 
 | | Local | Cloud |
 |---|---|---|
-| **Speech-to-speech engines** | any OpenAI-Realtime-compatible server: Speaches, LocalAI, vLLM-Omni | OpenAI Realtime, Gemini Live, Azure OpenAI Realtime, xAI Grok Voice, Qwen-Omni Realtime |
-| **STT** | sherpa-onnx (streaming Zipformer/NeMo, Parakeet, Moonshine, SenseVoice, Whisper), Moonshine Streaming, faster-whisper (CPU / CUDA) | Deepgram Nova-3 & Flux, AssemblyAI Universal-Streaming, ElevenLabs Scribe v2, OpenAI transcribe, Cartesia Ink |
+| **Speech-to-speech engines** | Moshi / PersonaPlex (full duplex), omni LLMs (LFM2.5-Audio), any OpenAI-Realtime-compatible server: Speaches, LocalAI, vLLM-Omni | OpenAI Realtime, Gemini Live, Azure OpenAI Realtime, xAI Grok Voice, Qwen-Omni Realtime |
+| **STT** | sherpa-onnx (streaming Zipformer/NeMo, Parakeet, Moonshine, SenseVoice, Whisper), Moonshine Streaming, faster-whisper (CPU / CUDA) | Deepgram Nova-3 & Flux, AssemblyAI Universal-Streaming, Soniox, Speechmatics, ElevenLabs Scribe v2, OpenAI transcribe, Cartesia Ink |
 | **LLM** | Ollama, llama.cpp, vLLM, LM Studio | OpenAI, Anthropic Claude, Google Gemini, Groq, Cerebras, Together, OpenRouter, DeepSeek, Fireworks, SambaNova |
-| **TTS** | Kyutai Pocket TTS (audio streaming, cloning), Kokoro-82M, sherpa-onnx (Piper/VITS, Kokoro, Matcha), Kokoro-FastAPI | Cartesia Sonic, ElevenLabs Flash/v3, OpenAI gpt-4o-mini-tts, Gemini TTS, Deepgram Aura-2 |
+| **TTS** | Kyutai Pocket TTS (audio streaming, cloning), Qwen3-TTS & Chatterbox (GPU), Kokoro-82M, sherpa-onnx (Piper/VITS, Kokoro, Matcha), Kokoro-FastAPI | Cartesia Sonic, ElevenLabs Flash/v3, OpenAI gpt-4o-mini-tts, Gemini TTS, Deepgram Aura-2 |
 | **VAD & turn-taking** | Silero VAD v6, TEN VAD, energy VAD, Smart Turn v3.2 | STT-native turn events (Deepgram Flux, AssemblyAI, Cartesia Ink) |
 | **Transports** | microphone/speakers (with WebRTC echo cancellation), files, loopback | WebSocket + browser client, WebRTC (aiortc), telephony (Twilio, Telnyx, Vonage, Plivo) |
-| **Serving & ops** | `van serve`: any engine behind the OpenAI Realtime protocol | failover chains, call recording (stereo WAV + JSONL), OpenTelemetry tracing, GPU auto-selection |
+| **Serving & ops** | `van serve` (any protocol, worker pool, prewarm, metrics), Docker images, `van doctor`, `van models` | failover chains, call recording (stereo WAV + JSONL), OpenTelemetry tracing, GPU auto-selection |
 
-In progress ([roadmap](ROADMAP.md)): omni models (LFM2.5-Audio), Moshi full-duplex, GPU TTS (Chatterbox, Qwen3-TTS), dynamic endpointing, session rotation, MLX on Apple Silicon.
+In progress ([roadmap](ROADMAP.md)): turn-taking quality on local stacks, MLX on Apple Silicon, release automation.
 
 ## Benchmarks
 
-`van bench latency` drives a simulated caller through the real runtime and measures voice-to-voice latency **on the call recording** (end of user speech → first agent audio), with a reproducibility manifest for every run. A fully local pipeline (Silero + Smart Turn + faster-whisper `base` + Ollama LFM2.5-1.2B + Kokoro) on a Ryzen 5 5600 CPU: **1.13 s p50 / 1.63 s p90**, and **0.97 s p50** with GPU speech recognition on an RTX 5070 Ti; the runtime itself adds ≈ 2 ms (checked on every PR). Details and methodology: [docs/benchmarks/results.md](docs/benchmarks/results.md), [benchmarks/README.md](benchmarks/README.md).
+`van bench latency` drives a simulated caller through the real runtime and measures voice-to-voice latency **on the call recording** (end of user speech → first agent audio), with a reproducibility manifest for every run. A fully local pipeline (Silero + Smart Turn + faster-whisper `base` + Ollama LFM2.5-1.2B + Kokoro) on a Ryzen 5 5600 CPU: **1.13 s p50 / 1.63 s p90**, **0.88 s** with streaming Pocket TTS on CPU, **0.72 s** fully local on an RTX 5070 Ti (Qwen3-TTS), and **0.28 s** with Moshi full-duplex; the runtime itself adds ≈ 2 ms (checked on every PR). Details and methodology: [docs/benchmarks/results.md](docs/benchmarks/results.md), [benchmarks/README.md](benchmarks/README.md).
 
 ## Architecture (short)
 
