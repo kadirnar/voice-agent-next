@@ -385,6 +385,40 @@ async def test_model_barge_in_cancels_the_response(
     assert finals == ["tell me", "stop please"]
 
 
+async def test_partial_sample_of_a_cancelled_response_does_not_shift_the_next(
+    fake_factory: Callable[..., Any],
+) -> None:
+    """One PCM16 reassembler per response (#157): an odd byte left over by an interrupted
+    response is dropped with it instead of prefixing the next response's audio."""
+    import base64
+
+    fake = fake_factory()
+    conn = await NovaSonicSessionEngine(stream_factory=fake).connect(EngineOptions())
+    events = Events(conn)
+    stream = fake.sessions[-1]
+    samples = (np.arange(-200, 200) * 71).astype(np.int16)
+    audio_cfg = {"mediaType": "audio/lpcm", "sampleRateHertz": 24_000, "sampleSizeBits": 16,
+                 "encoding": "base64", "channelCount": 1}  # fmt: skip
+
+    def put_audio(cid: str, raw: bytes, stop: str) -> None:
+        stream._put("contentStart", contentId=cid, type="AUDIO", role="ASSISTANT",
+                    audioOutputConfiguration=audio_cfg)  # fmt: skip
+        stream._put("audioOutput", contentId=cid, content=base64.b64encode(raw).decode())
+        stream._put("contentEnd", contentId=cid, type="AUDIO", stopReason=stop)
+
+    stream._put("completionStart")
+    put_audio("a1", samples.tobytes()[:401], "INTERRUPTED")  # cut mid-sample
+    await wait_for(lambda: len(events.of(ResponseDone)) == 1)
+    put_audio("a2", samples.tobytes(), "END_TURN")
+    await wait_for(lambda: len(events.of(ResponseDone)) == 2)
+    await conn.aclose()
+    await events.close()
+    first, second = events.of(ResponseDone)
+    assert first.status == "cancelled"
+    got = b"".join(a.frame.data for a in events.of(ResponseAudio) if a.response_id == second.response_id)  # fmt: skip
+    np.testing.assert_array_equal(np.frombuffer(got, dtype=np.int16), samples)
+
+
 async def test_tool_round_trip_at_the_engine_level(fake_factory: Callable[..., Any]) -> None:
     fake = fake_factory(
         FakeNovaTurn(

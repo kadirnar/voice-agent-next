@@ -624,6 +624,8 @@ class LiveSessionConnection(EngineConnection):
         """Unix time at which the session expires (from ``session.started``)."""
         self.usage_seconds = 0.0
         """Latest cumulative billed voice duration (``usage.seconds``)."""
+        self._billed_mark = 0.0
+        """``usage_seconds`` already attributed to a response."""
         self.context_usage: float | None = None
         """Latest ``context_window.usage_ratio``."""
         self.close_reason: str | None = None
@@ -1193,6 +1195,8 @@ class LiveSessionConnection(EngineConnection):
         if resp is None:
             return
         resp.ended_at = now()
+        billed = max(0.0, self.usage_seconds - self._billed_mark)
+        self._billed_mark = max(self._billed_mark, self.usage_seconds)
         self._emit(ResponseDone(response_id=resp.response_id, status=status))
         ttfb = None
         if resp.trigger_at is not None and resp.first_audio_at is not None:
@@ -1206,6 +1210,7 @@ class LiveSessionConnection(EngineConnection):
                 ttfb=ttfb,
                 duration=resp.ended_at - resp.started_at,
                 cancelled=status == "cancelled",
+                billed_seconds=billed,
             ),
         )
         self._input_since_response = 0.0

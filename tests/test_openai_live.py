@@ -39,7 +39,13 @@ from voice_agent_next.events import (
     ResponseText,
     ResponseToolCall,
 )
-from voice_agent_next.metrics import EngineMetrics, LLMMetrics, RotationMetrics, TurnMetrics
+from voice_agent_next.metrics import (
+    EngineMetrics,
+    LLMMetrics,
+    RotationMetrics,
+    TurnMetrics,
+    UsageSummary,
+)
 from voice_agent_next.providers.mock import synth_speech
 from voice_agent_next.providers.openai.live import (
     LiveSessionConnection,
@@ -338,6 +344,36 @@ async def test_greeting_reply_and_transcripts(fake: Callable[..., Any]) -> None:
     audio = np.concatenate([e.frame.to_float32() for e in events.of(ResponseAudio)])
     assert np.sqrt(np.mean(audio**2)) > 0.05  # speech, not the quiet noise between replies
     assert conn.usage_seconds >= 1.0  # type: ignore[attr-defined]
+
+
+async def test_billed_seconds_are_reported_per_response(fake: Callable[..., Any]) -> None:
+    """Each response's ``EngineMetrics.billed_seconds`` is the billed voice time since the
+    previous response (#157): the per-response values add up to the session's usage."""
+    server = await fake(turns=[FakeTurn("Nice to meet you", user="I am Ada")])
+    engine = engine_for(server)
+    seen: list[tuple[EngineMetrics, float]] = []
+    conn = await engine.connect(EngineOptions())
+    engine.on(
+        "metrics",
+        lambda m: seen.append((m, conn.usage_seconds)) if isinstance(m, EngineMetrics) else None,  # type: ignore[attr-defined]
+    )
+    events = Events(conn)
+    await conn.say("Hello there")
+    await silence(conn, 1.0)
+    await wait_for(lambda: bool(events.of(ResponseDone)))
+    await speak(conn, 0.6)
+    await silence(conn, 1.6)
+    await wait_for(lambda: len(events.of(ResponseDone)) == 2)
+    await conn.aclose()
+    await events.close()
+    (first, usage1), (second, usage2) = seen[:2]
+    assert first.billed_seconds > 0 and second.billed_seconds > 0
+    assert first.billed_seconds == pytest.approx(usage1)
+    assert second.billed_seconds == pytest.approx(usage2 - usage1)
+    summary = UsageSummary()
+    for m, _ in seen:
+        summary.add(m)
+    assert summary.engine_billed_seconds == pytest.approx(seen[-1][1])
 
 
 async def test_cancel_mutes_the_agent_until_its_next_pause(fake: Callable[..., Any]) -> None:
