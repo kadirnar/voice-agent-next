@@ -422,4 +422,3 @@ def load_quality_dataset(
         f"unknown dataset {spec!r}: use a built-in subset ({names}) "
         "or a manifest file (.jsonl/.json/.tsv/.csv)"
     )
-
