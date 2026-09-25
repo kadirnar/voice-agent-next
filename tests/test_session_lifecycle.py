@@ -288,7 +288,9 @@ async def test_max_tool_steps_is_per_request_chain_for_typed_input() -> None:
     await session.start(Agent("x", tools=[lookup]), LoopbackTransport())
     for i in range(4):  # 4 tool rounds in total > max_tool_steps, one per request
         await session.generate_reply(user_input=f"question {i}")
-        await wait_for(lambda i=i: any(f"Answer {i}." in e.delta for e in rec.of("agent_transcript")))
+        await wait_for(
+            lambda i=i: any(f"Answer {i}." in e.delta for e in rec.of("agent_transcript"))
+        )
         await wait_for(lambda: session.agent_state == AgentState.LISTENING)
     await session.aclose()
     assert len(rec.of("tool_result")) == 4
