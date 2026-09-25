@@ -56,6 +56,7 @@ from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus, InvalidURI
 
 from ...audio.frame import AudioFrame
+from ...audio.pcm import PCM16Reassembler
 from ...chat import ChatContext, ChatMessage, FunctionCall, FunctionCallOutput
 from ...engine import EngineCapabilities, EngineConnection, EngineOptions, S2SEngine
 from ...engines.rotation import (
@@ -687,6 +688,7 @@ class _Response:
     first_audio: float | None = None
     calls: set[str] = field(default_factory=set)
     done: asyncio.Event = field(default_factory=asyncio.Event)
+    pcm: PCM16Reassembler = field(default_factory=PCM16Reassembler)
 
 
 @dataclass
@@ -1797,9 +1799,7 @@ class OpenAIRealtimeConnection(EngineConnection):
         state = self._response_for(ev)
         if not isinstance(payload, str) or not payload or state is None:
             return
-        data = base64.b64decode(payload)
-        if len(data) % 2:
-            data = data[:-1]
+        data = state.pcm.push(base64.b64decode(payload))
         if not data:
             return
         frame = AudioFrame(data, self.output_sample_rate)

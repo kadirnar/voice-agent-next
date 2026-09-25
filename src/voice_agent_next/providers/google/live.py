@@ -55,6 +55,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 from urllib.parse import urlsplit
 
 from ...audio.frame import AudioFrame
+from ...audio.pcm import PCM16Reassembler
 from ...audio.resample import StreamResampler
 from ...chat import ChatContext, ChatMessage, FunctionCall, FunctionCallOutput
 from ...engine import EngineCapabilities, EngineConnection, EngineOptions, S2SEngine
@@ -515,6 +516,7 @@ class _Generation:
     server_complete: bool = False
     ended_at: float | None = None
     metrics_sent: bool = False
+    pcm: PCM16Reassembler = field(default_factory=PCM16Reassembler)
 
 
 class GeminiLiveConnection(EngineConnection):
@@ -1390,9 +1392,9 @@ class GeminiLiveConnection(EngineConnection):
             gen = self._open_generation()
             if gen is None:
                 return
-            pcm = base64.b64decode(data)
-            if len(pcm) % 2:
-                pcm = pcm[:-1]
+            pcm = gen.pcm.push(base64.b64decode(data))
+            if not pcm:
+                return
             rate = _audio_rate(mime, self.output_sample_rate)
             frame = self._out_resampler.push(AudioFrame(pcm, rate, 1))
             if not frame:

@@ -80,6 +80,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Protocol, TypeAlias, runtime_checkable
 
 from ...audio.frame import AudioFrame
+from ...audio.pcm import PCM16Reassembler
 from ...chat import ChatContext, ChatMessage, FunctionCall, FunctionCallOutput
 from ...engine import EngineCapabilities, EngineConnection, EngineOptions, S2SEngine
 from ...engines.rotation import RotatingConnection, RotatingEngine, RotationPolicy, _Link
@@ -788,7 +789,7 @@ class NovaSonicSessionConnection(EngineConnection):
         self._closing = False
         self._failed = False
         self._audio_open = False
-        self._odd_byte = b""
+        self._pcm = PCM16Reassembler()
         self._warned: set[str] = set()
         # ---- clocks
         self._t0 = now()
@@ -1229,12 +1230,10 @@ class NovaSonicSessionConnection(EngineConnection):
         reply = self._reply
         if reply is None or content.response_id != reply.response_id:
             return
-        raw = self._odd_byte + base64.b64decode(data)
-        cut = len(raw) - len(raw) % 2
-        self._odd_byte = raw[cut:]
-        if not cut:
+        raw = self._pcm.push(base64.b64decode(data))
+        if not raw:
             return
-        frame = AudioFrame(raw[:cut], self._e.output_sample_rate)
+        frame = AudioFrame(raw, self._e.output_sample_rate)
         if reply.first_audio_at is None:
             reply.first_audio_at = now()
         self._emit(ResponseAudio(response_id=reply.response_id, item_id=reply.item_id, frame=frame))

@@ -84,6 +84,7 @@ from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
 from ...audio.frame import AudioFrame
+from ...audio.pcm import PCM16Reassembler
 from ...chat import ChatContext, ChatMessage, FunctionCall, FunctionCallOutput
 from ...engine import EngineCapabilities, EngineConnection, EngineOptions, S2SEngine
 from ...engines.rotation import RotatingConnection, RotatingEngine, RotationPolicy, _Link
@@ -648,7 +649,7 @@ class LiveSessionConnection(EngineConnection):
         self._mute_speech_end = 0.0
         self._response_ended_at: float | None = None
         self._input_since_response = 0.0
-        self._odd_byte = b""
+        self._pcm = PCM16Reassembler()
         # ---- user speech (local VAD) and transcript
         opts = VADOptions(min_speech_duration=0.1, min_silence_duration=engine.user_min_silence)
         self._vad: VADStream = EnergyVAD(
@@ -1103,12 +1104,10 @@ class LiveSessionConnection(EngineConnection):
         delta = ev.get("delta")
         if not isinstance(delta, str) or not delta:
             return
-        data = self._odd_byte + base64.b64decode(delta)
-        cut = len(data) - len(data) % 2
-        self._odd_byte = data[cut:]
-        if not cut:
+        data = self._pcm.push(base64.b64decode(delta))
+        if not data:
             return
-        frame = AudioFrame(data[:cut], self._e.output_sample_rate)
+        frame = AudioFrame(data, self._e.output_sample_rate)
         t = now()
         self._playout_end = max(self._playout_end, t) + frame.duration
         loud = frame.dbfs() >= self._e.speech_threshold_db
