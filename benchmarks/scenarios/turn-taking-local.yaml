@@ -1,0 +1,52 @@
+# T4 turn-taking battery with real speech (Kokoro am_adam): mid-turn pauses of 0.5-1.0 s,
+# a backchannel, a cough and a real interruption spoken 1.5 s into the agent's reply, and a
+# one-word answer. The agent should answer in a few full sentences so the barge-ins land
+# while it is still talking (see benchmarks/README.md, "T4: turn-taking battery").
+#
+#   uv sync --extra kokoro --extra bench   # + the extras of the system under test
+#   van bench turn-taking -c agent.yaml -s benchmarks/scenarios/turn-taking-local.yaml
+#   van bench turn-taking --engine '{provider: moshi/moshika-q8, url: "ws://localhost:8998"}' \
+#       -s benchmarks/scenarios/turn-taking-local.yaml
+name: turn-taking-local
+version: 1
+description: >-
+  Customer-service turns voiced by Kokoro (am_adam): plain questions, questions with a
+  mid-turn pause, a backchannel, a cough and an interruption over the agent's reply.
+sample_rate: 16000
+loudness_dbfs: -20.0
+lead_in: 0.5
+stimuli: tts
+tts: {provider: kokoro/v1.0-fp16, voice: am_adam}
+reply_timeout: 10.0
+gap_after_reply: 0.8
+turns:
+  - {id: "hello", text: "Hi, I have a few questions.", category: question}
+  - id: "order"
+    category: pause
+    parts:
+      - {text: "Where is my order?", pause: 0.8}
+      - {text: "I placed it last week."}
+  - {id: "policy", text: "Can you explain your return policy?"}
+  - {id: "uh-huh", text: "Uh-huh.", barge_in: 1.5, expect_reply: false, category: backchannel}
+  - id: "table"
+    category: pause
+    parts:
+      - {text: "I would like to book a table,", pause: 0.6}
+      - {text: "for two people tonight."}
+  - {id: "hours", text: "What are your opening hours on weekends?"}
+  - {id: "cough", source: noise, duration: 0.35, seed: 7, loudness_dbfs: -24, barge_in: 1.5,
+     expect_reply: false, category: noise}
+  - id: "flight"
+    category: pause
+    parts:
+      - {text: "Please change my flight.", pause: 1.0}
+      - {text: "To Friday morning, if possible."}
+  - {id: "refund", text: "How long does a refund usually take?"}
+  - {id: "stop", text: "Sorry, wait. Can I pay by credit card instead?", barge_in: 1.5,
+     category: interruption}
+  - id: "sunday"
+    category: pause
+    parts:
+      - {text: "Are you open on Sunday?", pause: 0.5}
+      - {text: "In the afternoon, I mean."}
+  - {id: "yes", text: "Yes.", category: question}

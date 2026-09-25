@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
@@ -103,8 +103,9 @@ def _default_reply(ctx: ChatContext) -> str:
 
 
 class _Script:
-    def __init__(self, responses: ResponseScript) -> None:
+    def __init__(self, responses: ResponseScript, default: str | None = None) -> None:
         self._responses = responses
+        self._default = default
         self._i = 0
 
     def next(self, ctx: ChatContext) -> MockResponse:
@@ -114,7 +115,7 @@ class _Script:
             r = self._responses[self._i]
             self._i += 1
             return r
-        return _default_reply(ctx)
+        return self._default if self._default is not None else _default_reply(ctx)
 
 
 # ------------------------------------------------------------------------------ STT
@@ -233,7 +234,11 @@ class _MockSTTStream(STTStream):
     default_model="mock-llm",
 )
 class MockLLM(LLM):
-    """Streams scripted replies word by word (default: echoes the last user message)."""
+    """Streams scripted replies word by word (default: echoes the last user message).
+
+    ``default_response`` replaces the echo once the script is exhausted (e.g. a long reply
+    for barge-in benchmarks).
+    """
 
     provider = "mock"
 
@@ -242,6 +247,7 @@ class MockLLM(LLM):
         *,
         model: str = "mock-llm",
         responses: ResponseScript = None,
+        default_response: str | None = None,
         ttft: float = 0.0,
         token_delay: float = 0.0,
         temperature: float | None = None,
@@ -253,7 +259,7 @@ class MockLLM(LLM):
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        self.script = _Script(responses)
+        self.script = _Script(responses, default_response)
         self.ttft = ttft
         self.token_delay = token_delay
         self.requests: list[ChatContext] = []
@@ -461,7 +467,10 @@ class MockEngine(S2SEngine):
     Args:
         responses: reply script (strings / :class:`MockToolCall` / lists / callable).
         transcripts: user transcript script (see :class:`MockSTT`).
+        default_response: reply once ``responses`` is exhausted (default: echo the user).
         response_delay: delay between turn commit and the first response audio.
+        vad_options: server-side VAD settings (a :class:`VADOptions` or a mapping of its
+            fields, e.g. ``{min_silence_duration: 0.25}`` to end turns sooner).
         realtime_factor: 0 = audio produced instantly; 1.0 = at real-time speed.
     """
 
@@ -473,11 +482,12 @@ class MockEngine(S2SEngine):
         model: str = "mock-s2s",
         responses: ResponseScript = None,
         transcripts: Sequence[str] | None = None,
+        default_response: str | None = None,
         response_delay: float = 0.0,
         token_delay: float = 0.0,
         input_sample_rate: int = 16_000,
         output_sample_rate: int = 24_000,
-        vad_options: VADOptions | None = None,
+        vad_options: VADOptions | Mapping[str, Any] | None = None,
         chars_per_second: float = 15.0,
         chunk_duration: float = 0.04,
         realtime_factor: float = 0.0,
@@ -497,7 +507,9 @@ class MockEngine(S2SEngine):
             input_sample_rate=input_sample_rate,
             output_sample_rate=output_sample_rate,
         )
-        self.llm = MockLLM(responses=responses, token_delay=token_delay)
+        self.llm = MockLLM(
+            responses=responses, default_response=default_response, token_delay=token_delay
+        )
         self.stt = MockSTT(transcripts=transcripts)
         self.tts = MockTTS(
             sample_rate=output_sample_rate,
@@ -506,6 +518,10 @@ class MockEngine(S2SEngine):
             realtime_factor=realtime_factor,
         )
         self.response_delay = response_delay
+        if isinstance(vad_options, Mapping):
+            vad_options = VADOptions(
+                **{"min_speech_duration": 0.1, "min_silence_duration": 0.4, **vad_options}
+            )
         self.vad_options = vad_options or VADOptions(
             min_speech_duration=0.1, min_silence_duration=0.4
         )
