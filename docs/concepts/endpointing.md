@@ -364,14 +364,19 @@ the endpointing decision where the words disagree with the sound:
 * the fused probability replaces the detector's in every policy (fixed, dynamic,
   dictation); `EndpointingMetrics.audio_probability` / `text_probability` show both
   halves;
-* "I would like to book a table," (audio 0.88) and, with a punctuating STT, "Please change
-  my flight." read as unfinished: the fused probability falls under the threshold and the
-  fixed policy waits `max_endpointing_delay`;
+* "I would like to book a table," (audio 0.88) reads as unfinished: the fused probability
+  falls under the threshold and the fixed policy waits `max_endpointing_delay` (premature
+  in 0 of 9 sessions, 5 of 6 with Smart Turn alone);
 * the text half runs while the STT flushes and the reply is prepared (a held speculative
   reply starts on the audio verdict, before the text half returns), so a complete turn
   costs little more than with Smart Turn alone.
 
-SEMANTIC_TABLE
+| local CPU stack (#122), T4 battery | premature | v2v p50 | eot-bench en false cut-offs @ 0.5 / 1.5 s |
+|---|---:|---:|---:|
+| Smart Turn, fixed 0.5 / 1.5 s (local presets) | 75 % | 644 ms | 10.8 % |
+| **fused** (Smart Turn + `lm_turn`), fixed 0.5 / 1.5 s | **50 %** | 626–735 ms | **8.8 %** |
+
+Details, German and Spanish, and T1: [semantic end of turn](../providers/lm-turn.md#measurements).
 
 What it does not fix: "Where is my order?" is a complete question to the ear *and* to
 the reader. Only waiting longer after every complete question (a 1.0 s minimum, see

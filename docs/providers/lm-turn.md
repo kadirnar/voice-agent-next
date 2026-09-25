@@ -137,12 +137,28 @@ transcript arrives at the pause). Smart Turn v3.2 int8 vs the default fused dete
 local presets' policy (0.5 / 1.5 s); the other columns are eot-bench's operating points
 (best policy within the budget).
 
-EOTBENCH_TABLE
+| Language | Detector | ROC-AUC | False cut-offs @ 0.5 / 1.5 s | Mean latency @ 0.5 / 1.5 s | False cut-offs @ 300 ms | @ 600 ms | Latency @ 5 % cut-offs | @ 10 % |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| en | Smart Turn | 0.834 | 10.8 % | 755 ms | 36.0 % | 15.3 % | 1,058 ms | 766 ms |
+| en | **fused** | **0.912** | **8.8 %** | **702 ms** | **21.4 %** | **9.9 %** | **844 ms** | **594 ms** |
+| de | Smart Turn | 0.797 | 14.4 % | 632 ms | 35.9 % | 14.6 % | 952 ms | 727 ms |
+| de | **fused** | **0.873** | **6.6 %** | 875 ms | **23.9 %** | **10.1 %** | **775 ms** | **609 ms** |
+| es | Smart Turn | 0.782 | 19.4 % | 592 ms | 42.2 % | 18.2 % | 1,005 ms | 775 ms |
+| es | **fused** | **0.874** | **8.9 %** | 690 ms | **24.9 %** | **10.1 %** | **775 ms** | **605 ms** |
+
+```bash
+van bench turns -d eot-bench-en --transcript-lag 0 --min-endpointing-delay 0.5 \
+    --max-endpointing-delay 1.5 --detector '{provider: fused}'
+```
 
 * Fusion lowers the false cut-offs at the presets' policy in every language measured,
   and improves every operating point: it ranks turn ends better than either half.
-* The cost is latency where the text half disagrees with a confident audio verdict (+60
-  to +160 ms mean end-of-turn latency at the presets' policy).
+* The cost is latency where the text half disagrees with a confident audio verdict: in
+  German (+243 ms mean end-of-turn latency at the presets' policy) and Spanish (+98 ms);
+  in English the fused detector is both safer and faster.
+* The fused detector's inference time on eot-bench (p50 ~175 ms, both halves on one core
+  each, on a loaded machine) is mostly the text half on long transcripts; the prompt is
+  cut to its last 128 tokens.
 * SmolLM2 is English-first but scored better on German and Spanish text (ROC-AUC 0.81,
   0.83) than on English (0.74).
 
@@ -161,4 +177,38 @@ EOTBENCH_TABLE
 
 ### T4 battery and T1 latency
 
-T4T1_TABLE
+Local CPU stack of #122 (sherpa-onnx NeMo streaming STT, which writes lowercase text
+without punctuation, Ollama LFM2.5-1.2B, Pocket TTS, Silero; fixed 0.5 / 1.5 s,
+preemptive generation + TTS), Smart Turn alone vs `fused`, measured on the same machine
+the same day (other benchmarks were running, so absolute numbers vary by ±50 ms):
+
+| T4 battery (`turn-taking-local.yaml`, 3 × 12 turns) | Smart Turn | fused |
+|---|---:|---:|
+| premature replies in mid-turn pauses (12 per run) | 75 % | 50 %, 50 % (33 %*) |
+| v2v p50 (questions + pause turns, not premature) | 644 ms | 626, 735 ms (675 ms*) |
+| dead air / missed turns | 0 % / 0 % | ≤ 4 % / ≤ 4 % (one turn per run at most) |
+| same battery with Kroko (punctuating STT): premature | 92 % | 50 % |
+| same battery with Kroko: v2v p50 | 684 ms | 695 ms |
+
+| T1 (`latency-local.yaml`, 2 × 12 turns, 22 measured) | Smart Turn | fused |
+|---|---:|---:|
+| v2v p50, run 1 / run 2 (interleaved) | 604 / 681 ms | 613 ms (684 ms before the held reply started on the audio verdict) |
+
+\* first run, before the unpunctuated calibration: NeMo's text was read with the
+punctuated one, which made every transcript look less finished (it also caught "please
+change my flight", 3 of 3, but pushed complete questions towards the 1.5 s ceiling).
+
+Per phrase, premature replies over all runs:
+
+| first part (pause) | Smart Turn (NeMo + Kroko, 6 sessions) | fused (NeMo + Kroko, 9 sessions, current calibration) |
+|---|---:|---:|
+| "I would like to book a table," (0.6 s) | 5 / 6 | **0 / 9** |
+| "Please change my flight." (1.0 s) | 6 / 6 | 8 / 9 |
+| "Where is my order?" (0.8 s) | 6 / 6 | 9 / 9 |
+| "Are you open on Sunday?" (0.5 s) | 3 / 6 | 1 / 9 |
+* **"Where is my order?" is answered in its 0.8 s pause in every run.** It is a complete
+  question to both halves; so is "Please change my flight." to SmolLM2-135M (the 360M
+  model reads it as unfinished, p(end) 0.01, but its calibration is too flat to overrule
+  Smart Turn's 0.99). The issue's target (< 15 % premature)
+  needs a detector that predicts "the user will add details" after complete questions —
+  or a ~1 s minimum delay after every complete sentence, which costs ~450 ms v2v (#122).
