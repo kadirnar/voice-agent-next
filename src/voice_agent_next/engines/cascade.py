@@ -1312,25 +1312,27 @@ class CascadeConnection(EngineConnection):
                     stream = engine.llm.chat(ctx, tools=tools)
                 source = stream
                 calls: list[FunctionCall] = []
-                text_parts: list[str] = []
+                text = ""  # appended per delta (re-joining every delta is quadratic)
 
                 async def text_source() -> AsyncIterator[str]:
+                    nonlocal text
                     try:
                         async for chunk in source:
                             if chunk.delta:
-                                text_parts.append(chunk.delta)
-                                msg.content = ["".join(text_parts)]
+                                text += chunk.delta
+                                msg.content = [text]
                                 yield chunk.delta
                             calls.extend(chunk.tool_calls)
                     finally:
                         await source.aclose()
 
                 async def chunk_source() -> AsyncIterator[ChatChunk]:
+                    nonlocal text
                     try:
                         async for chunk in source:
                             if chunk.delta:
-                                text_parts.append(chunk.delta)
-                                msg.content = ["".join(text_parts)]
+                                text += chunk.delta
+                                msg.content = [text]
                             calls.extend(chunk.tool_calls)
                             yield chunk
                     finally:
@@ -1343,7 +1345,7 @@ class CascadeConnection(EngineConnection):
                 else:
                     await self._speak(rid, item_id, text_source(), output)
                 await output.wait_released()  # the turn is committed: history and tools
-                if not "".join(text_parts).strip():
+                if not text.strip():
                     self.chat_ctx.remove(item_id)
                 for call in calls:
                     self.chat_ctx.append(call)
