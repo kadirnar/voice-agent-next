@@ -18,15 +18,18 @@ import pytest
 
 from voice_agent_next.audio import AudioFrame
 from voice_agent_next.chat import ChatContext
-from voice_agent_next.fallback import FallbackLLM, FallbackSTT
+from voice_agent_next.fallback import FallbackLLM, FallbackSTT, FallbackTTS
 from voice_agent_next.llm import LLMStream
-from voice_agent_next.metrics import LLMMetrics, STTMetrics
-from voice_agent_next.providers.mock import MockLLM, MockSTT
+from voice_agent_next.metrics import LLMMetrics, STTMetrics, TTSMetrics
+from voice_agent_next.providers.mock import MockLLM, MockSTT, MockTTS
 from voice_agent_next.stt import STTEvent, STTEventType, STTStream, Transcript
 from voice_agent_next.tools import FunctionTool
 from voice_agent_next.utils.aio import closed_outside
 
 LOGGER = "voice_agent_next"
+
+# a collected coroutine that awaits in its cleanup is an "Exception ignored" unraisable
+pytestmark = pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
 
 
 async def _park() -> None:
@@ -242,6 +245,29 @@ async def test_abandoned_fallback_stt_stream_reports_nothing(
         gc.collect()
         await _park()
     assert [m for m in got if m.model == "a"] == []
+    assert _failures(caplog) == []
+
+
+# ------------------------------------------------------------------------------ TTS
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_abandoned_fallback_tts_stream_reports_nothing(
+    streaming: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The base TTS streams are covered by #150; the failover wrapper's cleanup must not
+    await (or report) while it is being collected either."""
+    a, b = MockTTS(model="a", streaming=streaming), MockTTS(model="b", streaming=streaming)
+    fb = FallbackTTS([a, b])
+    got: list[TTSMetrics] = []
+    for emitter in (fb, a, b):
+        emitter.on("metrics", got.append)
+    stream = fb.stream()
+    stream.push_text("Hello there")  # no flush: every task parks on its input
+    await _park()
+    del stream
+    with caplog.at_level(logging.ERROR, logger=LOGGER):
+        gc.collect()
+        await _park()
+    assert got == []
     assert _failures(caplog) == []
 
 

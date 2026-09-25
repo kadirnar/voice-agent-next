@@ -33,7 +33,7 @@ from .text.normalize import (
     get_normalizer,
 )
 from .text.sentences import SentenceSegmenter
-from .utils.aio import Chan, ChanClosed, cancel_and_wait
+from .utils.aio import Chan, ChanClosed, cancel_and_wait, closed_outside
 from .utils.clock import now
 from .utils.emitter import EventEmitter
 from .utils.ids import new_id
@@ -251,21 +251,12 @@ class _AudioEmitter:
             self._events.send_nowait(item)
 
     def _collected(self) -> bool:
-        """``True`` while this stream's coroutine is being closed from outside its task.
+        """``True`` while a stream dropped without ``aclose()`` is garbage-collected.
 
-        That only happens when the stream was dropped without ``aclose()`` while its task
-        was still pending: the unreachable task is garbage-collected and its coroutine is
-        closed wherever the collector happens to run (e.g. in the middle of another
-        request). Nothing may be reported from there — at a random time, possibly into
-        another request's listeners — so an abandoned stream reports no metrics.
+        Its coroutine is then closed from outside its task, at a random time: nothing
+        is reported from there (see :func:`~voice_agent_next.utils.aio.closed_outside`).
         """
-        task: asyncio.Task[None] | None = getattr(self, "_task", None)
-        if task is None:  # still inside ``create_task`` (eager task factory)
-            return False
-        try:
-            return asyncio.current_task() is not task
-        except RuntimeError:  # no running loop: collected after the loop is gone
-            return True
+        return closed_outside(getattr(self, "_task", None))
 
     def _emit_metrics(self) -> None:
         if not self._metrics_enabled:
