@@ -10,8 +10,6 @@ on:
         description: "Extra pytest arguments (e.g. a test path or -k expression)"
         required: false
         default: ""
-  push:
-    branches: [fix/flake-hunt]  # TEMPORARY: verification runs of PR #131
 
 concurrency:
   group: flake-hunt-${{ github.ref }}
