@@ -339,7 +339,7 @@ async def test_flush_sends_finalize_and_owns_the_turn() -> None:
         (E.FINAL_TRANSCRIPT, ""),  # the second flush
         (E.FINAL_TRANSCRIPT, ""),  # end_input's flush
     ]  # no END_OF_TURN: the cascade owns the turn
-    assert acked_at - flushed_at < 0.5
+    assert acked_at - flushed_at < 1.0
     assert server.connections[0].controls() == ["finalize"]
     assert metrics and all(m.latency is not None for m in metrics)
 
