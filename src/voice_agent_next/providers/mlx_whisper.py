@@ -125,9 +125,9 @@ class MLXWhisperSTT(STT):
             :class:`~voice_agent_next.stt_guard.HallucinationGuard`): ``True`` (default),
             ``False``, a guard or a mapping of its fields.
         final_from_interim: behind a VAD with ``interim_results``, use the latest interim
-            decode as the final transcript when it started after the last voiced VAD window
-            (no second decode when the input ends right after the speech). Ignored with
-            ``word_timestamps``.
+            decode as the final transcript when no voiced VAD window arrived after it took
+            its audio (no second decode when the input ends right after the speech).
+            Ignored with ``word_timestamps``.
     """
 
     provider = _PROVIDER

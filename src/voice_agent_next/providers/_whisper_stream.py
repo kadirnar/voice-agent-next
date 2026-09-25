@@ -83,10 +83,11 @@ class WhisperAdapterStream(STTStream):
       the final one is needed. A decode still running when the utterance ends is awaited
       and its result discarded (a model call cannot be interrupted), unless the backend
       can run the final next to it (``parallel_final``, e.g. a second model replica).
-    * **final from interim** (``final_from_interim=True``): when the utterance ends and the
-      latest interim decode (in flight or done) started after the last voiced VAD window,
-      it has heard all of the speech: its transcript becomes the final one and no second
-      decode runs. Not with ``word_timestamps`` (interim decodes do not align words).
+    * **final from interim** (``final_from_interim=True``): when the utterance ends and no
+      voiced VAD window arrived after the latest interim decode (in flight or done) took
+      its audio, that decode has heard all of the speech: its transcript becomes the final
+      one and no second decode runs. Not with ``word_timestamps`` (interim decodes do not
+      align words).
     * **VAD-aware hallucination guard**: the mean speech probability of the utterance's
       speech windows is passed to the guard.
     """

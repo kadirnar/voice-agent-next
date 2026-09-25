@@ -136,8 +136,8 @@ class FasterWhisperSTT(STT):
             ``False`` disables it, a :class:`HallucinationGuard` or a mapping of its
             fields configures it.
         final_from_interim: behind a VAD with ``interim_results``, when the utterance ends
-            and the latest interim decode started after the last voiced VAD window (it has
-            heard all of the speech), use its transcript as the final one instead of
+            and no voiced VAD window arrived after the latest interim decode took its audio
+            (it has heard all of the speech), use its transcript as the final one instead of
             decoding the utterance again. Saves a decode when the input ends right after
             the speech (a forced flush, the end of a file), at the price of an interim-grade
             final (greedy, no temperature fallback). Ignored with ``word_timestamps``.

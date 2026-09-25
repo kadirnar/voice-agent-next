@@ -108,6 +108,24 @@ greedy (`temperature=0`) without conditioning on previous text; `fp16`,
 keyword) are options. Several Whisper instances in one process keep their own model (no
 reload between them).
 
+It shares faster-whisper's streaming and robustness features (the same adapter stream and
+guard, see [faster-whisper](faster_whisper.md)):
+
+| Option | Default | Meaning |
+|---|---|---|
+| `hallucination_guard` | `True` | drop segments that are probably not speech: no-speech segments, known subtitle artifacts and outros in 16 languages, repetition loops, stock phrases ("Thank you.", "Danke.") the VAD was unsure about; see [Hallucination guard](faster_whisper.md#hallucination-guard). `False`, a `voice_agent_next.stt_guard.HallucinationGuard` or a mapping of its fields configures it |
+| `interim_results` | `False` | behind a VAD (`StreamAdapter`, as in the cascade), re-decode the utterance while the user speaks and emit interim transcripts (greedy, no timestamps); see [Partial transcripts](faster_whisper.md#partial-transcripts) |
+| `interim_interval` | `0.25` | seconds of new speech between interim decodes (at least; a slow decode spaces them out) |
+| `final_from_interim` | `False` | when no voiced audio followed the latest interim decode, use it as the final transcript instead of decoding again; see [Final from the interim](faster_whisper.md#final-from-the-interim) |
+
+mlx-whisper's segments carry the same statistics as faster-whisper's (`no_speech_prob`,
+`avg_logprob`, `compression_ratio`), so the guard applies the same rules; behind a VAD it
+also gets the VAD's confidence. All decodes, interim and final, run on the one MLX
+thread, so a final waits for an interim decode in flight (as with one faster-whisper
+replica). Interim decodes and the guard on real models are exercised by the
+`ci:models` macOS job (`tests/providers/test_mlx_models.py`); their latency on Apple
+silicon has not been measured yet.
+
 ## TTS: mlx-audio (`mlx_audio`)
 
 | Model | Repository | Download | Voices | Streaming |
