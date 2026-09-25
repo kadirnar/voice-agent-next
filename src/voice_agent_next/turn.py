@@ -140,14 +140,15 @@ def fuse_end_of_turn(
     Either may be ``None`` (no audio, no transcript yet, or the text detector missed its
     latency budget): the other one is returned as is (``None`` when both are).
 
-    Methods:
-        ``"logit"``: ``sigmoid(audio_weight * logit(audio) + text_weight * logit(text) +
-        bias)``, a logistic regression over the two scores. With weights 1 and bias 0 it
-        is the naive-Bayes combination of two independent, calibrated opinions.
-        ``"product"``: ``audio ** audio_weight * text ** text_weight``: both must agree
-        that the user is done.
-        ``"min"``: the less confident of the two (weights ignored).
-        ``"mean"``: the weighted mean.
+    ``method``:
+
+    * ``"logit"``: ``sigmoid(audio_weight * logit(audio) + text_weight * logit(text) +
+      bias)``, a logistic regression over the two scores. With weights 1 and bias 0 it is
+      the naive-Bayes combination of two independent, calibrated opinions.
+    * ``"product"``: ``audio ** audio_weight * text ** text_weight`` (both must agree
+      that the user is done).
+    * ``"min"``: the less confident of the two (weights ignored).
+    * ``"mean"``: the weighted mean.
     """
     if audio is None or text is None:
         return text if audio is None else audio
