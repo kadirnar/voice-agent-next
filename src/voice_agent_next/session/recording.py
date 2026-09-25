@@ -66,6 +66,20 @@ SESSION_EVENTS = (
 _JITTER = 0.2
 """User audio arriving up to this much later than its predecessor ends is contiguous."""
 
+_BACKLOG = 0.05
+"""User audio placed this much later than it arrived was queued behind a stall (see
+:meth:`SessionRecorder.user_audio`)."""
+
+
+@dataclasses.dataclass(slots=True)
+class _Gap:
+    """Silence the recorder inserted into the user stream (the latest run of it)."""
+
+    pos: int  # where it starts on the recording (output samples)
+    n_out: int  # its length on the recording
+    n_in: int  # its length in input samples
+    in_end: int  # input samples of the stream up to its end
+
 
 class SessionRecorder(SessionTap):
     """Records an :class:`~voice_agent_next.session.AgentSession` to disk.
@@ -117,8 +131,10 @@ class SessionRecorder(SessionTap):
         self._user_rs: Resampler | None = None
         self._user_rate = 0
         self._user_skip = 0  # resampler delay still to drop
+        self._user_delay = 0  # the resampler's delay (output samples)
         self._user_base = 0.0  # time (s) at which the current input stream starts
         self._user_in = 0  # input samples of the current stream so far
+        self._gap: _Gap | None = None  # the latest silence inserted into the user stream
 
     @property
     def origin(self) -> float:
@@ -225,12 +241,21 @@ class SessionRecorder(SessionTap):
         if frame.sample_rate != self._user_rate:
             self._restart_user_stream(frame.sample_rate)
         rate = self._user_rate
-        # the frame was captured during [t - duration, t]; keep the stream contiguous
-        # unless it arrives clearly later than the previous one ended (a gap in the input)
+        # the frame was captured from its timestamp (when the transport stamped it: that
+        # holds even when the input loop falls behind), or at the latest during
+        # [t - duration, t]; keep the stream contiguous unless it starts clearly later
+        # than the previous one ended (a gap in the input)
         cursor = self._user_base + self._user_in / rate
-        start = t - frame.duration - self._origin
+        captured = t - frame.duration if frame.timestamp is None else min(frame.timestamp, t)
+        start = captured - self._origin
         if start > cursor + _JITTER:
-            self._push_user(np.zeros(round((start - cursor) * rate), dtype=np.int16))
+            self._push_silence(start - cursor)
+        elif cursor - start > _BACKLOG:
+            # it would end after it arrived: the "gap" before it was a backlog (a stalled
+            # event loop or input loop delivers the queued real-time frames late, then all
+            # at once), not a pause of the input: take that silence out again, or the rest
+            # of the user channel would stay late by the length of the stall
+            self._take_back_silence(cursor - start)
         self._push_user(frame.to_numpy())
         self._maybe_flush()
 
@@ -303,8 +328,9 @@ class SessionRecorder(SessionTap):
             self._user_base += self._user_in / self._user_rate
         self._user.truncate(self._pos(self._origin + self._user_base))
         self._user_rate, self._user_in = rate, 0
+        self._gap = None
         self._user_rs = None if rate == self.sample_rate else Resampler(rate, self.sample_rate)
-        self._user_skip = _resampler_delay(rate, self.sample_rate)
+        self._user_delay = self._user_skip = _resampler_delay(rate, self.sample_rate)
 
     def _push_user(self, samples: np.ndarray[Any, np.dtype[np.int16]]) -> None:
         if len(samples) == 0:
@@ -312,6 +338,50 @@ class SessionRecorder(SessionTap):
         self._user_in += len(samples)
         frame = AudioFrame(samples.tobytes(), self._user_rate, 1)
         self._put_user(frame if self._user_rs is None else self._user_rs.push(frame))
+
+    def _push_silence(self, seconds: float) -> None:
+        """Extend the user stream with ``seconds`` of silence (a gap in the input),
+        remembering where it is so that :meth:`_take_back_silence` can undo it."""
+        n = round(seconds * self._user_rate)
+        if n <= 0:
+            return
+        gap = self._gap
+        extend = gap is not None and gap.in_end == self._user_in  # no audio since it
+        if self._user_rs is not None and not extend:
+            # write the silence directly, not through the resampler (which holds back part
+            # of its output): the audio so far is flushed and a new resampler takes over
+            self._put_user(self._user_rs.flush())
+            self._user_rs = Resampler(self._user_rate, self.sample_rate)
+            self._user_skip = self._user_delay
+        self._user_in += n
+        pos = self._user.end
+        end = self._pos(self._origin + self._user_base + self._user_in / self._user_rate)
+        self._user.write(pos, np.zeros(max(0, end - pos), dtype=np.int16))
+        if gap is not None and extend:
+            gap.n_in += n
+            gap.n_out = self._user.end - gap.pos
+            gap.in_end = self._user_in
+        else:
+            self._gap = _Gap(pos, self._user.end - pos, n, self._user_in)
+
+    def _take_back_silence(self, seconds: float) -> None:
+        """Remove up to ``seconds`` of the latest inserted silence that is still in memory
+        (from its middle: resampler ringing at its edges stays)."""
+        gap = self._gap
+        if gap is None:
+            return
+        ratio = self.sample_rate / self._user_rate
+        lo = max(gap.pos, self._user.start)
+        hi = min(gap.pos + gap.n_out, self._user.end)
+        n_in = min(gap.n_in, round(seconds * self._user_rate), math.floor((hi - lo) / ratio))
+        if n_in <= 0:
+            return
+        n_out = min(hi - lo, round(n_in * ratio))
+        self._user.remove(lo + (hi - lo - n_out) // 2, n_out)
+        self._user_in -= n_in
+        gap.n_in -= n_in
+        gap.n_out -= n_out
+        gap.in_end -= n_in
 
     def _put_user(self, frame: AudioFrame) -> None:
         samples = frame.to_numpy()
@@ -327,7 +397,7 @@ class SessionRecorder(SessionTap):
         cursor = self._user_base + self._user_in / self._user_rate
         gap = t - self._origin - cursor
         if gap > 0:
-            self._push_user(np.zeros(round(gap * self._user_rate), dtype=np.int16))
+            self._push_silence(gap)
 
     def _maybe_flush(self) -> None:
         t = now()

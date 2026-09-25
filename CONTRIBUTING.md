@@ -46,7 +46,12 @@ Rules:
 * Real-API tests: `@pytest.mark.integration`, skipped unless the API key env var is set.
 * Real-model tests: `@pytest.mark.model`, skipped unless the dependency is installed; keep downloads small. They run weekly on Linux, macOS and Windows (`.github/workflows/models.yml`) and on PRs labelled `ci:models` — add the label when you touch a local model provider.
 * Tests that need audio hardware: `@pytest.mark.audio_device`.
-* Timing assertions must use generous tolerances (CI runners are slow; Windows timers are coarse).
+* Timing assertions must use generous tolerances (CI runners are slow; Windows timers are coarse). Prefer assertions that cannot flake:
+  * wait for a condition (`wait_for(...)`) instead of sleeping a fixed time; on Windows' Proactor loop a sent message may reach the peer later — wait for delivery;
+  * lower bounds are exact when the delay is: mock latencies and tool delays use `utils.clock.sleep_for` / `sleep_until`, which never return early (a plain `asyncio.sleep` can be ~16 ms short on Windows);
+  * upper bounds allow for how late *this run's* event loop was: `async with tests.timing.LoopLag() as lag: ...` then `assert measured <= designed + margin + lag.max`;
+  * compare with timestamps measured in the same run (or count samples) rather than with wall-clock constants.
+* Hunting flaky tests: the manual **flake-hunt** workflow (Actions → flake-hunt → Run workflow, or `gh workflow run flake-hunt --ref <branch>`) runs the whole suite 5× on Linux (all extras), Windows and macOS and lists every test that failed at least once in the job summary (optional extra pytest arguments, e.g. a test path). It costs ~15 runner jobs, macOS included. A flaky test is fixed at its root cause, never skipped or loosened until it can no longer fail on a mutation of the behaviour it checks.
 
 ## Code conventions
 

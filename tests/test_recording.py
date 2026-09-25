@@ -24,6 +24,7 @@ from voice_agent_next.transports.loopback import PlayedAudio
 from voice_agent_next.utils import now
 
 from .test_session import Recorder, make_session, speak, wait_for
+from .timing import LoopLag
 
 TOL = 0.1  # s: frame size, event-loop and timer jitter (Windows: 15.6 ms ticks)
 
@@ -152,6 +153,69 @@ def test_user_stream_is_contiguous_with_gaps_as_silence(tmp_path: Path) -> None:
     assert starts[1] == pytest.approx(1.7, abs=0.005) and stops[1] == pytest.approx(1.8, abs=0.005)
 
 
+def test_timeline_track_remove_undoes_insert_silence() -> None:
+    tr = TimelineTrack(10)
+    tr.write(0, np.arange(1, 7, dtype=np.int16))
+    tr.insert_silence(2, 3)
+    tr.remove(3, 2)  # part of the pause
+    assert tr.read().tolist() == [1, 2, 0, 3, 4, 5, 6]
+    tr.remove(2, 1)
+    assert tr.read().tolist() == [1, 2, 3, 4, 5, 6] and tr.end == 6
+    tr.pop(2)
+    tr.remove(0, 2)  # clamped to what is still held
+    assert tr.read().tolist() == [5, 6] and (tr.start, tr.end) == (2, 4)
+
+
+def loud_runs(user: np.ndarray, rate: int) -> list[tuple[float, float]]:
+    loud = np.abs(user.astype(np.int32)) > 1500
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], loud.astype(np.int8), [0]])))
+    return [(a / rate, b / rate) for a, b in zip(edges[::2], edges[1::2], strict=True)]
+
+
+def test_user_backlog_after_a_stall_is_not_recorded_as_a_gap(tmp_path: Path) -> None:
+    # continuous speech from 0.5 s to 1.2 s in 20 ms frames; the input loop stalls from
+    # 0.72 s to 1.02 s, then gets the 16 queued frames at once and runs on in real time
+    rec = SessionRecorder(tmp_path / "s.wav")
+    session = fake_session(output_rate=2000, input_rate=1000)
+    t0 = now()
+    rec.session_started(session, t0)
+    arrivals = [0.52 + i * 0.02 for i in range(10)]  # [0.5, 0.7) on time
+    arrivals += [1.02] * 16  # [0.7, 1.02): the backlog
+    arrivals += [1.04 + i * 0.02 for i in range(9)]  # [1.02, 1.2) on time again
+    for t in arrivals:
+        rec.user_audio(tone(0.02, value=3000), t0 + t)
+    rec.agent_audio(tone(0.1, rate=2000), t0 + 1.3)  # the agent answers at 1.3 s
+    rec.session_closing(session, "done", t0 + 2.0)
+    user, agent, rate = channels(tmp_path / "s.wav")
+    # one utterance, where it was spoken: the stall inserted no pause and the user
+    # channel stays aligned with the agent's
+    start, stop = active(user, rate, threshold=1500)
+    assert start == pytest.approx(0.5, abs=0.005)
+    assert 1.2 - 0.005 <= stop <= 1.2 + 0.05  # _BACKLOG
+    quiet = np.abs(user[round(start * rate) : round(stop * rate)].astype(np.int32)) <= 1500
+    assert np.count_nonzero(quiet) <= 0.002 * rate  # resampler edges, no pause
+    assert active(agent, rate) == pytest.approx((1.3, 1.4), abs=0.001)
+
+
+def test_user_pause_then_backlog_keeps_the_real_pause(tmp_path: Path) -> None:
+    # a real 0.5 s pause in the input, then a short backlog: only the part of the silence
+    # the backlog proves wrong is taken back
+    rec = SessionRecorder(tmp_path / "p.wav")
+    session = fake_session()
+    t0 = now()
+    rec.session_started(session, t0)
+    for i in range(10):  # [0.5, 0.7)
+        rec.user_audio(tone(0.02, value=3000), t0 + 0.52 + i * 0.02)
+    for _ in range(5):  # [1.2, 1.3) captured, all delivered at 1.3 s
+        rec.user_audio(tone(0.02, value=3000), t0 + 1.3)
+    rec.session_closing(session, "done", t0 + 2.0)
+    user, _, rate = channels(tmp_path / "p.wav")
+    runs = loud_runs(user, rate)
+    assert len(runs) == 2 and runs[0] == pytest.approx((0.5, 0.7), abs=0.001)
+    assert 1.2 <= runs[1][0] <= 1.2 + 0.05  # _BACKLOG
+    assert runs[1][1] - runs[1][0] == pytest.approx(0.1, abs=0.001)
+
+
 # ------------------------------------------------------------------- live sessions
 
 
@@ -195,6 +259,41 @@ async def test_session_recording_aligns_user_and_agent_audio(tmp_path: Path) -> 
     # the whole call is there, and no more
     # ends with the call; loaded runners (macOS CI) deliver the last frames ~0.25 s late
     assert len(user) / rate == pytest.approx(rec.of("close")[0].timestamp - origin, abs=0.35)
+
+
+async def test_a_stalled_event_loop_does_not_stretch_the_user_channel(tmp_path: Path) -> None:
+    # the loop blocks for 0.3 s in the middle of a 1 s utterance (a loaded CI runner did
+    # this on its own): the frames queued meanwhile arrive late and at once, and are still
+    # recorded as the continuous speech they were
+    session = make_session("native", transcripts=["hello"], responses=["Hi."], record=tmp_path)
+    transport = LoopbackTransport(realtime_playout=True)
+    await session.start(Agent("x"), transport)
+    recorder = session.recorder
+    assert recorder is not None and recorder.wav_path is not None
+    await asyncio.sleep(0.3)
+    spoke_at = now()
+    stalled: list[float] = []
+
+    def stall() -> None:
+        # busy-wait: time.sleep may overshoot by 0.1 s+ on macOS, and a stall that
+        # outlasts the utterance would leave the source itself restarting late
+        end = now() + 0.3
+        while now() < end:
+            pass
+        stalled.append(now())
+
+    async with LoopLag() as lag:
+        asyncio.get_running_loop().call_later(0.2, stall)
+        await transport.play_user_audio(synth_speech(1.0, 16_000))
+        await transport.play_user_audio(AudioFrame.silence(0.6, 16_000))
+    await session.aclose()
+    assert stalled[0] - spoke_at < 0.9  # the source caught up before the utterance ended
+    user, _, rate = channels(recorder.wav_path)
+    u0, u1 = active(user, rate)
+    assert u0 == pytest.approx(spoke_at - recorder.origin, abs=TOL)
+    # what is left of the pause: up to _BACKLOG, plus how late the frames after the stall
+    # were produced (a loaded runner), which reads as audio arriving on time
+    assert u1 - u0 == pytest.approx(1.0, abs=0.06 + lag.max_since(stalled[0]))
 
 
 async def test_barge_in_truncates_the_recorded_agent_audio(tmp_path: Path) -> None:

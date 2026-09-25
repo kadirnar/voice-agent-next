@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from tests.test_session import Recorder, speak, wait_for
+from tests.timing import LoopLag, assert_delay
 from voice_agent_next import Agent, AgentSession, AudioFrame, CascadeOptions
 from voice_agent_next.chat import ChatContext
 from voice_agent_next.engines.endpointing import Endpointer, PauseTracker
@@ -184,23 +185,25 @@ async def pause_then_continue(transport: LoopbackTransport, pause: float) -> Non
     await speak(transport, 0.4, 0.3)
 
 
-async def eot_delays(detector: Any, **options: Any) -> tuple[list[float], Recorder]:
+async def eot_delays(detector: Any, **options: Any) -> tuple[list[float], Recorder, float]:
+    """End-of-turn delays of one turn, the recorder, and how late this run's loop was."""
     session = cascade(detector, **options)
     rec = Recorder(session)
     transport = LoopbackTransport()
-    await session.start(Agent("x"), transport)
-    await speak(transport, 0.5, 0.3)
-    await wait_for(lambda: bool(rec.turn_metrics()), 6)
+    async with LoopLag() as lag:
+        await session.start(Agent("x"), transport)
+        await speak(transport, 0.5, 0.3)
+        await wait_for(lambda: bool(rec.turn_metrics()), 6)
     await session.aclose()
-    return [m.end_of_turn_delay or 0.0 for m in rec.turn_metrics()], rec
+    return [m.end_of_turn_delay or 0.0 for m in rec.turn_metrics()], rec, lag.max
 
 
 async def test_confident_detector_commits_at_the_floor() -> None:
-    [fixed], _ = await eot_delays(ScriptedDetector(0.99))
-    [dynamic], rec = await eot_delays(ScriptedDetector(0.99), endpointing="dynamic")
-    assert fixed == pytest.approx(0.4, abs=0.1)
-    assert dynamic == pytest.approx(0.25, abs=0.1)  # = the VAD's own 0.25 s pause
-    assert dynamic < fixed - 0.05
+    [fixed], _, lag_fixed = await eot_delays(ScriptedDetector(0.99))
+    [dynamic], rec, lag = await eot_delays(ScriptedDetector(0.99), endpointing="dynamic")
+    assert_delay(fixed, 0.4, 0.1, lag_fixed)
+    assert_delay(dynamic, 0.25, 0.1, lag)  # = the VAD's own 0.25 s pause
+    assert dynamic < 0.4 - 0.05 + lag  # sooner than the fixed delay
     [m] = endpointing(rec)
     assert m.policy == "dynamic" and m.committed and not m.false_commit
     assert m.delay == pytest.approx(0.25 + 0.15 * 0.02)
@@ -208,10 +211,10 @@ async def test_confident_detector_commits_at_the_floor() -> None:
 
 
 async def test_unconfident_detector_waits_up_to_the_ceiling() -> None:
-    [delay], rec = await eot_delays(
+    [delay], rec, lag = await eot_delays(
         ScriptedDetector(0.0), endpointing="dynamic", max_endpointing_delay=1.0
     )
-    assert delay == pytest.approx(1.0, abs=0.15)
+    assert_delay(delay, 1.0, 0.15, lag)
     assert endpointing(rec)[0].delay == pytest.approx(1.0)
 
 
@@ -264,10 +267,11 @@ async def test_dictation_mode_at_runtime() -> None:
     # a 0.9 s pause while reading out a number: fixed endpointing would wait 2.5 s too,
     # but a confident detector would cut it at 0.4 s; dictation never commits before 1 s
     detector.script = [0.9, 0.3]
-    await pause_then_continue(transport, 0.8)
-    await wait_for(lambda: bool(rec.turn_metrics()), 6)
+    async with LoopLag() as lag:
+        await pause_then_continue(transport, 0.8)
+        await wait_for(lambda: bool(rec.turn_metrics()), 6)
     [turn] = rec.turn_metrics()
-    assert turn.end_of_turn_delay == pytest.approx(1.2, abs=0.2)  # dictation_max_delay
+    assert_delay(turn.end_of_turn_delay, 1.2, 0.2, lag)  # dictation_max_delay
     await wait_for(lambda: len(endpointing(rec)) == 2, 3)  # after false_commit_window
     hold, commit = endpointing(rec)
     assert hold.policy == "dictation" and not hold.committed and hold.delay == 1.0
@@ -282,8 +286,10 @@ async def test_dictation_mode_at_runtime() -> None:
 
 
 async def test_dictation_option_per_session() -> None:
-    [delay], rec = await eot_delays(ScriptedDetector(0.99), dictation=True, dictation_min_delay=0.7)
-    assert delay == pytest.approx(0.7, abs=0.15)
+    [delay], rec, lag = await eot_delays(
+        ScriptedDetector(0.99), dictation=True, dictation_min_delay=0.7
+    )
+    assert_delay(delay, 0.7, 0.15, lag)
     assert endpointing(rec)[0].policy == "dictation"
 
 
@@ -307,15 +313,16 @@ async def test_preemptive_generation_with_dynamic_endpointing() -> None:
     )
     rec = Recorder(session)
     transport = LoopbackTransport()
-    await session.start(Agent("x"), transport)
-    await speak(transport, 0.5, 0.4)
-    await wait_for(lambda: bool(rec.turn_metrics()), 5)
+    async with LoopLag() as lag:
+        await session.start(Agent("x"), transport)
+        await speak(transport, 0.5, 0.4)
+        await wait_for(lambda: bool(rec.turn_metrics()), 5)
     await session.aclose()
     [spec] = [m for m in rec.of("metrics") if isinstance(m, SpeculationMetrics)]
     assert spec.hit
     assert len(llm.requests) == 1
     turn: TurnMetrics = rec.turn_metrics()[0]
-    assert turn.end_of_turn_delay == pytest.approx(0.37, abs=0.1)
+    assert_delay(turn.end_of_turn_delay, 0.37, 0.1, lag)
 
 
 async def test_confident_false_commit_raises_the_confident_delay() -> None:

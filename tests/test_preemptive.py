@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from tests.test_session import Recorder, speak, wait_for
+from tests.timing import LoopLag
 from voice_agent_next import (
     Agent,
     AgentSession,
@@ -110,7 +111,8 @@ def history(session: AgentSession) -> list[tuple[str, str]]:
 # ------------------------------------------------------------------------------ hits
 
 
-async def one_turn(**options: Any) -> tuple[TurnMetrics, Recorder]:
+async def one_turn(**options: Any) -> tuple[TurnMetrics, Recorder, float]:
+    """One turn; returns its metrics, the recorder and how late this run's loop was."""
     session = AgentSession(
         stt=MockSTT(transcripts=["book a table for two"], latency=0.05),
         llm=MockLLM(responses=lambda ctx: "Sure.", ttft=0.3),
@@ -120,30 +122,37 @@ async def one_turn(**options: Any) -> tuple[TurnMetrics, Recorder]:
     )
     rec = Recorder(session)
     transport = LoopbackTransport()
-    await session.start(Agent("x"), transport)
-    await speak(transport, 0.6, 0.6)
-    await wait_for(lambda: bool(rec.turn_metrics()), 5)
+    async with LoopLag() as lag:
+        await session.start(Agent("x"), transport)
+        await speak(transport, 0.6, 0.6)
+        await wait_for(lambda: bool(rec.turn_metrics()), 5)
     await session.aclose()
-    return rec.turn_metrics()[0], rec
+    return rec.turn_metrics()[0], rec, lag.max
 
 
 async def test_hit_hides_the_llm_time_to_first_token() -> None:
-    # speech end -> VAD 0.25 s + STT 0.05 s -> transcript; the commit comes at 0.6 s
-    off, _ = await one_turn()
-    on, rec = await one_turn(preemptive_generation=True)
-    on_tts, rec_tts = await one_turn(preemptive_generation=True, preemptive_tts=True)
-    assert off.voice_to_voice is not None and on.voice_to_voice is not None
-    assert on_tts.voice_to_voice is not None and on.end_of_turn_delay is not None
-    # the turn ends exactly when it did before...
-    assert on.end_of_turn_delay == pytest.approx(off.end_of_turn_delay or 0, abs=0.1)
-    # ...but the LLM already streamed its reply: the 0.3 s TTFT is gone from the latency
-    # (net of the two runs' measured endpointing, whose timers jitter independently: a
-    # Windows tick each)
-    endpointing = off.end_of_turn_delay - on.end_of_turn_delay
-    assert off.voice_to_voice - on.voice_to_voice - endpointing == pytest.approx(0.3, abs=0.1)
+    # speech end -> VAD 0.25 s + STT 0.05 s -> transcript; the commit comes at 0.6 s.
+    # Each run is checked against the designed delays; upper bounds allow for how late
+    # that run's event loop was (a loaded runner), lower bounds are exact (the mocks'
+    # delays never run short).
+    off, _, lag_off = await one_turn()
+    on, rec, lag_on = await one_turn(preemptive_generation=True)
+    on_tts, rec_tts, lag_tts = await one_turn(preemptive_generation=True, preemptive_tts=True)
+    for m, lag in ((off, lag_off), (on, lag_on), (on_tts, lag_tts)):
+        # the turn ends when it did without speculation: the endpointing delay after the
+        # end of speech
+        assert m.end_of_turn_delay is not None and m.voice_to_voice is not None
+        assert 0.55 <= m.end_of_turn_delay <= 0.7 + lag
+        assert m.response_ttfb is not None
+    assert off.response_ttfb is not None and on.response_ttfb is not None
+    assert on_tts.response_ttfb is not None
+    # without speculation the LLM's 0.3 s TTFT and then the TTS's 0.1 s TTFB follow it...
+    assert off.response_ttfb >= 0.4
+    # ...with it the LLM already streamed its reply: the TTFT is gone from the latency
+    assert 0.1 <= on.response_ttfb < 0.4
+    assert on.response_ttfb <= 0.15 + lag_on
     # pre-synthesis also hides the TTS time to first audio (0.1 s): audio is ready at once
-    assert on_tts.voice_to_voice < on.voice_to_voice - 0.04
-    assert on_tts.response_ttfb is not None and on_tts.response_ttfb < 0.08
+    assert on_tts.response_ttfb <= 0.02 + lag_tts
     for r in (rec, rec_tts):
         [m] = speculations(r)
         assert m.hit and m.reason is None and m.response_id and m.lead > 0.2

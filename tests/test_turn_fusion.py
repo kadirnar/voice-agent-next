@@ -16,6 +16,7 @@ import pytest
 
 from tests.test_endpointing import endpointing
 from tests.test_session import Recorder, speak, wait_for
+from tests.timing import LoopLag, assert_delay
 from voice_agent_next import Agent, AgentSession, AudioFrame, CascadeOptions
 from voice_agent_next.chat import ChatContext
 from voice_agent_next.metrics import EndpointingMetrics, EOTMetrics
@@ -389,9 +390,10 @@ async def test_llm_turn_uses_logprobs_of_openai_compatible_llms() -> None:
 # ------------------------------------------------------------------- cascade
 
 
-async def fused_turn(words: str, text: FakeTextDetector) -> tuple[Any, EndpointingMetrics]:
+async def fused_turn(words: str, text: FakeTextDetector) -> tuple[Any, EndpointingMetrics, float]:
     """One user turn through a cascade whose fused detector hears "done" (0.95) and reads
-    ``words``; returns the turn's metrics and its endpointing decision."""
+    ``words``; returns the turn's metrics, its endpointing decision and how late this run's
+    event loop was."""
     fused = FusedTurnDetector(audio=FakeAudioDetector(0.95), text=text)
     session = AgentSession(
         stt=MockSTT(transcripts=[words], latency=0.01),
@@ -403,9 +405,10 @@ async def fused_turn(words: str, text: FakeTextDetector) -> tuple[Any, Endpointi
     )
     rec = Recorder(session)
     transport = LoopbackTransport()
-    await session.start(Agent("x"), transport)
-    await speak(transport, 0.5, 0.3)
-    await wait_for(lambda: bool(rec.turn_metrics()), 6)
+    async with LoopLag() as lag:
+        await session.start(Agent("x"), transport)
+        await speak(transport, 0.5, 0.3)
+        await wait_for(lambda: bool(rec.turn_metrics()), 6)
     await wait_for(lambda: bool(endpointing(rec)), 3)  # after false_commit_window
     await session.aclose()
     [turn] = rec.turn_metrics()
@@ -414,23 +417,23 @@ async def fused_turn(words: str, text: FakeTextDetector) -> tuple[Any, Endpointi
     assert text.read[-1][1] == words  # the text half read the final transcript
     assert m.audio_probability == pytest.approx(0.95)
     assert m.probability == pytest.approx(fused.fuse(m.audio_probability, m.text_probability))
-    return turn, m
+    return turn, m, lag.max
 
 
 async def test_cascade_waits_when_text_says_incomplete_and_audio_says_complete() -> None:
-    turn, m = await fused_turn("I would like to book a table", FakeTextDetector())
+    turn, m, lag = await fused_turn("I would like to book a table", FakeTextDetector())
     assert m.text_probability == pytest.approx(0.05)
     assert m.probability is not None and m.probability < 0.5
     assert m.delay == pytest.approx(1.2)  # the ceiling: the user is probably not done
-    assert turn.end_of_turn_delay == pytest.approx(1.2, abs=0.2)
+    assert_delay(turn.end_of_turn_delay, 1.2, 0.2, lag)
 
 
 async def test_cascade_commits_at_the_floor_when_both_say_complete() -> None:
-    turn, m = await fused_turn("That is all, thank you.", FakeTextDetector())
+    turn, m, lag = await fused_turn("That is all, thank you.", FakeTextDetector())
     assert m.text_probability == pytest.approx(0.8)
     assert m.probability is not None and m.probability > 0.5
     assert m.delay == pytest.approx(0.4)
-    assert turn.end_of_turn_delay == pytest.approx(0.4, abs=0.15)
+    assert_delay(turn.end_of_turn_delay, 0.4, 0.15, lag)
 
 
 async def test_cascade_uses_the_audio_verdict_when_the_text_is_late() -> None:

@@ -68,6 +68,16 @@ class TimelineTrack:
         self.truncate(pos)
         self.write(pos + n, tail)
 
+    def remove(self, pos: int, n: int) -> None:
+        """Drop the ``n`` samples at ``pos``: everything after moves ``n`` samples earlier
+        (the inverse of :meth:`insert_silence`)."""
+        pos = max(pos, self._start)
+        if n <= 0 or pos >= self._end:
+            return
+        tail = self.read_range(min(pos + n, self._end), self._end).copy()
+        self.truncate(pos)
+        self.write(pos, tail)
+
     def truncate(self, pos: int) -> None:
         """Drop everything at or after ``pos``."""
         pos = max(pos, self._start)

@@ -1,0 +1,80 @@
+"""Timing helpers for tests that assert on latencies measured in real time.
+
+A latency measured on a CI runner is the designed delay plus however late the event loop
+got around to it (a 15.6 ms timer tick on Windows, a stalled or overloaded macOS runner).
+:class:`LoopLag` measures that lateness *in the same run*, so an upper bound can allow for
+it instead of guessing a tolerance that a slow runner eventually exceeds.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from types import TracebackType
+
+from voice_agent_next.utils import now
+
+
+class LoopLag:
+    """Measures how late the running event loop wakes up while the block runs.
+
+    A probe task sleeps ``tick`` seconds over and over; :attr:`max` is the worst lateness
+    of those wake-ups, i.e. how much later than planned any timer of the loop could have
+    fired. Use it as the tolerance of an upper bound::
+
+        async with LoopLag() as lag:
+            ...  # run the scenario
+        assert measured <= designed + 0.05 + lag.max
+    """
+
+    def __init__(self, tick: float = 0.005) -> None:
+        self.tick = tick
+        self.samples: list[tuple[float, float]] = []  # (wake-up time, lateness)
+        self._task: asyncio.Task[None] | None = None
+
+    @property
+    def max(self) -> float:
+        """The worst lateness (s)."""
+        return self.max_since(float("-inf"))
+
+    def max_since(self, t: float) -> float:
+        """The worst lateness of the wake-ups after ``t`` (a :func:`now` time), e.g. to
+        leave out a stall the test caused on purpose."""
+        return max((late for at, late in self.samples if at - late - self.tick > t), default=0.0)
+
+    async def _probe(self) -> None:
+        while True:
+            t = now()
+            await asyncio.sleep(self.tick)
+            woke = now()
+            self.samples.append((woke, max(0.0, woke - t - self.tick)))
+
+    async def __aenter__(self) -> LoopLag:
+        self._task = asyncio.create_task(self._probe())
+        await asyncio.sleep(0)
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        assert self._task is not None
+        self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+
+
+def assert_delay(
+    measured: float | None, designed: float, tol: float, lag: LoopLag | float = 0.0
+) -> None:
+    """``measured`` is the ``designed`` delay within ``tol``, and above it also within how
+    late this run's event loop was (``lag``): timers never fire much early, but a stalled
+    runner fires them late."""
+    late = lag.max if isinstance(lag, LoopLag) else lag
+    assert measured is not None
+    lo, hi = designed - tol, designed + tol + late
+    assert lo <= measured <= hi, (
+        f"{measured:.3f} s is not {designed:g} ± {tol:g} s (+ {late:.3f} s of loop lag)"
+    )
