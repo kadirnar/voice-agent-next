@@ -697,6 +697,10 @@ class CascadeConnection(EngineConnection):
                 if final:
                     text_task = asyncio.ensure_future(fused.predict_text(self._user_context(final)))
             pa = await audio_task
+            if text_task is not None and not text_task.done():
+                # the audio verdict alone may already justify a (held) speculative reply:
+                # start it now rather than after the text half
+                self._speculate(pa)
             pt = await text_task if text_task is not None else None
         finally:
             for task in (audio_task, text_task):
