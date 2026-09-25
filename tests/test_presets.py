@@ -105,7 +105,14 @@ def test_required_presets_exist() -> None:
 def test_preset_metadata() -> None:
     local = get_preset("local-cpu")
     assert local.config["stt"] == "sherpa-onnx/zipformer-en-kroko"  # measured best on CPU
-    assert set(local.extras) == {"sherpa-onnx", "openai", "kokoro", "silero", "smart-turn"}
+    assert set(local.extras) == {
+        "sherpa-onnx",
+        "openai",
+        "kokoro",
+        "silero",
+        "smart-turn",
+        "text-turn",
+    }
     assert local.env_vars == ()
     fast = get_preset("cloud-fast")
     assert ("DEEPGRAM_API_KEY",) in fast.env_vars and ("CARTESIA_API_KEY",) in fast.env_vars
@@ -174,7 +181,8 @@ def test_extends_in_yaml_and_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert cfg.extends == "local-cpu"
     assert cfg.llm == "ollama/qwen3.5:4b"
     assert cfg.stt == {"provider": "sherpa-onnx/zipformer-en-kroko", "language": "en"}
-    assert cfg.tts == "kokoro/v1.0-fp16" and cfg.turn_detector == "smart_turn"
+    assert cfg.tts == "kokoro/v1.0-fp16"
+    assert cfg.turn_detector == {"provider": "fused", "audio": "smart_turn", "text": "lm_turn"}
     assert cfg.agent.instructions == "You are a pirate."
 
     toml_file = tmp_path / "agent.toml"
@@ -226,13 +234,61 @@ def test_ollama_server_and_model_checks() -> None:
     assert any("ollama serve" in fix for fix in down.fixes())
     assert "ollama pull LiquidAI/lfm2.5-1.2b-instruct" in down.fixes()
 
-    no_model = check_preset("local-gpu", env=fake_env(ollama=["qwen3.5:4b"], gpus=["RTX"]))
-    assert [p.message for p in no_model.problems] == ["Ollama has no model qwen3.5:9b"]
-    assert no_model.fixes() == ["ollama pull qwen3.5:9b"]
+    no_model = check_preset("local-gpu", env=fake_env(ollama=["qwen3.5:9b"], gpus=["RTX"]))
+    assert [p.message for p in no_model.problems] == ["Ollama has no model qwen3.5:4b"]
+    assert no_model.fixes() == ["ollama pull qwen3.5:4b"]
 
     # ":latest" is implied, names are case-insensitive
     ok = fake_env(ollama=["liquidai/LFM2.5-1.2b-instruct:latest"])
     assert check_preset("local-cpu", env=ok).ready
+
+
+def test_fused_turn_detector_halves_are_checked() -> None:
+    # local-cpu fuses Smart Turn with the lm_turn text model (#155): its extra is checked
+    assert PRESETS["local-cpu"].config["turn_detector"] == presets.FUSED_TURN_DETECTOR
+    assert ("turn_detector", "lm_turn") in PRESETS["local-cpu"].components()
+    result = check_preset("local-cpu", env=fake_env(missing=["tokenizers"]), transport=None)
+    assert not result.ready
+    assert result.extras == ("text-turn",)
+    assert result.fixes() == ["pip install 'voice-agent-next[text-turn]'"]
+    assert "turn_detector: lm_turn needs the 'text-turn' extra" in result.explain()
+
+    # a bare `fused` spec checks its default halves; custom halves are checked instead
+    bare = check_config({"turn_detector": "fused"}, env=fake_env(missing=["tokenizers"]))
+    assert bare.extras == ("text-turn",)
+    custom = {"provider": "fused", "audio": "smart_turn", "text": "mock"}
+    assert check_config({"turn_detector": custom}, env=fake_env(missing=["tokenizers"])).ready
+    unknown = check_config({"turn_detector": {"provider": "fused", "text": "nope"}}, env=fake_env())
+    assert not unknown.ready and unknown.problems[0].component == "turn_detector"
+
+
+def test_local_llm_defaults() -> None:
+    # #155: LFM2.5-1.2B stays on the CPU preset (latency), Qwen3.5-4B without its thinking
+    # phase on the GPU (T5/T6 quality); the Ollama failover of `apple` does not think either
+    assert PRESETS["local-cpu"].config["llm"] == "ollama/LiquidAI/lfm2.5-1.2b-instruct"
+    gpu_llm = {"provider": "ollama/qwen3.5:4b", "reasoning_effort": "none"}
+    assert PRESETS["local-gpu"].config["llm"] == gpu_llm
+    assert PRESETS["apple"].config["llm"][1] == gpu_llm
+    assert PRESETS["local-gpu"].config["turn_detector"] == "smart_turn"
+    ready = check_preset("local-gpu", env=fake_env(gpus=["RTX"]))
+    assert ready.ready, ready.explain()
+    assert ready.config["llm"] == gpu_llm
+    assert not any("reasons before" in note for note in ready.notes)
+    cfg = load_preset("local-gpu", env=fake_env(gpus=["RTX"]))
+    assert cfg.llm == gpu_llm
+
+
+def test_thinking_models_get_a_note() -> None:
+    env = fake_env(gpus=["RTX"])
+    thinking = check_preset("local-gpu", overrides={"llm": "ollama/qwen3.5:9b"}, env=env)
+    assert thinking.ready  # a note, not a problem
+    assert any(
+        "qwen3.5:9b reasons before it answers" in n and "reasoning_effort: none" in n
+        for n in thinking.notes
+    )
+    quiet = {"provider": "ollama/qwen3.5:9b", "reasoning_effort": "none"}
+    assert not any("reasons" in n for n in check_config({"llm": quiet}, env=fake_env()).notes)
+    assert not any("reasons" in n for n in check_preset("local-cpu", env=fake_env()).notes)
 
 
 def test_ollama_url_follows_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -391,6 +447,7 @@ def test_cli_presets_table_and_json(cli: Callable[..., Any]) -> None:
         "kokoro",
         "silero",
         "smart-turn",
+        "text-turn",
     ]
 
 

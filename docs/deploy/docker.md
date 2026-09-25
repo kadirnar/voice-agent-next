@@ -28,7 +28,7 @@ The first start downloads about 1 GB into two named volumes, which takes a few m
 
 * `ollama-pull` pulls the LLM, `LiquidAI/lfm2.5-1.2b-instruct` (~0.7 GB).
 * `models` runs `van models download --for /config/agent.yaml`, which downloads the Kroko
-  Zipformer STT, Kokoro, Silero VAD and Smart Turn (~0.25 GB).
+  Zipformer STT, Kokoro, Silero VAD, Smart Turn and the `lm_turn` text model (~0.4 GB).
 
 The agents start once both have finished. They run with `VAN_OFFLINE=1`, so no download
 can ever happen during a call. Later starts use the volumes and work without network.
@@ -61,12 +61,14 @@ you only write what differs:
 
 ```yaml
 extends: local-cpu
-llm: ollama/${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}
+llm: {provider: "ollama/${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}", reasoning_effort: none}
 agent:
   instructions: You are a pirate. Answer in one sentence.
 ```
 
-To use another Ollama model, set `OLLAMA_MODEL`. Both the pull and the config read it:
+To use another Ollama model, set `OLLAMA_MODEL`. Both the pull and the config read it.
+`reasoning_effort: none` keeps models that think by default (Qwen3.5) from reasoning
+before every answer:
 
 ```bash
 OLLAMA_MODEL=qwen3.5:4b docker compose -f docker/compose.yaml up
@@ -98,10 +100,10 @@ on the host. The override changes four things:
 * The agents run the CUDA image.
 * The config is `docker/config/local-gpu.yaml`, which extends the
   [`local-gpu` preset](../presets.md): faster-whisper `large-v3-turbo` on CUDA and Kokoro.
-* Ollama runs `qwen3.5:9b` on the GPU.
+* Ollama runs `qwen3.5:4b` (thinking off) on the GPU.
 * Ollama and the agents reserve the GPUs (`deploy.resources.reservations.devices`).
 
-The first start downloads about 6.6 GB for the LLM and 1.8 GB of models.
+The first start downloads about 3.4 GB for the LLM and 1.8 GB of models.
 
 ## The images
 
@@ -109,8 +111,8 @@ The first start downloads about 6.6 GB for the LLM and 1.8 GB of models.
 | --- | --- | --- |
 | Tags | `latest`, `main`, `X.Y.Z`, `X.Y`, `sha-…` | the same with `-cuda` (`latest-cuda`, ...) |
 | Platforms | `linux/amd64`, `linux/arm64` | `linux/amd64` |
-| Size (uncompressed, amd64) | 515 MB; 789 MB with `BAKE_MODELS=preset:local-cpu` | 3.9 GB (cuBLAS, cuDNN, CUDA runtime wheels) |
-| Extras | `sherpa-onnx openai kokoro silero smart-turn webrtc resample`: the `local-cpu` preset and WebRTC | `faster-whisper openai kokoro silero smart-turn webrtc resample cuda`: the `local-gpu` preset, cuBLAS 12 |
+| Size (uncompressed, amd64) | 515 MB; 789 MB with `BAKE_MODELS=preset:local-cpu` (measured before `text-turn` was added: +32 MB of packages, +137 MB baked model) | 3.9 GB (cuBLAS, cuDNN, CUDA runtime wheels) |
+| Extras | `sherpa-onnx openai kokoro silero smart-turn text-turn webrtc resample`: the `local-cpu` preset and WebRTC | `faster-whisper openai kokoro silero smart-turn webrtc resample cuda`: the `local-gpu` preset, cuBLAS 12 |
 | ONNX Runtime | `onnxruntime` (CPU) | `onnxruntime-gpu[cuda,cudnn]` 1.26 (CUDA 12, cuDNN 9) |
 
 Both images are built the same way:
@@ -226,7 +228,7 @@ docker build -f docker/Dockerfile --target cuda -t voice-agent-next:cuda \
 
 | Build argument | Default | What |
 | --- | --- | --- |
-| `EXTRAS` | `sherpa-onnx openai kokoro silero smart-turn webrtc resample` | voice-agent-next extras to install (see `pyproject.toml`), for example add `anthropic google` for cloud LLMs |
+| `EXTRAS` | `sherpa-onnx openai kokoro silero smart-turn text-turn webrtc resample` | voice-agent-next extras to install (see `pyproject.toml`), for example add `anthropic google` for cloud LLMs |
 | `ONNXRUNTIME_GPU` | empty | A pip requirement that replaces `onnxruntime` with a GPU build |
 | `BAKE_MODELS` | empty | `van models download --for` targets to bake in |
 | `PYTHON_VERSION` | `3.12` | Kokoro needs Python < 3.14 |

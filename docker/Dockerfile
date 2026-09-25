@@ -27,8 +27,9 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_PYTHON_DOWNLOADS=never \
     UV_PROJECT_ENVIRONMENT=/opt/venv
 # voice-agent-next extras (space separated). Default: the `local-cpu` preset (sherpa-onnx
-# STT, Ollama through `openai`, Kokoro, Silero, Smart Turn) plus the WebRTC transport.
-ARG EXTRAS="sherpa-onnx openai kokoro silero smart-turn webrtc resample"
+# STT, Ollama through `openai`, Kokoro, Silero, Smart Turn + the lm_turn text model) plus
+# the WebRTC transport.
+ARG EXTRAS="sherpa-onnx openai kokoro silero smart-turn text-turn webrtc resample"
 # A pip requirement that replaces `onnxruntime` with a GPU build (CUDA image), or empty.
 ARG ONNXRUNTIME_GPU=""
 WORKDIR /src

@@ -3,7 +3,7 @@
 #   docker compose -f docker/compose.yaml up --build     # then open http://localhost:8080
 #
 # First start: Ollama pulls the LLM (~0.7 GB) and `models` downloads the STT/TTS/VAD/turn
-# models (~0.25 GB) into named volumes; later starts are offline. On an NVIDIA GPU add
+# models (~0.4 GB) into named volumes; later starts are offline. On an NVIDIA GPU add
 # `-f docker/compose.gpu.yaml`. Details: docs/deploy/docker.md.
 name: voice-agent-next
 

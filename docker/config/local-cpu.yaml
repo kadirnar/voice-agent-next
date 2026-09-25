@@ -4,7 +4,8 @@
 extends: local-cpu
 
 # The model the `ollama-pull` service fetches (OLLAMA_MODEL in the compose file).
-llm: ollama/${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}
+# reasoning_effort none: models that think by default (qwen3.5) answer at once.
+llm: {provider: "ollama/${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}", reasoning_effort: none}
 
 agent:
   instructions: >-
