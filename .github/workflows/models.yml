@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       mlx-large:
-        description: "Only the MLX job, with the opt-in larger models too (Parakeet 110M, Kokoro, mlx-lm with Qwen3.5 0.8B; ~1.5 GB more)"
+        description: "Only the MLX job, with the opt-in larger models too (Parakeet 110M, Kokoro, mlx-lm with Qwen3 1.7B; ~1.8 GB more)"
         type: boolean
         default: false
   pull_request:
@@ -71,7 +71,7 @@ jobs:
       HF_HUB_DISABLE_PROGRESS_BARS: "1"
       VAN_TEST_MLX_PARAKEET: ${{ inputs.mlx-large && 'parakeet-tdt_ctc-110m' || '' }}
       VAN_TEST_MLX_KOKORO: ${{ inputs.mlx-large && '1' || '' }}
-      VAN_TEST_MLX_LM_MODEL: ${{ inputs.mlx-large && 'mlx-community/Qwen3.5-0.8B-4bit' || '' }}
+      VAN_TEST_MLX_LM_MODEL: ${{ inputs.mlx-large && 'mlx-community/Qwen3-1.7B-4bit' || '' }}
     steps:
       - uses: actions/checkout@v4
       - name: model cache locations

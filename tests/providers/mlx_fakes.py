@@ -86,6 +86,7 @@ class MLXFakes:
     holder: Any = None
     # mlx-audio
     tts_loads: list[str] = field(default_factory=list)
+    tts_load_kwargs: list[dict[str, Any]] = field(default_factory=list)
     tts_calls: list[dict[str, Any]] = field(default_factory=list)
     tts_sample_rate: int = 24_000
     tts_chunks: int = 3
@@ -245,16 +246,24 @@ class MLXFakes:
                     fakes.tts_closed.append(True)
                     raise
 
-        def load(path: str, **kwargs: Any) -> TTSModel:
+        def load(path: Any, **kwargs: Any) -> TTSModel:
             fakes.mark()
-            fakes.tts_loads.append(path)
+            fakes.tts_loads.append(str(path))
+            fakes.tts_load_kwargs.append(kwargs)
             return TTSModel()
+
+        def get_model_name_parts(path: Any) -> list[str]:
+            name = path.lower().split("/")[-1] if isinstance(path, str) else path.name.lower()
+            return name.split("-")
 
         pkg = ModuleType("mlx_audio")
         tts = ModuleType("mlx_audio.tts")
         tts.load = load  # type: ignore[attr-defined]
+        utils = ModuleType("mlx_audio.utils")
+        utils.get_model_name_parts = get_model_name_parts  # type: ignore[attr-defined]
         pkg.tts = tts  # type: ignore[attr-defined]
-        return {"mlx_audio": pkg, "mlx_audio.tts": tts}
+        pkg.utils = utils  # type: ignore[attr-defined]
+        return {"mlx_audio": pkg, "mlx_audio.tts": tts, "mlx_audio.utils": utils}
 
 
 @pytest.fixture

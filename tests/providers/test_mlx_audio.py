@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -66,7 +67,9 @@ async def test_kokoro_synthesizes(mlx_fakes: MLXFakes) -> None:
     tts.on("metrics", metrics.append)
     await tts.warmup()
     assert mlx_fakes.snapshots[0][0] == "mlx-community/Kokoro-82M-bf16"
-    assert mlx_fakes.tts_loads == ["/hf/mlx-community/Kokoro-82M-bf16"]
+    assert mlx_fakes.tts_loads == [str(Path("/hf/mlx-community/Kokoro-82M-bf16"))]
+    # named after the repository (the architecture for configs without model_type)
+    assert mlx_fakes.tts_load_kwargs == [{"model_name_parts": ["kokoro", "82m", "bf16"]}]
     assert mlx_fakes.tts_calls[0]["text"] == "Hello."  # warm-up
 
     items = [item async for item in tts.synthesize("Good morning! How are you?")]
@@ -90,7 +93,7 @@ async def test_pocket_tts_defaults(mlx_fakes: MLXFakes) -> None:
     assert "lang_code" not in call  # Kokoro only
     assert call["streaming_interval"] == 0.25 and call["temperature"] == 0.5
     assert call["voice"] == "alba"
-    assert mlx_fakes.tts_loads == ["/hf/mlx-community/pocket-tts"]
+    assert mlx_fakes.tts_loads == [str(Path("/hf/mlx-community/pocket-tts"))]
 
 
 async def test_unknown_model_is_resampled_to_the_declared_rate(mlx_fakes: MLXFakes) -> None:
@@ -158,3 +161,20 @@ async def test_kokoro_spacy_model_without_pip(mlx_fakes: MLXFakes, g2p: dict[str
     g2p["pip"] = True
     await create("tts", "mlx_audio/kokoro").warmup()
     assert len(mlx_fakes.tts_loads) == 2
+
+
+@pytest.mark.usefixtures("g2p")
+async def test_kokoro_uses_the_snapshot_voices(
+    mlx_fakes: MLXFakes, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    voices = tmp_path / "voices"
+    voices.mkdir()
+    (voices / "af_heart.safetensors").write_bytes(b"")
+    hub = __import__("sys").modules["huggingface_hub"]
+    monkeypatch.setattr(hub, "snapshot_download", lambda repo, **kw: str(tmp_path))
+    tts = create("tts", "mlx_audio/kokoro")
+    await tts.synthesize("Hi.").collect()
+    call = mlx_fakes.tts_calls[-1]
+    assert call["voice"] == str(voices / "af_heart.safetensors") and call["lang_code"] == "a"
+    await tts.synthesize("Hi.", voice="bf_emma").collect()  # not in the snapshot: by name
+    assert mlx_fakes.tts_calls[-1]["voice"] == "bf_emma"

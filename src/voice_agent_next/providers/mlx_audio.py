@@ -25,9 +25,11 @@ speech recognizer is not blocked for a whole sentence (see :mod:`._mlx`). See
 
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Generator, Iterator, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -188,6 +190,7 @@ class MLXAudioTTS(TTS):
         self.model_sample_rate: int | None = None
         """The loaded model's own output rate (``None`` until loaded)."""
         self._model: Any = None
+        self._voice_dir: Path | None = None
         self._load_lock = threading.Lock()
 
     # ------------------------------------------------------------------ lifecycle
@@ -224,10 +227,18 @@ class MLXAudioTTS(TTS):
             local_files_only=self.local_files_only,
             provider=_PROVIDER,
         )
+        utils = require("mlx_audio.utils", extra=_EXTRA, package="mlx-audio")
+        local = os.path.isdir(self.repo)
         try:
-            model = tts_mod.load(path)
+            # mlx-audio falls back to the model's name for the architecture when config.json
+            # has no model_type (Kokoro): name it after the repository, not the snapshot dir
+            parts = utils.get_model_name_parts(Path(self.repo) if local else self.repo)
+            model = tts_mod.load(Path(path), model_name_parts=parts)
         except Exception as exc:
             raise _mlx.map_error(exc, _PROVIDER, f"loading model {self.model!r}") from exc
+        if not local and getattr(model, "repo_id", False) is None:
+            model.repo_id = self.repo  # Kokoro fetches voices from here (else another repo)
+        self._voice_dir = Path(path) / "voices"
         rate = getattr(model, "sample_rate", None)
         self.model_sample_rate = int(rate) if rate else self.sample_rate
         logger.info(
@@ -280,6 +291,11 @@ class MLXAudioTTS(TTS):
         lang = self._language(voice)
         if lang is not None:
             options["lang_code"] = lang
+        if self.is_kokoro and voice and self._voice_dir is not None:
+            # a voice of the downloaded snapshot: no Hub lookup (works with VAN_OFFLINE)
+            local_voice = self._voice_dir / f"{voice}.safetensors"
+            if local_voice.is_file():
+                options["voice"] = str(local_voice)
         options.update(self.generate_options)
         try:
             for result in model.generate(text=text, **options):
