@@ -132,7 +132,8 @@ async def test_whisper_tiny_interims_and_guard_behind_a_vad() -> None:
                 finals.append(ev.text)
 
     reader = asyncio.create_task(consume())
-    audio = AudioFrame.concat([clip, AudioFrame.silence(1.0, 16_000)])
+    tail = AudioFrame.silence(1.0, clip.sample_rate, clip.channels)
+    audio = AudioFrame.concat([clip, tail])
     start = now()
     for i, frame in enumerate(_chunks(audio)):
         stream.push_audio(frame)
