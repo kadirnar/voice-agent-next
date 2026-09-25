@@ -121,6 +121,10 @@ On CPU the omni model is slower than the best CPU cascade (≈ 0.9 s with Pocket
 - **Backchannels:** the small streaming STTs can't transcribe "uh-huh" ("but high", "m"). #122 treats a short utterance without an interruption word as a backchannel.
 - **Premature replies:** Smart Turn scores the first sentence of a two-sentence question as complete (0.57–0.99). A fixed 1.0 s minimum delay removes the premature replies at about +450 ms v2v. The real fix is a semantic end-of-turn detector (#124).
 - **eot-bench (English):** Smart Turn v3.2 has 35.2 % false cut-offs @ 300 ms vs 55.6 % for VAD only, matching the published numbers.
+- **Semantic + audio fusion (#124):** `fused` turn detection (Smart Turn + a SmolLM2-135M text model, 137 MB int8) at the presets' 0.5/1.5 s endpointing:
+  - eot-bench false cut-offs: en 10.8 → 8.8 % (mean latency −53 ms), de 14.4 → 6.6 %, es 19.4 → 8.9 %; ROC-AUC (en) 0.83 → 0.91.
+  - T4 premature replies: 75 % → ≈ 50 %, with v2v within +100 ms. Complete-sounding questions ("Where is my order?") followed by details stay premature. They need a detector that predicts "more is coming", or a ~1 s minimum delay.
+  - Opt-in (`turn_detector="fused"`), not yet the preset default.
 
 ## T2 · ASR on CPU (2026-09-24, `van bench asr`)
 
