@@ -127,7 +127,7 @@ With `include_timestamps=True` or `include_language_detection=True`, Scribe send
 | `filter_background_audio` | `None` | realtime background filtering |
 | `keepalive_interval` | `5.0` | after this many seconds without audio, one chunk of silence is sent (Scribe closes sessions without audio activity); `None` disables it |
 | `enable_logging` | `True` | `False` = zero retention mode (enterprise) |
-| `batch_model`, `tag_audio_events`, `request_timeout` | `scribe_v2`, `False`, `60.0` | `transcribe()` |
+| `batch_model`, `tag_audio_events`, `timeout` (formerly `request_timeout`) | `scribe_v2`, `False`, `60.0` | `transcribe()` |
 | `connect_timeout`, `close_timeout` | `10.0`, `5.0` | seconds |
 
 ### Batch: `transcribe()`

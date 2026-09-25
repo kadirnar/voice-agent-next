@@ -1204,6 +1204,24 @@ async def test_tts_normalization_language_follows_the_model_and_voice(
     assert kokoro.text_language("af_heart") == "en"
     assert kokoro.text_language("ef_dora") == "es"
     assert kokoro.text_language("26") == "en"  # bm_george
-    assert SherpaOnnxTTS(model="kokoro-multi-lang-v1_0-int8", language="fr").text_language(None) == "fr"
+    assert (
+        SherpaOnnxTTS(model="kokoro-multi-lang-v1_0-int8", language="fr").text_language(None)
+        == "fr"
+    )
     assert SherpaOnnxTTS(normalize=False).normalizer_for() is None
     await piper.aclose()
+
+
+async def test_device_and_language_options(backend: FakeBackend) -> None:
+    stt = SherpaOnnxSTT(device="cuda")
+    assert (stt.device, stt.execution_provider) == ("cuda", "cuda")
+    await stt.warmup()
+    assert backend.online.kwargs["provider"] == "cuda"
+    assert SherpaOnnxSTT(device="auto").execution_provider == "cpu"
+    with pytest.warns(DeprecationWarning, match=r"SherpaOnnxSTT\(execution_provider=\.\.\.\)"):
+        assert SherpaOnnxSTT(execution_provider="coreml").device == "coreml"
+    with pytest.warns(DeprecationWarning, match=r"SherpaOnnxTTS\(lang=\.\.\.\)"):
+        tts = SherpaOnnxTTS(model="kokoro-multi-lang-v1_0-int8", lang="fr")
+    assert tts.language == tts.lang == "fr" and tts.text_language(None) == "fr"
+    with pytest.warns(DeprecationWarning, match=r"SherpaOnnxTTS\(execution_provider=\.\.\.\)"):
+        assert SherpaOnnxTTS(execution_provider="cuda").execution_provider == "cuda"

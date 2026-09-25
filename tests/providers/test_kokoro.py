@@ -628,3 +628,20 @@ def test_normalization_language_follows_the_voice(backend: FakeBackend) -> None:
     assert tts.text_language("ef_dora") == "es"
     assert tts.normalizer_for("bf_emma") is not None
     assert KokoroTTS(normalize=False).normalizer_for() is None
+
+
+async def test_deprecated_lang_and_providers_options(backend: FakeBackend) -> None:
+    with pytest.warns(DeprecationWarning, match=r"KokoroTTS\(lang=\.\.\.\) is deprecated"):
+        tts = KokoroTTS(voice="ff_siwis", lang="fr-fr")
+    assert tts.language == tts.lang == "fr-fr"
+    with pytest.warns(DeprecationWarning, match=r"KokoroTTS\(providers=\.\.\.\) is deprecated"):
+        old = KokoroTTS(providers="CPUExecutionProvider")
+    await old.warmup()
+    assert backend.sessions[-1].providers == [CPU]
+    await KokoroTTS(device="cpu").warmup()
+    assert backend.sessions[-1].providers == [CPU]
+    with (
+        pytest.raises(ConfigurationError, match="not both"),
+        pytest.warns(DeprecationWarning, match="use language"),
+    ):
+        KokoroTTS(language="en-us", lang="fr-fr")

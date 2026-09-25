@@ -40,7 +40,7 @@ Silicon for MLX. The model sits behind the server, so the `model` in the spec
 | Linux / NVIDIA 24 GB+, PyTorch bf16 | `python -m moshi.server --hf-repo kyutai/moshiko-pytorch-bf16` | about 24 GB |
 | Linux / NVIDIA, Rust (candle) q8 | in `kyutai-labs/moshi/rust`: `cargo run --features cuda --bin moshi-backend -r -- --config moshi-backend/config-q8.json standalone` (needs `nvcc`), then use `url="wss://localhost:8998"` (self-signed certificate) | about 9 GB |
 | macOS / Apple Silicon | `pip install moshi_mlx` then `python -m moshi_mlx.local_web -q 4` (`-q 8`, `--hf-repo kyutai/moshika-mlx-q4`) | 16 GB unified memory for q4 |
-| Windows | Kyutai does not support Windows servers. Run the server under WSL2 or on another machine and point `url` at it | |
+| Windows | Kyutai does not support Windows servers. Run the server under WSL2 or on another machine and point `base_url` at it | |
 
 Pick Moshika (female voice) or Moshiko (male voice) with `--hf-repo`. `moshi.server`
 serves **one conversation at a time**. A second client gets no handshake until the first
@@ -184,7 +184,7 @@ the server trails), `server_metadata`, `server_version` and `connections`.
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `url` | `ws://localhost:8998` | server origin (`http(s)://` also works). `/api/chat` is appended unless the URL has a path |
+| `base_url` | `ws://localhost:8998` | server origin (`http(s)://` also works). `/api/chat` is appended unless the URL has a path (`url` is a deprecated alias) |
 | `ssl_verify` | auto | verify `wss://` certificates. Off for `localhost` (self-signed), on elsewhere |
 | `text_temperature`, `text_topk`, `audio_temperature`, `audio_topk`, `pad_mult`, `repetition_penalty`, `repetition_penalty_context`, `seed` | server default | sampling query parameters (Rust server) |
 | `query` | `{}` | extra query parameters |
@@ -199,7 +199,7 @@ the server trails), `server_metadata`, `server_version` and `connections`.
 | `connect_timeout` | 30 | WebSocket + handshake timeout |
 | `reconnect` / `max_reconnect_attempts` | `True` / 5 | reconnect policy |
 
-`PersonaPlexEngine` adds `voice=` and `text_prompt=`, and its `url` defaults to
+`PersonaPlexEngine` adds `voice=` and `text_prompt=`, and its `base_url` defaults to
 `wss://localhost:8998`.
 
 ## Latency (measured)

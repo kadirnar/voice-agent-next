@@ -43,7 +43,7 @@ A yellow row means a faster backend is one install away, and the row gives the c
 | Chatterbox, Qwen3-TTS | PyTorch | CUDA > MPS > CPU | Autoregressive models of 110M–1.7B parameters: real time needs a GPU ([chatterbox](providers/chatterbox.md), [qwen-tts](providers/qwen-tts.md)) |
 
 Explicit choices are never second-guessed: `device="cpu"` / `device="cuda"` for
-faster-whisper and `providers=[...]` for the ONNX models are used as given. With an explicit
+faster-whisper and the ONNX models are used as given. With an explicit
 `device="cuda"`, a GPU failure is a `ProviderError`, not a fallback.
 
 ### Fallbacks

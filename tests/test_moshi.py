@@ -159,7 +159,9 @@ def test_endpoint_urls_and_query() -> None:
     assert MoshiEngine().endpoint(opts) == "ws://localhost:8998/api/chat"
     assert MoshiEngine(base_url="https://box:9000").endpoint(opts) == "wss://box:9000/api/chat"
     assert MoshiEngine(base_url="127.0.0.1:8998").endpoint(opts) == "ws://127.0.0.1:8998/api/chat"
-    url = MoshiEngine(base_url="ws://h/custom/chat?x=1", text_temperature=0.6, seed=7).endpoint(opts)
+    url = MoshiEngine(base_url="ws://h/custom/chat?x=1", text_temperature=0.6, seed=7).endpoint(
+        opts
+    )
     assert url == ("ws://h/custom/chat?x=1&text_temperature=0.6&text_seed=7&audio_seed=7&seed=7")
     with pytest.raises(ConfigurationError):
         MoshiEngine(base_url="ftp://h").endpoint(opts)
@@ -290,6 +292,7 @@ async def test_greeting_and_reply_events(fake: Callable[..., Any]) -> None:
     assert metrics[1].ttfb is not None and metrics[1].ttfb >= 0
     assert metrics[1].output_text_tokens == 4
     assert metrics[1].output_audio_tokens >= 13
+    assert all(m.tokens_estimated for m in metrics)  # derived from durations
 
 
 async def test_user_talking_over_the_agent_is_left_to_the_model(fake: Callable[..., Any]) -> None:
@@ -420,7 +423,9 @@ async def test_gives_up_when_reconnecting_is_disabled(fake: Callable[..., Any]) 
 
 async def test_gives_up_after_failed_reconnects(fake: Callable[..., Any]) -> None:
     server = await fake()
-    conn = await connect(MoshiEngine(base_url=server.url, max_reconnect_attempts=1, connect_timeout=2))
+    conn = await connect(
+        MoshiEngine(base_url=server.url, max_reconnect_attempts=1, connect_timeout=2)
+    )
     events = Events(conn)
     server.reject_status = 503
     await server.drop()

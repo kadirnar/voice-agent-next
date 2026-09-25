@@ -228,6 +228,8 @@ def test_missing_dependency_is_reported_with_install_hint(monkeypatch: pytest.Mo
 def test_create_from_spec(backend: FakeBackend) -> None:
     tts = create("tts", "pocket-tts")
     assert isinstance(tts, PocketTTS)
+    assert tts.capabilities.word_timestamps  # estimated word timings
+    assert not create("tts", "pocket-tts", word_timings=False).capabilities.word_timestamps
     assert (tts.model, tts.voice, tts.language, tts.sample_rate) == (
         "english",
         "alba",

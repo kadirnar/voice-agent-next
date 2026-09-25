@@ -113,16 +113,12 @@ def for_status(
 ) -> ProviderError:
     """Map an HTTP (or WebSocket handshake) status code to a library error.
 
-    ======================  ===================================  =========
-    status                  error                                retryable
-    ======================  ===================================  =========
-    401, 403                :class:`AuthenticationError`         no
-    429                     :class:`RateLimitError`              yes
-    408, 504                :class:`ProviderTimeoutError`        yes
-    other 5xx               :class:`ProviderConnectionError`     yes
-    409                     :class:`ProviderError`               yes
-    anything else / None    :class:`ProviderError`               no
-    ======================  ===================================  =========
+    * 401, 403: :class:`AuthenticationError` (not retryable)
+    * 429: :class:`RateLimitError` (retryable)
+    * 408, 504: :class:`ProviderTimeoutError` (retryable)
+    * other 5xx: :class:`ProviderConnectionError` (retryable)
+    * 409: :class:`ProviderError` (retryable)
+    * anything else, or ``None``: :class:`ProviderError` (not retryable)
 
     ``retryable`` overrides the default, e.g. ``False`` for a 429 caused by an exhausted
     quota (retrying does not help until it is raised).
