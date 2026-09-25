@@ -209,12 +209,15 @@ _PRESETS: tuple[Preset, ...] = (
         },
         rationale=(
             "Note 03 §9.2's Apple silicon stack, all on the GPU through MLX: parakeet-mlx "
-            "streams Parakeet TDT 0.6B v3 (25 European languages) and has the final "
-            "transcript ready when the turn ends; mlx_lm.server runs Qwen3.5-4B at 4-bit "
-            "(note 03 recommends Qwen3.5 / Gemma 4 E4B at 4-bit; use "
+            "streams Parakeet TDT 0.6B v3 (25 European languages), idle once the user stops "
+            "talking, so the final transcript is one pass (on a GitHub M1 runner the 110M "
+            "Parakeet finalized a 3 s turn 127 ms after the flush); mlx_lm.server runs "
+            "Qwen3.5-4B at 4-bit (Qwen3-1.7B 4-bit there: 211 ms TTFT and a correct tool "
+            "call; note 03 recommends Qwen3.5 / Gemma 4 E4B at 4-bit; use "
             "`--llm mlx_lm/mlx-community/Qwen3.5-9B-4bit` with 16 GB or more), with Ollama "
             "as the failover when no mlx-lm server runs; Kokoro-82M through mlx-audio "
-            "(docs/providers/mlx.md). "
+            "(`--tts mlx_audio/pocket-tts` streams audio: 140 ms to first audio against "
+            "Kokoro's 542 ms per segment; docs/providers/mlx.md). "
             f"{_TURN_TAKING})."
         ),
         where="local",

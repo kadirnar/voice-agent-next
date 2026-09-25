@@ -54,9 +54,7 @@ generation never occupies that thread.
 ## STT: Parakeet (`mlx`)
 
 NVIDIA's Parakeet TDT 0.6B v3 transcribes 25 European languages with punctuation and casing
-(v2 and the other Parakeets are English-only). `ParakeetMLXSTT` streams with parakeet-mlx's
-`StreamingParakeet`: local attention with a rotating key/value cache, so every audio chunk
-extends the transcript instead of re-running the utterance.
+(v2 and the other Parakeets are English-only).
 
 | Model | Download | Languages |
 |---|---|---|
@@ -70,21 +68,33 @@ The downloads are float32; `dtype="bfloat16"` (the default) halves them in memor
 other parakeet-mlx checkpoint loads from its Hugging Face id (`mlx/<org>/<repo>`) or a
 local directory with `config.json` and `model.safetensors`.
 
-How a turn is recognized:
+How a turn is recognized (the default, re-decoding streaming):
 
-* audio is fed every `chunk_duration` (0.32 s) and each step emits an
-  `INTERIM_TRANSCRIPT` (finalized plus draft tokens);
-* on `flush()` (the cascade calls it when the VAD and turn detector end the turn) the rest
-  of the audio is fed and the current transcript is the `FINAL_TRANSCRIPT`: there is no
-  second pass, so the final costs one chunk of encoding;
-* the next utterance starts a new recognizer state (word times stay relative to the start
-  of the stream).
+* while the user speaks, every `chunk_duration` (0.32 s) of new audio triggers an interim
+  step: the utterance so far is decoded with full attention and emitted as an
+  `INTERIM_TRANSCRIPT`. A step that takes longer than half of `chunk_duration` spaces the
+  next one out, so the MLX thread stays at most about half busy;
+* pending audio that is only silence (below about -50 dBFS) triggers no step: once the
+  user stops talking the GPU goes idle, while the VAD and the turn detector wait for the
+  end of the turn;
+* `flush()` (the cascade calls it at the end of the turn) decodes the utterance once more
+  and that is the `FINAL_TRANSCRIPT`: one full pass, identical to batch recognition. An
+  utterance of only silence (a VAD false alarm) is not decoded;
+* the next audio starts a new utterance (word times stay relative to the stream start).
+
+Each step costs one pass over the utterance so far, which is what keeps the final
+transcript fast and accurate for conversational turns (a few seconds to a few tens of
+seconds). For long dictation, `incremental=True` switches to parakeet-mlx's cache-aware
+`StreamingParakeet` (local attention with a rotating key/value cache, `context_size` and
+`depth`): the cost per step stays bounded, but on the M1 runner its final transcript came
+later (270 ms instead of 127 ms for a 3-second turn) and its accuracy depends on a large
+right context (`(256, 256)` frames; with `(256, 32)` the JFK clip came out garbled).
 
 Options: `streaming` (`False`: a batch recognizer that the cascade wraps in a
-`StreamAdapter`), `interim_results`, `chunk_duration`, `context_size` (`(256, 256)` encoder
-frames of left/right attention context), `depth`, `dtype`, `beam_size` (1 = greedy),
-`language` (reported on transcripts; Parakeet v3 detects the language itself),
-`local_files_only`. Words carry timings and confidences (sub-word tokens merged).
+`StreamAdapter`), `interim_results`, `chunk_duration`, `incremental`, `context_size`,
+`depth`, `dtype`, `beam_size` (1 = greedy), `language` (reported on transcripts; Parakeet v3
+detects the language itself), `local_files_only`. Words carry timings and confidences
+(sub-word tokens merged).
 
 ## STT: Whisper (`mlx_whisper`)
 
@@ -156,9 +166,32 @@ server); for several concurrent agents, LM Studio's MLX engine or Ollama are alt
 ## Latency
 
 Measured by `tests/providers/test_mlx_models.py` on a GitHub Actions `macos-latest` runner
-(Apple M1, 3 cores, 7 GB; shared and virtualized, so slower than a desktop Mac):
+(Apple M1, 3 cores, 7 GB; shared and virtualized, so slower than a desktop Mac), Python
+3.12, mlx 0.32, 2026-09-25. Warm models; best of three where noted. Streaming tests push
+the 11-second [JFK clip](https://github.com/openai/whisper/raw/main/tests/jfk.flac) (or its
+first 3 seconds) in 20 ms frames at real-time speed, then flush.
 
-<!-- mlx-latency -->
+| Component | Measurement | Result |
+|---|---|---|
+| `mlx/parakeet-tdt_ctc-110m` | final transcript after the flush, 3 s turn (streaming) | **127 ms** (5 interim results) |
+| | same, 11 s utterance | 300 ms (18 interim results), text exact |
+| | batch, 3 s turn | 104 ms |
+| | `incremental=True`: 3 s turn / 11 s utterance | 270 ms / 488 ms |
+| `mlx_whisper/tiny` | batch, 3 s turn (the final behind a `StreamAdapter`) | **97 ms** |
+| | batch, 11 s clip | 1.3 s |
+| `mlx_audio/pocket-tts` | first audio of a 70-character sentence | **140 ms** (176 ms median), RTF 0.37, 24 chunks |
+| `mlx_audio/kokoro` | first audio of "Hello! How can I help you today?" (one segment) | 542 ms, RTF 0.23 |
+| `mlx_lm` + `mlx-community/Qwen3-1.7B-4bit` | time to first token (short prompt) | **211 ms** (266 ms median) |
+| | tool call | `get_weather({"city": "Paris"})` |
+
+Loading (with the warm-up inference, models cached): Parakeet 110M 1.7 s, Whisper tiny
+2.8 s, Pocket TTS 6.3 s, Kokoro 12 s. The default Parakeet (0.6B v3, 2.5 GB download) and
+Qwen3.5-4B were not run on the runner (the CI budget keeps downloads small); expect a
+larger model to cost more per pass, roughly in proportion to its size.
+
+Kokoro synthesizes a whole segment before the first audio; the cascade sends it one
+sentence at a time, so a short first sentence starts sooner. Pocket TTS streams audio while
+it generates, which is why its first audio does not depend on the sentence's length.
 
 ## Limitations
 
