@@ -97,6 +97,7 @@ from ...utils.aio import BackgroundTasks, cancel_and_wait
 from ...utils.clock import now
 from ...utils.ids import new_id
 from ...utils.log import logger
+from ._http import first_env, is_openai_host
 
 __all__ = [
     "BETA_EVENT_ALIASES",
@@ -462,6 +463,51 @@ def _is_loopback(url: str) -> bool:
     return host in ("localhost", "127.0.0.1", "::1") or host.startswith("127.")
 
 
+_OPENAI_KEY_ENV: Final = "OPENAI_API_KEY"
+
+
+def _engine_api_key(
+    owner: str,
+    *,
+    api_key: str | None,
+    env_names: Sequence[str],
+    url: str,
+    url_from_env: bool,
+    required: bool,
+    has_auth: bool,
+) -> str | None:
+    """The key a WebSocket engine sends: ``api_key=``, else the first environment variable.
+
+    ``OPENAI_API_KEY`` belongs to OpenAI: it is never sent to a base URL that is not
+    OpenAI's own (``*.api.openai.com``), unless that URL also comes from the environment
+    (a deliberately configured proxy). A key passed explicitly is always used, and
+    ``api_key=""`` means "no key" (no environment fallback). Other profiles' variables
+    (``XAI_API_KEY``, ``AZURE_OPENAI_API_KEY``, ...) are used as they are.
+    """
+    if api_key is not None:
+        return api_key
+    guarded = _OPENAI_KEY_ENV in env_names and not url_from_env and not is_openai_host(url)
+    names = [n for n in env_names if not (guarded and n == _OPENAI_KEY_ENV)]
+    key = first_env(names)
+    if key or has_auth:
+        return key
+    if guarded:
+        # a server that is not OpenAI's decides whether it needs a key
+        host = urlsplit(url).hostname or url
+        logger.warning(
+            "%s: no API key for %s; %s is only sent to api.openai.com. "
+            "Pass api_key=... (or an Authorization header) if the server needs one.",
+            owner,
+            host,
+            _OPENAI_KEY_ENV,
+        )
+        return None
+    if required:
+        hint = " or ".join(env_names) or "api_key=..."
+        raise ConfigurationError(f"{owner}: no API key; pass api_key=... or set {hint}")
+    return None
+
+
 _CONNECT_ACCEPTS_PROXY: Final = "proxy" in inspect.signature(ws_connect.__init__).parameters
 
 
@@ -524,7 +570,8 @@ class OpenAIRealtimeEngine(S2SEngine):
 
     Args:
         model: model id (Azure: deployment name). Default: the profile's default model.
-        api_key: API key (default: the profile's environment variable).
+        api_key: API key (default: the profile's environment variable; ``OPENAI_API_KEY``
+            is only sent to OpenAI's own host, other servers need ``api_key=``).
         base_url: server base URL, e.g. ``wss://api.openai.com/v1`` (``/realtime`` is
             appended; ``http(s)`` is accepted).
         profile: compatibility profile name or :class:`RealtimeProfile` (default ``openai``).
@@ -619,25 +666,22 @@ class OpenAIRealtimeEngine(S2SEngine):
             input_sample_rate=input_sample_rate or prof.input_sample_rate,
             output_sample_rate=output_sample_rate or prof.output_sample_rate,
         )
-        # api_key="" means "no key" (e.g. Azure Entra tokens): no environment fallback
-        self.api_key = (
-            api_key
-            if api_key is not None
-            else next((v for v in (os.environ.get(e) for e in prof.api_key_env) if v), None)
-        )
-        self.headers: dict[str, str] = dict(headers or {})
-        auth_names = {"authorization", prof.auth_header.lower()}
-        has_auth = any(h.lower() in auth_names for h in self.headers)
-        if prof.api_key_required and not self.api_key and not has_auth:
-            hint = " or ".join(prof.api_key_env) or "api_key=..."
-            raise ConfigurationError(f"{self.provider}: no API key; pass api_key=... or set {hint}")
-        resolved_base = (
-            base_url
-            or next((v for v in (os.environ.get(e) for e in prof.base_url_env) if v), None)
-            or prof.base_url
-        )
+        env_base = first_env(prof.base_url_env)
+        resolved_base = base_url or env_base or prof.base_url
         if not resolved_base:
             raise ConfigurationError(f"{self.provider}: base_url=... is required")
+        self.headers: dict[str, str] = dict(headers or {})
+        auth_names = {"authorization", prof.auth_header.lower()}
+        # api_key="" means "no key" (e.g. Azure Entra tokens): no environment fallback
+        self.api_key = _engine_api_key(
+            self.provider,
+            api_key=api_key,
+            env_names=prof.api_key_env,
+            url=resolved_base,
+            url_from_env=base_url is None and env_base is not None,
+            required=prof.api_key_required,
+            has_auth=any(h.lower() in auth_names for h in self.headers),
+        )
         self.url = realtime_url(resolved_base, model=self.model or None, query=query)
         self.voice = voice or prof.default_voice
         self.noise_reduction = noise_reduction

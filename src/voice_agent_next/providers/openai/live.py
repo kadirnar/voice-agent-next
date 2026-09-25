@@ -124,6 +124,7 @@ from .realtime import (
     RealtimeConnectTimeoutError,
     _close_reason,
     _deep_merge,
+    _engine_api_key,
     _handshake_error,
     _is_loopback,
 )
@@ -274,7 +275,8 @@ class OpenAILiveSessionEngine(S2SEngine):
 
     Args:
         model: Live model (default ``gpt-live-1``).
-        api_key: API key (default: ``OPENAI_API_KEY``).
+        api_key: API key (default: ``OPENAI_API_KEY``, which is only sent to OpenAI's
+            own host or to an ``OPENAI_LIVE_BASE_URL``; other servers need ``api_key=``).
         base_url: ``wss://api.openai.com/v1`` (``/live/sessions`` is appended;
             ``http(s)`` is accepted). Default: ``OPENAI_LIVE_BASE_URL`` or OpenAI.
         voice: output voice (``marin`` by default; see :data:`VOICES`) or a custom voice
@@ -373,13 +375,19 @@ class OpenAILiveSessionEngine(S2SEngine):
             input_sample_rate=sample_rate,
             output_sample_rate=sample_rate,
         )
-        self.api_key = api_key if api_key is not None else os.environ.get("OPENAI_API_KEY")
+        env_base = os.environ.get("OPENAI_LIVE_BASE_URL") or None
+        self.url = live_url(base_url or env_base or DEFAULT_URL)
         self.headers: dict[str, str] = dict(headers or {})
-        if not self.api_key and not any(h.lower() == "authorization" for h in self.headers):
-            raise ConfigurationError(
-                f"{self.provider}: no API key; pass api_key=... or set OPENAI_API_KEY"
-            )
-        self.url = live_url(base_url or os.environ.get("OPENAI_LIVE_BASE_URL") or DEFAULT_URL)
+        # OPENAI_API_KEY is only sent to OpenAI's own host (or an OPENAI_LIVE_BASE_URL)
+        self.api_key = _engine_api_key(
+            self.provider,
+            api_key=api_key,
+            env_names=("OPENAI_API_KEY",),
+            url=self.url,
+            url_from_env=base_url is None and env_base is not None,
+            required=True,
+            has_auth=any(h.lower() == "authorization" for h in self.headers),
+        )
         self.voice = voice
         self.delegation: Delegation = delegation
         self.responses_model = responses_model
