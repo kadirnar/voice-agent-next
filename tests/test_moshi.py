@@ -468,6 +468,9 @@ async def test_session_full_duplex_conversation(fake: Callable[..., Any]) -> Non
     await say(0.8)  # the fake yields after 0.4 s of overlap, then answers "Okay."
     await quiet(1.5)
     await wait_for(lambda: len(server.utterances) == 4 and session.agent_state == AgentState.LISTENING)  # fmt: skip
+    # the last reply reaches the history once its text is complete: on a slow runner that
+    # can be after the agent went quiet
+    await wait_for(lambda: len([r for r, _ in history(session) if r == "assistant"]) >= 4)
     transport.end_user_audio()
     await asyncio.wait_for(session.wait_closed(), 5)
 

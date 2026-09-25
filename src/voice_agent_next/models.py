@@ -81,7 +81,7 @@ ModelProgress = Callable[["ModelFile", int, "int | None"], None]
 
 _KINDS = ("stt", "tts", "llm", "vad", "turn", "engine")
 _ARCHIVE_MARKER = ".van-archive.json"  # written by utils.download.download_archive
-_ARCHIVE_SUFFIXES = (".tar.bz2", ".tbz2", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar")
+_ARCHIVE_SUFFIXES = (".tar.bz2", ".tbz2", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar", ".zip")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HF_FALLBACK = "hf"
 """Cache sub-directory of Hugging Face files downloaded without ``huggingface_hub``."""

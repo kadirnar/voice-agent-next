@@ -122,6 +122,7 @@ nav:
       - Session rotation: concepts/session-rotation.md
       - Interruptions: concepts/interruptions.md
       - Preemptive generation: concepts/preemptive-generation.md
+      - Omni models: concepts/omni-models.md
       - Tools: concepts/tools.md
       - Handoffs and flows: concepts/handoffs.md
       - Failover: concepts/failover.md
@@ -134,6 +135,7 @@ nav:
           - OpenAI Realtime (+ compatible): providers/openai-realtime.md
           - Gemini Live: providers/gemini-live.md
           - Moshi and PersonaPlex: providers/moshi.md
+          - LFM2.5-Audio (omni, local): providers/liquid-audio.md
       - Cloud:
           - OpenAI: providers/openai.md
           - Anthropic: providers/anthropic.md
@@ -151,6 +153,8 @@ nav:
           - faster-whisper: providers/faster_whisper.md
           - Kokoro: providers/kokoro.md
           - Pocket TTS: providers/pocket-tts.md
+          - Chatterbox: providers/chatterbox.md
+          - Qwen3-TTS: providers/qwen-tts.md
           - Silero VAD: providers/silero.md
           - Smart Turn: providers/smart_turn.md
   - Transports:

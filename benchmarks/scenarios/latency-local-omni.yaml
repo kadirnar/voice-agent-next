@@ -1,0 +1,28 @@
+# T1 latency for native local speech-to-speech with an omni model: the same six questions
+# as `latency-local`, voiced by Kokoro (am_adam), answered by LFM2.5-Audio-1.5B through
+# llama-liquid-audio-server (no STT, no TTS: the model hears the audio and speaks itself).
+# Requires the `kokoro` extra for the stimuli; the model (Q4_0 GGUF set, ~1.1 GB) and the
+# server runner are downloaded once. See docs/providers/liquid-audio.md:
+#
+#   van bench latency --scenario benchmarks/scenarios/latency-local-omni.yaml \
+#       --llm '{provider: liquid-audio, serve: true}' --vad silero --turn smart_turn \
+#       --turns 12 --label lfm2.5-audio-q4_0
+name: latency-local-omni
+version: 1
+description: >-
+  Short customer-service questions spoken by Kokoro (am_adam), for benchmarking local
+  omni (audio-in, speech-out) models fully offline.
+sample_rate: 16000
+loudness_dbfs: -20.0
+lead_in: 0.5
+stimuli: tts
+tts: {provider: kokoro/v1.0-fp16, voice: am_adam}
+reply_timeout: 15.0
+gap_after_reply: 0.5
+turns:
+  - {id: "time", text: "What time does the store open tomorrow?"}
+  - {id: "table", text: "Can you book a table for two people tonight?"}
+  - {id: "order", text: "Where is my order? I placed it last week."}
+  - {id: "sunday", text: "Are you open on Sunday afternoon?"}
+  - {id: "flight", text: "Please change my flight to Friday morning."}
+  - {id: "refund", text: "How long does a refund usually take?"}

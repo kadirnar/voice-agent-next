@@ -619,3 +619,53 @@ async def test_cascade_turn_with_tool_round_trip() -> None:
     assert "It is sunny in Paris." in "".join(transcripts)
     kinds = [getattr(i, "role", i.type) for i in session.history.items]
     assert kinds == ["user", "function_call", "function_call_output", "assistant"]
+
+
+# --------------------------------------------------------------------- audio output
+
+
+def audio_delta(**fields: Any) -> dict[str, Any]:
+    return chunk({"audio": fields})
+
+
+async def test_gpt_audio_streams_its_voice_and_transcript() -> None:
+    import base64
+
+    import numpy as np
+
+    from voice_agent_next.engines.cascade import CascadeEngine
+
+    pcm = (np.arange(2400) % 200 - 100).astype("<i2") * 50  # 100 ms at 24 kHz
+    b64 = base64.b64encode(pcm.tobytes()).decode()
+    stream = [
+        chunk({"role": "assistant", "content": None, "refusal": None,
+               "audio": {"id": "audio_123", "transcript": "Hello"}}),
+        audio_delta(transcript=" there."),
+        audio_delta(data=b64),
+        audio_delta(data=b64, expires_at=1790003600),
+        chunk({}, finish="stop"),
+        usage_chunk(120, 40),
+    ]  # fmt: skip
+    server = FakeServer([SSEStream(stream)])
+    llm = make_llm(server, model="gpt-audio", voice="marin")
+    caps = llm.capabilities
+    assert caps.audio_output and caps.audio_input and caps.audio_sample_rate == 24_000
+    metrics = collect_metrics(llm)
+    chunks = [c async for c in llm.chat(user_ctx())]
+    [body] = server.chat_bodies
+    assert body["modalities"] == ["text", "audio"]
+    assert body["audio"] == {"voice": "marin", "format": "pcm16"}
+    assert "".join(c.delta for c in chunks) == "Hello there."
+    frames = [c.audio for c in chunks if c.audio]
+    assert [f.sample_rate for f in frames] == [24_000, 24_000]
+    assert np.array_equal(frames[0].to_numpy(), pcm)
+    [m] = metrics
+    assert m.ttfb is not None and m.ttft is not None and m.ttft <= m.ttfb
+    # without a TTS, the cascade plays the model's own voice
+    engine = CascadeEngine(llm=make_llm(FakeServer([SSEStream(stream)]), model="gpt-audio"),
+                           vad=EnergyVAD())  # fmt: skip
+    assert engine.llm_audio
+    # text models are unchanged; modalities in extra opt any compatible model in
+    assert not make_llm(FakeServer([])).capabilities.audio_output
+    custom = make_llm(FakeServer([]), model="my-omni", extra={"modalities": ["text", "audio"]})
+    assert custom.capabilities.audio_output

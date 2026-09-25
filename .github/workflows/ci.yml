@@ -73,7 +73,9 @@ jobs:
       - name: System audio library (sounddevice)
         run: sudo apt-get update -q && sudo apt-get install -y -q libportaudio2
       # `cuda` is ~700 MB of NVIDIA runtime wheels, useless on a GPU-less runner
-      - run: uv sync --all-extras --no-extra cuda
+      # The GPU TTS extras (chatterbox, qwen-tts) are multi-GB CUDA torch installs and conflict
+      # with pocket-tts (CPU torch); their unit tests use fake modules.
+      - run: uv sync --all-extras --no-extra cuda --no-extra chatterbox --no-extra qwen-tts
       - run: uv run pytest -q
       - run: uv run van providers --json > /dev/null
 
