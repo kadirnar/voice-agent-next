@@ -39,6 +39,7 @@ from ..audio.frame import AudioFrame
 from ..errors import (
     AuthenticationError,
     ConfigurationError,
+    MissingAPIKeyError,
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
@@ -321,7 +322,7 @@ class SonioxSTT(STT):
         )
         self._api_key = (api_key or os.environ.get(API_KEY_ENV) or "").strip()
         if not self._api_key:
-            raise ConfigurationError(
+            raise MissingAPIKeyError(
                 f"Soniox needs an API key: pass api_key=... or set {API_KEY_ENV}"
             )
         self.language_hints = list(language_hints)

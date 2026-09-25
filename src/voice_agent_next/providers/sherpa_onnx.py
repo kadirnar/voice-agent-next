@@ -38,6 +38,7 @@ on the event loop. See ``docs/providers/sherpa-onnx.md`` for the model table and
 from __future__ import annotations
 
 import asyncio
+import collections
 import dataclasses
 import importlib
 import json
@@ -45,6 +46,7 @@ import math
 import os
 import re
 import threading
+import weakref
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -68,6 +70,7 @@ from ..utils.download import download, download_archive
 from ..utils.ids import new_id
 from ..utils.log import logger
 from ..vad import VAD, VADOptions
+from ._options import renamed
 
 __all__ = [
     "DEFAULT_STT_MODEL",
@@ -956,8 +959,9 @@ class SherpaOnnxSTT(STT):
             ``model``...), overriding the catalog or the directory scan.
         sha256: expected digest when ``model`` is a URL.
         num_threads: ONNX Runtime threads for the recognizer.
-        execution_provider: ``"cpu"`` (default), ``"cuda"`` or ``"coreml"`` (the PyPI wheels
-            are CPU-only and fall back to CPU).
+        device: ``"cpu"`` (default; ``"auto"`` is CPU too), ``"cuda"`` or ``"coreml"`` (the
+            PyPI wheels are CPU-only and fall back to CPU). (``execution_provider`` is a
+            deprecated alias.)
         decoding_method: ``"greedy_search"`` or ``"modified_beam_search"`` (transducers).
         max_active_paths: beam size for ``modified_beam_search``.
         endpoint_detection: use sherpa's endpoint rules (streaming models): an endpoint
@@ -980,6 +984,11 @@ class SherpaOnnxSTT(STT):
 
     provider = _PROVIDER
 
+    @property
+    def execution_provider(self) -> str:
+        """Deprecated alias of :attr:`device` (the sherpa-onnx provider string)."""
+        return _sherpa_device(self.device)
+
     def __init__(
         self,
         *,
@@ -989,7 +998,7 @@ class SherpaOnnxSTT(STT):
         files: Mapping[str, str | os.PathLike[str]] | None = None,
         sha256: str | None = None,
         num_threads: int = 2,
-        execution_provider: str = "cpu",
+        device: str | None = None,
         decoding_method: str = "greedy_search",
         max_active_paths: int = 4,
         endpoint_detection: bool = False,
@@ -1002,7 +1011,11 @@ class SherpaOnnxSTT(STT):
         text_case: Literal["auto", "lower", "keep"] = "auto",
         max_segment_duration: float | None = None,
         recognizer_options: Mapping[str, Any] | None = None,
+        execution_provider: str | None = None,
     ) -> None:
+        device = renamed(
+            "SherpaOnnxSTT", "device", device, "execution_provider", execution_provider
+        )
         _check_installed()
         if num_threads < 1:
             raise ConfigurationError(f"sherpa-onnx: num_threads must be >= 1, got {num_threads}")
@@ -1039,7 +1052,7 @@ class SherpaOnnxSTT(STT):
         )
         self.kind = ref.kind
         self.num_threads = num_threads
-        self.execution_provider = execution_provider
+        self.device = device or "cpu"
         self.decoding_method = decoding_method
         self.max_active_paths = max_active_paths
         self.endpoint_detection = endpoint_detection
@@ -1095,7 +1108,7 @@ class SherpaOnnxSTT(STT):
         spec = self._ref.spec
         options: dict[str, Any] = {
             "num_threads": self.num_threads,
-            "provider": self.execution_provider,
+            "provider": _sherpa_device(self.device),
         }
         if spec is not None:
             options.update(spec.options)
@@ -1512,9 +1525,11 @@ class SherpaOnnxTTS(TTS):
         sha256: expected digest when ``model`` is a URL.
         sample_rate: output rate. Default: the model's (catalog, Piper ``.onnx.json``, or the
             kind's usual rate); audio at another rate is resampled.
-        lang: Kokoro language hint for text without a lexicon entry (``"es"``, ``"fr"``...).
+        language: Kokoro language hint for text without a lexicon entry (``"es"``,
+            ``"fr"``...). (``lang`` is a deprecated alias.)
         num_threads: ONNX Runtime threads.
-        execution_provider: ``"cpu"`` (default), ``"cuda"`` or ``"coreml"``.
+        device: ``"cpu"`` (default; ``"auto"`` is CPU too), ``"cuda"`` or ``"coreml"``.
+            (``execution_provider`` is a deprecated alias.)
         silence_scale: scales the pauses sherpa inserts between sentences of one request.
         max_num_sentences: sentences per synthesis step; each step's audio is emitted as
             soon as it is ready.
@@ -1527,6 +1542,17 @@ class SherpaOnnxTTS(TTS):
     """
 
     provider = _PROVIDER
+
+    @property
+    def execution_provider(self) -> str:
+        """Deprecated alias of :attr:`device` (the sherpa-onnx provider string)."""
+        return _sherpa_device(self.device)
+
+    @property
+    def lang(self) -> str | None:
+        """Deprecated alias of :attr:`language`."""
+        return self.language
+
     normalize_by_default = True
 
     def __init__(
@@ -1539,16 +1565,22 @@ class SherpaOnnxTTS(TTS):
         files: Mapping[str, str | os.PathLike[str]] | None = None,
         sha256: str | None = None,
         sample_rate: int | None = None,
-        lang: str | None = None,
+        language: str | None = None,
         num_threads: int = 2,
-        execution_provider: str = "cpu",
+        device: str | None = None,
         silence_scale: float = 0.2,
         max_num_sentences: int = 1,
         chunk_duration: float = 0.05,
         clean_text: bool = True,
         trim_silence: bool = True,
         normalize: NormalizeOption = None,
+        lang: str | None = None,
+        execution_provider: str | None = None,
     ) -> None:
+        language = renamed("SherpaOnnxTTS", "language", language, "lang", lang)
+        device = renamed(
+            "SherpaOnnxTTS", "device", device, "execution_provider", execution_provider
+        )
         _check_installed()
         if not 0.25 <= speed <= 4.0:
             raise ConfigurationError(f"sherpa-onnx: speed must be between 0.25 and 4, got {speed}")
@@ -1575,9 +1607,9 @@ class SherpaOnnxTTS(TTS):
         )
         self.kind = ref.kind
         self.speed = float(speed)
-        self.lang = lang
+        self.language = language
         self.num_threads = num_threads
-        self.execution_provider = execution_provider
+        self.device = device or "cpu"
         self.silence_scale = silence_scale
         self.max_num_sentences = max_num_sentences
         self.chunk_duration = chunk_duration
@@ -1611,8 +1643,8 @@ class SherpaOnnxTTS(TTS):
     def text_language(self, voice: str | None) -> str | None:
         """``lang``, else the locale in the model name (``piper-en_US-...``), else the
         language of a Kokoro voice name; ``None`` (no normalization) when unknown."""
-        if self.lang:
-            return self.lang
+        if self.language:
+            return self.language
         m = re.search(r"(?:^|[-_/])([a-z]{2,3})_[A-Z]{2}(?:$|[-_])", self.model)
         if m:
             return m.group(1)
@@ -1667,7 +1699,7 @@ class SherpaOnnxTTS(TTS):
         f = {role: _joined(files, role) for role in (*_REQUIRED_FILES[self.kind], *_OPTIONAL_FILES)}
         model_config: dict[str, Any] = {
             "num_threads": self.num_threads,
-            "provider": self.execution_provider,
+            "provider": _sherpa_device(self.device),
         }
         if self.kind == "tts-vits":
             model_config["vits"] = so.OfflineTtsVitsModelConfig(
@@ -1680,7 +1712,7 @@ class SherpaOnnxTTS(TTS):
                 tokens=f["tokens"],
                 data_dir=f["data_dir"],
                 lexicon=f["lexicon"],
-                lang=self.lang or "",
+                lang=self.language or "",
             )
         else:
             model_config["matcha"] = so.OfflineTtsMatchaModelConfig(
@@ -1807,6 +1839,12 @@ def _call_soon(loop: asyncio.AbstractEventLoop, fn: Callable[..., Any], *args: A
         pass
 
 
+def _sherpa_device(device: str) -> str:
+    """sherpa-onnx's ``provider`` string for a ``device`` option."""
+    name = device.strip().lower()
+    return "cpu" if name in ("", "auto") else name
+
+
 # ----------------------------------------------------------------------------- VAD
 class _SherpaVADInference:
     """Per-stream sherpa ``VadModel`` (it keeps the recurrent state and hysteresis)."""
@@ -1887,16 +1925,47 @@ class SherpaOnnxVAD(VAD):
         self._ref = ref
         self._path: Path | None = None
         self._lock = threading.Lock()
+        self._idle: collections.deque[tuple[float, Any]] = collections.deque()
+        """Loaded models no stream uses, with the threshold they were created with."""
 
     def _new_inference(self) -> _SherpaVADInference:
-        return _SherpaVADInference(self._create_model(), self.window_samples)
+        """Per-stream state around a cached model when one is idle, else a new model.
+
+        A sherpa ``VadModel`` holds a stream's recurrent state, so streams never share one;
+        a model goes back to the cache when its stream's inference object is released.
+        """
+        threshold = self.options.activation_threshold
+        model = self._take_idle(threshold)
+        if model is None:
+            model = self._create_model()
+        inference = _SherpaVADInference(model, self.window_samples)
+        finalizer = weakref.finalize(inference, self._idle.append, (threshold, model))
+        finalizer.atexit = False  # type: ignore[misc]  # a documented property
+        return inference
+
+    def _take_idle(self, threshold: float) -> Any:
+        # deque.pop()/append() are atomic: no lock (a GC finalizer may run at any point)
+        while True:
+            try:
+                model_threshold, model = self._idle.pop()
+            except IndexError:
+                return None
+            if model_threshold == threshold:  # else: created before the options changed
+                model.reset()
+                return model
 
     async def warmup(self) -> None:
-        """Download (first run only) and load the model off the event loop, then run it once."""
+        """Download (first run only) and load the model off the event loop, then run it once.
+
+        The model stays cached for the next stream, which then loads nothing on the loop.
+        """
         await asyncio.to_thread(self._warmup)
 
     def _warmup(self) -> None:
         self._new_inference()(np.zeros(self.window_samples, dtype=np.float32))
+
+    async def aclose(self) -> None:
+        self._idle.clear()
 
     def _model_path(self) -> Path:
         with self._lock:

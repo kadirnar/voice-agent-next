@@ -52,6 +52,7 @@ from ..utils.clock import now
 from ..utils.deps import is_installed, require
 from ..utils.download import cache_dir, download
 from ..utils.log import logger
+from ._options import onnx_providers, renamed
 
 __all__ = [
     "DEFAULT_MODEL",
@@ -326,16 +327,19 @@ class KokoroTTS(TTS):
             there), ``"v1.1-zh"``, ``"v1.1-zh-fp16"`` or ``"v1.1-zh-int8"``.
             With ``model_path`` any label is accepted.
         voice: default voice, e.g. ``"af_heart"`` (the default for v1.0) or ``"bm_george"``.
-            The first letter selects the language (see ``lang``).
+            The first letter selects the language (see ``language``).
         speed: speaking rate, 0.5 to 2.0.
-        lang: espeak-ng language code for phonemization (``"en-us"``, ``"en-gb"``, ``"es"``,
-            ``"fr-fr"``, ``"hi"``, ``"it"``, ``"ja"``, ``"pt-br"``, ``"cmn"``...). Default:
-            derived from the voice name of each request.
+        language: espeak-ng language code for phonemization (``"en-us"``, ``"en-gb"``,
+            ``"es"``, ``"fr-fr"``, ``"hi"``, ``"it"``, ``"ja"``, ``"pt-br"``, ``"cmn"``...).
+            Default: derived from the voice name of each request. (``lang`` is a deprecated
+            alias.)
         model_path: local ``.onnx`` file instead of the downloaded one.
         voices_path: local voice pack (``voices-*.bin``) instead of the downloaded one.
-        providers: ONNX Runtime execution providers, e.g. ``["CPUExecutionProvider"]``.
-            Default: CUDA, CoreML or DirectML when available, CPU otherwise (and CPU when
-            the accelerated session cannot be created).
+        device: ``"auto"`` (default: CUDA, CoreML or DirectML when available, CPU
+            otherwise, and CPU when the accelerated session cannot be created), ``"cpu"``,
+            ``"cuda"``, ``"coreml"``, ``"directml"``, or a list of ONNX Runtime execution
+            providers, e.g. ``["CPUExecutionProvider"]``. (``providers`` is a deprecated
+            alias.)
         num_threads: ONNX Runtime intra-op threads (default: one per physical core).
         chunk_duration: duration of the emitted audio chunks, in seconds.
         split_sentences: synthesize long texts sentence by sentence so the first audio
@@ -363,10 +367,10 @@ class KokoroTTS(TTS):
         model: str | None = None,
         voice: str | None = None,
         speed: float = 1.0,
-        lang: str | None = None,
+        language: str | None = None,
         model_path: str | os.PathLike[str] | None = None,
         voices_path: str | os.PathLike[str] | None = None,
-        providers: Sequence[ExecutionProvider] | str | None = None,
+        device: Sequence[ExecutionProvider] | str | None = None,
         num_threads: int | None = None,
         chunk_duration: float = 0.05,
         split_sentences: bool = True,
@@ -376,7 +380,11 @@ class KokoroTTS(TTS):
         g2p: Callable[[str, str], str] | None = None,
         clean_text: bool = True,
         normalize: NormalizeOption = None,
+        lang: str | None = None,
+        providers: Sequence[ExecutionProvider] | str | None = None,
     ) -> None:
+        language = renamed("KokoroTTS", "language", language, "lang", lang)
+        device = renamed("KokoroTTS", "device", device, "providers", providers)
         model_id = _normalize_model(model or DEFAULT_MODEL)
         variant = KOKORO_MODELS.get(model_id)
         if variant is None:
@@ -404,7 +412,7 @@ class KokoroTTS(TTS):
             normalize=normalize,
         )
         self.speed = float(speed)
-        self.lang = lang
+        self.language = language
         self.num_threads = num_threads
         self.chunk_duration = chunk_duration
         self.split_sentences = split_sentences
@@ -416,18 +424,20 @@ class KokoroTTS(TTS):
         self._model_path = Path(model_path).expanduser() if model_path is not None else None
         self._voices_path = Path(voices_path).expanduser() if voices_path is not None else None
         self._int8_on_arm64 = False
-        if isinstance(providers, str):
-            providers = [providers]
-        self._providers: list[ExecutionProvider] | None = (
-            list(providers) if providers is not None else None
-        )
+        self.device = device
+        self._providers: list[ExecutionProvider] | None = onnx_providers(device)
         self._chunk_bytes = max(1, round(chunk_duration * SAMPLE_RATE)) * SAMPLE_WIDTH
         self._engine: Any = None  # kokoro_onnx.Kokoro, created on the worker thread
         self._executor: ThreadPoolExecutor | None = None
 
+    @property
+    def lang(self) -> str | None:
+        """Deprecated alias of :attr:`language`."""
+        return self.language
+
     # ------------------------------------------------------------------ public API
     def text_language(self, voice: str | None) -> str | None:
-        return self.lang or lang_for_voice(voice or self.voice or "a")
+        return self.language or lang_for_voice(voice or self.voice or "a")
 
     def _synthesize(self, text: str, *, voice: str | None) -> ChunkedStream:
         return _KokoroChunkedStream(self, text, voice=voice)
@@ -551,7 +561,7 @@ class KokoroTTS(TTS):
                 f"unknown Kokoro voice {voice!r} for model {self.model!r}; available: "
                 f"{', '.join(engine.get_voices())}"
             )
-        lang = self.lang or lang_for_voice(voice)
+        lang = self.language or lang_for_voice(voice)
         options: dict[str, Any] = {
             "voice": voice,
             "speed": self.speed,

@@ -10,6 +10,8 @@ Kroko 57 MB, Moonshine tiny 30 MB, a Piper voice 23 MB, Silero VAD 0.6 MB) and r
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import gc
 import importlib.machinery
 import math
 import re
@@ -935,7 +937,7 @@ async def test_kokoro_voices_by_name(
     backend: FakeBackend, downloads: list[tuple[str, str | None]]
 ) -> None:
     backend.num_speakers = 54
-    tts = SherpaOnnxTTS(model="kokoro-multi-lang-v1_0-int8", speed=1.2, lang="es")
+    tts = SherpaOnnxTTS(model="kokoro-multi-lang-v1_0-int8", speed=1.2, language="es")
     assert (tts.voice, tts.sample_rate) == ("af_heart", 24_000)
     await tts.synthesize("Hola.").collect()
     await tts.synthesize("Hi.", voice="bm_george").collect()
@@ -1034,6 +1036,28 @@ async def test_unpronounceable_text_is_skipped_and_stream_uses_sentences(
 
 
 # ----------------------------------------------------------------------------- VAD
+async def test_vad_caches_models_across_streams(backend: FakeBackend) -> None:
+    vad = SherpaOnnxVAD()
+    await vad.warmup()  # loads the model in a worker thread
+    assert FakeVadModel.created == 1
+    first, second = vad.stream(), vad.stream()  # concurrent streams never share a model
+    models = (first._infer._model, second._infer._model)  # type: ignore[attr-defined]
+    assert FakeVadModel.created == 2 and models[0] is not models[1]
+    assert models[0].resets == 1  # the cached model starts from a clean state
+    del first
+    gc.collect()
+    third = vad.stream()  # the released model is reused: no load on the event loop
+    assert FakeVadModel.created == 2
+    assert third._infer._model is models[0]  # type: ignore[attr-defined]
+    vad.options = dataclasses.replace(vad.options, activation_threshold=0.8)
+    del second, third
+    gc.collect()
+    fourth = vad.stream()  # cached models were built with the old threshold
+    assert FakeVadModel.created == 3
+    assert fourth._infer._model.config.silero_vad.threshold == 0.8  # type: ignore[attr-defined]
+    await vad.aclose()
+
+
 async def test_vad_windows_and_events(
     backend: FakeBackend, downloads: list[tuple[str, str | None]]
 ) -> None:
@@ -1046,16 +1070,17 @@ async def test_vad_windows_and_events(
     for frame in chunks(silence(0.3)) + chunks(speech(0.6)) + chunks(silence(0.5)):
         events.extend(stream.push_audio(frame))
     assert [e.type for e in events] == [VADEventType.START_OF_SPEECH, VADEventType.END_OF_SPEECH]
-    assert FakeVadModel.created == 2  # warm-up + one per stream
+    assert FakeVadModel.created == 1  # loaded by the warm-up, reused by the stream
     config = stream._infer._model.config  # type: ignore[attr-defined]
     assert config.silero_vad.threshold == 0.6
     assert config.silero_vad.window_size == 512 and config.sample_rate == SR
+    resets = stream._infer._model.resets  # type: ignore[attr-defined]
     stream.reset()
-    assert stream._infer._model.resets == 1  # type: ignore[attr-defined]
+    assert stream._infer._model.resets == resets + 1  # type: ignore[attr-defined]
     ten = SherpaOnnxVAD(model="ten-vad")
     assert ten.window_samples == 256
     ten.stream()
-    assert FakeVadModel.created == 3
+    assert FakeVadModel.created == 2
     with pytest.raises(ConfigurationError, match="unknown VAD option"):
         SherpaOnnxVAD(bogus=1.0)
     assert [u for u, _ in downloads if u.endswith(".onnx")] == [
@@ -1179,6 +1204,6 @@ async def test_tts_normalization_language_follows_the_model_and_voice(
     assert kokoro.text_language("af_heart") == "en"
     assert kokoro.text_language("ef_dora") == "es"
     assert kokoro.text_language("26") == "en"  # bm_george
-    assert SherpaOnnxTTS(model="kokoro-multi-lang-v1_0-int8", lang="fr").text_language(None) == "fr"
+    assert SherpaOnnxTTS(model="kokoro-multi-lang-v1_0-int8", language="fr").text_language(None) == "fr"
     assert SherpaOnnxTTS(normalize=False).normalizer_for() is None
     await piper.aclose()

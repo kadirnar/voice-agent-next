@@ -114,7 +114,9 @@ style and when to delegate. Put business rules and tool workflows in
 `responses_instructions`. An agent handoff updates the backend tools through
 `session.update`, and `session.update_instructions()` appends the new instructions (the
 startup prompt itself cannot change). Backend token usage is reported as `LLMMetrics` (one per
-backend response).
+backend response). GPT-Live itself is billed by duration, not tokens: its `EngineMetrics`
+carry no token counts, and the billed seconds are `connection.usage_seconds` (the
+cumulative `usage.seconds` of every session of the connection, final once it closed).
 
 ### Client delegation
 

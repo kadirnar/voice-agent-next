@@ -35,6 +35,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 from ..audio.frame import AudioFrame
 from ..errors import (
     ConfigurationError,
+    MissingAPIKeyError,
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
@@ -85,7 +86,7 @@ _MAX_MESSAGE_BYTES = 16 * 2**20
 def _resolve_api_key(api_key: str | None) -> str:
     key = api_key or os.environ.get("CARTESIA_API_KEY")
     if not key:
-        raise ConfigurationError(
+        raise MissingAPIKeyError(
             "Cartesia needs an API key: pass api_key=... or set CARTESIA_API_KEY"
         )
     return key

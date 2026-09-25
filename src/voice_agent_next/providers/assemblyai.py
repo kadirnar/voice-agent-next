@@ -38,6 +38,7 @@ from ..audio.frame import AudioFrame
 from ..errors import (
     AuthenticationError,
     ConfigurationError,
+    MissingAPIKeyError,
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
@@ -50,6 +51,7 @@ from ..stt import STT, STTCapabilities, STTEvent, STTEventType, STTStream, Trans
 from ..utils.aio import ChanClosed, cancel_and_wait
 from ..utils.ids import new_id
 from ..utils.log import logger
+from ._options import deprecated
 from ._ws import close_ws, raise_task_error, ws_connect
 
 __all__ = ["AssemblyAISTT", "AssemblyAIStream"]
@@ -293,11 +295,16 @@ class AssemblyAISTT(STT):
         connect_timeout: WebSocket / HTTP connection timeout in seconds.
         close_timeout: how long to wait for the last ``Turn`` / ``Termination`` after the
             input ends.
-        request_timeout: HTTP timeout of :meth:`transcribe`.
+        timeout: HTTP timeout of :meth:`transcribe`. (``request_timeout`` is a deprecated alias.)
         extra_params: additional connection parameters, passed through verbatim.
     """
 
     provider = PROVIDER
+
+    @property
+    def request_timeout(self) -> float:
+        """Deprecated alias of :attr:`timeout`."""
+        return self.timeout
 
     def __init__(
         self,
@@ -335,9 +342,12 @@ class AssemblyAISTT(STT):
         http_client: httpx.AsyncClient | None = None,
         connect_timeout: float = 10.0,
         close_timeout: float = 5.0,
-        request_timeout: float = 35.0,
+        timeout: float = 35.0,
         extra_params: Mapping[str, Any] | None = None,
+        request_timeout: float | None = None,
     ) -> None:
+        if request_timeout is not None:
+            timeout = deprecated("AssemblyAISTT", "timeout", "request_timeout", request_timeout)
         model = model or DEFAULT_MODEL
         pro = _is_pro(model)
         for name, seq in (("keyterms", keyterms), ("language_codes", language_codes)):
@@ -399,7 +409,7 @@ class AssemblyAISTT(STT):
         self.token = token
         self._api_key = (api_key or os.environ.get(API_KEY_ENV) or "").strip()
         if not self._api_key and not token:
-            raise ConfigurationError(
+            raise MissingAPIKeyError(
                 f"AssemblyAI needs an API key: pass api_key=... (or token=...) or set {API_KEY_ENV}"
             )
         self.is_pro = pro
@@ -430,7 +440,7 @@ class AssemblyAISTT(STT):
         self.sync_model = sync_model
         self.connect_timeout = connect_timeout
         self.close_timeout = close_timeout
-        self.request_timeout = request_timeout
+        self.timeout = timeout
         self.extra_params = dict(extra_params or {})
         self._http = http_client
         self._owns_http = http_client is None
@@ -485,7 +495,7 @@ class AssemblyAISTT(STT):
 
     def _headers(self) -> dict[str, str]:
         if not self._api_key:
-            raise ConfigurationError(
+            raise MissingAPIKeyError(
                 f"this AssemblyAI request needs an API key (api_key=... or {API_KEY_ENV})"
             )
         return {"Authorization": self._api_key}
@@ -497,7 +507,7 @@ class AssemblyAISTT(STT):
     def _client(self) -> httpx.AsyncClient:
         if self._http is None:
             self._http = httpx.AsyncClient(
-                timeout=httpx.Timeout(self.request_timeout, connect=self.connect_timeout)
+                timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout)
             )
             self._owns_http = True
         return self._http

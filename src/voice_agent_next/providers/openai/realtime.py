@@ -68,6 +68,7 @@ from ...errors import (
     AuthenticationError,
     ConfigurationError,
     EngineError,
+    MissingAPIKeyError,
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
@@ -498,7 +499,7 @@ def _engine_api_key(
         return None
     if required:
         hint = " or ".join(env_names) or "api_key=..."
-        raise ConfigurationError(f"{owner}: no API key; pass api_key=... or set {hint}")
+        raise MissingAPIKeyError(f"{owner}: no API key; pass api_key=... or set {hint}")
     return None
 
 

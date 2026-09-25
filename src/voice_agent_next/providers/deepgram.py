@@ -47,6 +47,7 @@ from ..audio.frame import AudioFrame
 from ..errors import (
     AuthenticationError,
     ConfigurationError,
+    MissingAPIKeyError,
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
@@ -61,6 +62,7 @@ from ..utils.aio import BackgroundTasks, ChanClosed, cancel_and_wait
 from ..utils.clock import now
 from ..utils.ids import new_id
 from ..utils.log import logger
+from ._options import deprecated
 from ._ws import close_ws, ws_connect
 
 __all__ = ["DeepgramSTT", "DeepgramTTS"]
@@ -92,7 +94,7 @@ _MAX_CONNECTION_AGE = 55 * 60.0
 def _resolve_api_key(api_key: str | None) -> str:
     key = (api_key or os.environ.get(API_KEY_ENV) or "").strip()
     if not key:
-        raise ConfigurationError(
+        raise MissingAPIKeyError(
             f"Deepgram needs an API key: pass api_key=... or set {API_KEY_ENV}"
         )
     return key
@@ -787,6 +789,8 @@ class DeepgramTTS(TTS):
             text/audio alignment for truncation, at the cost of one request per sentence).
         base_url: API origin (``https://api.deepgram.com``).
         http_client: an ``httpx.AsyncClient`` for REST requests (created if omitted).
+        timeout: HTTP timeout of REST requests, in seconds. (``request_timeout`` is a
+            deprecated alias.)
         idle_timeout: close pooled WebSocket connections unused for this many seconds.
         clear_timeout: max wait for ``Cleared`` before a connection is dropped instead.
         mip_opt_out, tags, extra_params: passed through as query parameters.
@@ -795,6 +799,11 @@ class DeepgramTTS(TTS):
     """
 
     provider = PROVIDER
+
+    @property
+    def request_timeout(self) -> float:
+        """Deprecated alias of :attr:`timeout`."""
+        return self.timeout
 
     def __init__(
         self,
@@ -808,7 +817,7 @@ class DeepgramTTS(TTS):
         base_url: str = DEFAULT_BASE_URL,
         http_client: httpx.AsyncClient | None = None,
         connect_timeout: float = 10.0,
-        request_timeout: float = 30.0,
+        timeout: float = 30.0,
         idle_timeout: float = 60.0,
         clear_timeout: float = 2.0,
         mip_opt_out: bool | None = None,
@@ -816,7 +825,10 @@ class DeepgramTTS(TTS):
         extra_params: Mapping[str, Any] | None = None,
         clean_text: bool = True,
         normalize: NormalizeOption = None,
+        request_timeout: float | None = None,
     ) -> None:
+        if request_timeout is not None:
+            timeout = deprecated("DeepgramTTS", "timeout", "request_timeout", request_timeout)
         if sample_rate not in _AURA_SAMPLE_RATES:
             raise ConfigurationError(
                 f"Aura supports sample rates {_AURA_SAMPLE_RATES} for linear16, got {sample_rate}"
@@ -834,7 +846,7 @@ class DeepgramTTS(TTS):
         self.speed = speed
         self.base_url = base_url
         self.connect_timeout = connect_timeout
-        self.request_timeout = request_timeout
+        self.timeout = timeout
         self.idle_timeout = idle_timeout
         self.clear_timeout = clear_timeout
         self.mip_opt_out = mip_opt_out
@@ -883,7 +895,7 @@ class DeepgramTTS(TTS):
     def _client(self) -> httpx.AsyncClient:
         if self._http is None:
             self._http = httpx.AsyncClient(
-                timeout=httpx.Timeout(self.request_timeout, connect=self.connect_timeout)
+                timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout)
             )
         return self._http
 

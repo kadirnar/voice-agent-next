@@ -10,7 +10,7 @@ It works with Kyutai's `python -m moshi.server`, the Rust `moshi-backend` and
 from voice_agent_next import Agent, AgentSession
 from voice_agent_next.providers.moshi import MoshiEngine
 
-session = AgentSession(MoshiEngine(url="ws://localhost:8998"))  # or AgentSession("moshi")
+session = AgentSession(MoshiEngine(base_url="ws://localhost:8998"))  # or AgentSession("moshi")
 await session.run(Agent(""), transport)
 
 session = AgentSession("personaplex")  # wss://localhost:8998
@@ -174,6 +174,8 @@ closes. `0x05` messages become recoverable `EngineErrorEvent`s and are kept in
 * `output_audio_tokens` counts Mimi frames (12.5 Hz). `output_text_tokens` counts text
   tokens.
 * `input_audio_tokens` counts the frames heard since the previous response.
+* The server reports no usage: these audio counts are derived from durations, so
+  `tokens_estimated` is `True`.
 
 The connection also exposes `lag` and `max_lag` (input sent minus output received: how far
 the server trails), `server_metadata`, `server_version` and `connections`.

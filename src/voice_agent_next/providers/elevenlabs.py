@@ -47,6 +47,7 @@ from ..audio.wav import wav_bytes
 from ..errors import (
     AuthenticationError,
     ConfigurationError,
+    MissingAPIKeyError,
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
@@ -68,6 +69,7 @@ from ..utils.aio import Chan, ChanClosed, cancel_and_wait
 from ..utils.clock import now
 from ..utils.ids import new_id
 from ..utils.log import logger
+from ._options import deprecated
 from ._ws import body_text, close_ws, raise_reader_error, ws_connect
 
 if TYPE_CHECKING:
@@ -125,7 +127,7 @@ def _resolve_api_key(api_key: str | None) -> str:
     for candidate in (api_key, *(os.environ.get(name) for name in API_KEY_ENV)):
         if candidate and candidate.strip():
             return candidate.strip()
-    raise ConfigurationError(
+    raise MissingAPIKeyError(
         "ElevenLabs needs an API key: pass api_key=... or set ELEVEN_API_KEY "
         "(or ELEVENLABS_API_KEY)"
     )
@@ -1441,10 +1443,15 @@ class ElevenLabsSTT(STT):
         connect_timeout: connection / handshake timeout in seconds.
         close_timeout: how long to wait for the last commit's transcript after the input
             ends.
-        request_timeout: HTTP timeout of :meth:`transcribe`.
+        timeout: HTTP timeout of :meth:`transcribe`. (``request_timeout`` is a deprecated alias.)
     """
 
     provider = "elevenlabs"
+
+    @property
+    def request_timeout(self) -> float:
+        """Deprecated alias of :attr:`timeout`."""
+        return self.timeout
 
     def __init__(
         self,
@@ -1475,8 +1482,11 @@ class ElevenLabsSTT(STT):
         http_client: httpx.AsyncClient | None = None,
         connect_timeout: float = 10.0,
         close_timeout: float = 5.0,
-        request_timeout: float = 60.0,
+        timeout: float = 60.0,
+        request_timeout: float | None = None,
     ) -> None:
+        if request_timeout is not None:
+            timeout = deprecated("ElevenLabsSTT", "timeout", "request_timeout", request_timeout)
         realtime = "realtime" in model
         if realtime and sample_rate not in STT_SAMPLE_RATES:
             raise ConfigurationError(
@@ -1531,7 +1541,7 @@ class ElevenLabsSTT(STT):
         self.keepalive_interval = keepalive_interval
         self.connect_timeout = connect_timeout
         self.close_timeout = close_timeout
-        self.request_timeout = request_timeout
+        self.timeout = timeout
         self._http = http_client
         self._owns_http = http_client is None
 
@@ -1575,7 +1585,7 @@ class ElevenLabsSTT(STT):
 
         if self._http is None:
             self._http = httpx.AsyncClient(
-                timeout=httpx.Timeout(self.request_timeout, connect=self.connect_timeout)
+                timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout)
             )
             self._owns_http = True
         return self._http

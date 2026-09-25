@@ -54,6 +54,9 @@ class TTSCapabilities:
     streaming: bool = False
     """Accepts incremental text input over one connection (native :meth:`TTS.stream`)."""
     word_timestamps: bool = False
+    """Reports word timings on :attr:`SynthesizedAudio.words` (used for word-exact
+    truncation on barge-in). Some local models estimate them from the text length of each
+    synthesized segment rather than aligning them; the cascade uses both the same way."""
 
 
 @dataclass(slots=True)

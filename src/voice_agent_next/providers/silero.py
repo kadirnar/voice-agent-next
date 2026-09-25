@@ -19,6 +19,7 @@ import asyncio
 import dataclasses
 import os
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ from ..utils.deps import require
 from ..utils.download import download
 from ..utils.log import logger
 from ..vad import VAD, VADOptions
+from ._options import deprecated, onnx_providers
 
 __all__ = ["SileroVAD"]
 
@@ -136,8 +138,10 @@ class SileroVAD(VAD):
             Input audio at any rate or channel count is converted by the stream.
         model_path: local Silero v5/v6 ONNX file to use instead of downloading the
             pinned model. ``model`` is then only a label.
-        force_cpu: use ONNX Runtime's CPU execution provider even when an accelerator
-            is available. Keep it on: the model is tiny and runs with batch size 1.
+        device: ``"cpu"`` (default: the model is tiny and runs with batch size 1, keep it),
+            ``"auto"`` (every execution provider onnxruntime offers), a device name
+            (``"cuda"``, ``"coreml"``...) or a list of ONNX Runtime execution providers.
+            (``force_cpu=True``/``False`` is the deprecated form of ``"cpu"``/``"auto"``.)
         options: thresholds and durations (:class:`~voice_agent_next.vad.VADOptions`).
         **option_overrides: individual ``VADOptions`` fields, applied on top of
             ``options``, e.g. ``min_silence_duration=0.3``.
@@ -159,10 +163,14 @@ class SileroVAD(VAD):
         model: str | None = None,
         sample_rate: int = 16_000,
         model_path: str | os.PathLike[str] | None = None,
-        force_cpu: bool = True,
+        device: str | Sequence[str] = "cpu",
         options: VADOptions | None = None,
+        force_cpu: bool | None = None,
         **option_overrides: float,
     ) -> None:
+        if force_cpu is not None:
+            deprecated("SileroVAD", "device", "force_cpu", force_cpu)
+            device = "cpu" if force_cpu else "auto"
         if sample_rate not in _WINDOW_SAMPLES:
             raise ConfigurationError(
                 f"Silero VAD runs at 8000 or 16000 Hz, got sample_rate={sample_rate} "
@@ -182,9 +190,15 @@ class SileroVAD(VAD):
         )
         self._ort = require("onnxruntime", extra="silero")
         self.model_path = Path(model_path).expanduser() if model_path is not None else None
-        self.force_cpu = force_cpu
+        self.device = device
+        self._providers = onnx_providers(device)
         self._session: Any = None
         self._session_lock = threading.Lock()
+
+    @property
+    def force_cpu(self) -> bool:
+        """Deprecated: whether :attr:`device` is the CPU."""
+        return self._providers == ["CPUExecutionProvider"]
 
     def _new_inference(self) -> _SileroInference:
         return _SileroInference(self._get_session(), self.sample_rate)
@@ -225,10 +239,12 @@ class SileroVAD(VAD):
         opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
         opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
         available = list(ort.get_available_providers())
-        if self.force_cpu and "CPUExecutionProvider" in available:
-            providers = ["CPUExecutionProvider"]
-        else:
+        if self._providers is None or (
+            self._providers == ["CPUExecutionProvider"] and "CPUExecutionProvider" not in available
+        ):
             providers = available  # older onnxruntime requires an explicit list
+        else:
+            providers = self._providers
         t0 = now()
         try:
             session = ort.InferenceSession(os.fspath(path), sess_options=opts, providers=providers)

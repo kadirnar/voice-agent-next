@@ -45,6 +45,7 @@ from ..audio.frame import AudioFrame
 from ..errors import (
     AuthenticationError,
     ConfigurationError,
+    MissingAPIKeyError,
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
@@ -383,7 +384,7 @@ class SpeechmaticsSTT(STT):
         self.jwt = jwt
         self._api_key = (api_key or os.environ.get(API_KEY_ENV) or "").strip()
         if not self._api_key and not jwt:
-            raise ConfigurationError(
+            raise MissingAPIKeyError(
                 f"Speechmatics needs an API key: pass api_key=... (or jwt=...) or set {API_KEY_ENV}"
             )
         self.is_agent = agent
@@ -481,7 +482,7 @@ class SpeechmaticsSTT(STT):
         not see your API key: ``SpeechmaticsSTT(jwt=key)``. ``ttl`` is 60-86400 s."""
         _check_range("ttl", ttl, 60, 86_400)
         if not self._api_key:
-            raise ConfigurationError(f"creating a temporary key needs an API key ({API_KEY_ENV})")
+            raise MissingAPIKeyError(f"creating a temporary key needs an API key ({API_KEY_ENV})")
         body: dict[str, Any] = {"ttl": ttl}
         if client_ref:
             body["client_ref"] = client_ref
