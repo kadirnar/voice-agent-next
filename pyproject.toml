@@ -104,6 +104,9 @@ sherpa-onnx = [
   "sherpa-onnx>=1.13.3",
   "sherpa-onnx-core>=1.13.3; platform_machine != 'armv7l'",
 ]
+# --- local speech-to-speech servers ------------------------------------------------
+# Kyutai's Ogg/Opus codec (Rust, bundled libopus): byte-compatible with moshi-server
+moshi = ["sphn>=0.2,<0.3"]
 # --- cloud providers (Deepgram, Cartesia, AssemblyAI, ElevenLabs... use raw WS/HTTP) --
 anthropic = ["anthropic>=0.60"]
 google = ["google-genai>=2.25"]
@@ -113,7 +116,7 @@ webrtc = ["aiortc>=1.9"]
 # --- observability -----------------------------------------------------------------
 otel = ["opentelemetry-api>=1.27"]  # tracing API only: pick your own SDK and exporter
 # --- benchmark ----------------------------------------------------------------------
-bench = ["jiwer>=3.0"]
+bench = ["jiwer>=3.0", "soundfile>=0.12"]  # soundfile: FLAC/OGG test sets (LibriSpeech)
 # --- bundles ------------------------------------------------------------------------
 local = ["voice-agent-next[audio,silero,smart-turn,faster-whisper,kokoro]"]
 cloud = ["voice-agent-next[openai,anthropic,google]"]
@@ -137,8 +140,15 @@ dev = [
   "mypy>=1.11",
   "types-PyYAML>=6.0",
   "soxr>=0.5",
+  "sphn>=0.2,<0.3",  # Ogg/Opus for the Moshi fake-server tests (extra `moshi`)
   "opentelemetry-api>=1.27",  # tracing tests (in-memory span exporter)
   "opentelemetry-sdk>=1.27",
+]
+# documentation site: `uv run --group docs mkdocs serve` (mkdocs.yml)
+docs = [
+  "mkdocs>=1.6,<2",
+  "mkdocs-material>=9.5",
+  "mkdocstrings[python]>=0.26",
 ]
 
 [tool.uv]

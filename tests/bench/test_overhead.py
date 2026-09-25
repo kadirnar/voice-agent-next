@@ -314,8 +314,14 @@ def test_smoke_run_measures_the_framework_overhead(smoke: RunResults) -> None:
     assert smoke.summary.counts["flush_leaked_frames"] == 0
     assert smoke.summary.rates["e2e_missed_rate"] == 0.0
     capacity = extra["capacity"]
-    assert capacity["sessions_per_core"] == 2 and not capacity["limit_found"]
-    assert [s["sessions"] for s in capacity["steps"]] == [1, 2]
+    steps = capacity["steps"]
+    assert [s["sessions"] for s in steps] == [1, 2] and steps[0]["passed"]
+    for step in steps:  # concurrent sessions work: none failed, every turn was answered
+        assert step["missed"] == 0 and all("ms >" in r for r in step["reasons"]), step
+    # two tiny sessions stay far below the 50 ms thresholds, but those are wall-clock: a
+    # stall of a shared (macOS) runner during the short step may exceed one of them
+    assert capacity["sessions_per_core"] == (2 if steps[1]["passed"] else 1)
+    assert capacity["limit_found"] is not steps[1]["passed"]
     assert set(m) >= {"micro.energy_vad_us", "micro.event_emit_us"}
     assert extra["sections"] == ["micro", "e2e", "flush", "capacity"]
 

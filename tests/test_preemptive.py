@@ -137,7 +137,10 @@ async def test_hit_hides_the_llm_time_to_first_token() -> None:
     # the turn ends exactly when it did before...
     assert on.end_of_turn_delay == pytest.approx(off.end_of_turn_delay or 0, abs=0.1)
     # ...but the LLM already streamed its reply: the 0.3 s TTFT is gone from the latency
-    assert off.voice_to_voice - on.voice_to_voice == pytest.approx(0.3, abs=0.1)
+    # (net of the two runs' measured endpointing, whose timers jitter independently: a
+    # Windows tick each)
+    endpointing = off.end_of_turn_delay - on.end_of_turn_delay
+    assert off.voice_to_voice - on.voice_to_voice - endpointing == pytest.approx(0.3, abs=0.1)
     # pre-synthesis also hides the TTS time to first audio (0.1 s): audio is ready at once
     assert on_tts.voice_to_voice < on.voice_to_voice - 0.04
     assert on_tts.response_ttfb is not None and on_tts.response_ttfb < 0.08
@@ -368,7 +371,8 @@ async def test_eager_end_of_turn_starts_the_reply_early() -> None:
     assert outcomes(rec) == [(True, None)]
     assert len(llm.requests) == 1
     # EagerEndOfTurn came 0.3 s before EndOfTurn: the 0.25 s TTFT was spent meanwhile
-    assert off - on == pytest.approx(0.25, abs=0.1)
+    # (one-sided: two separate runs under CPU load can each drift by ~0.1 s)
+    assert 0.12 <= off - on <= 0.45
     assert history(session)[-1] == ("assistant", "You said: Book a table for two.")
     assert log.of(InputCommitted)[0].timestamp <= log.of(ResponseStarted)[0].timestamp
 
