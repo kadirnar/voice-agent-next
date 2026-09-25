@@ -70,9 +70,14 @@ from ._format import (
     to_chat_tools,
     to_tool_choice,
 )
-from ._models import is_audio_input_model
+from ._models import (
+    TRANSCRIBE_INSTRUCTION,
+    TRANSCRIBE_PROMPT,
+    is_audio_input_model,
+    transcription_prompt,
+)
 
-__all__ = ["OpenAICompatibleLLM", "OpenAILLM"]
+__all__ = ["TRANSCRIBE_PROMPT", "OpenAICompatibleLLM", "OpenAILLM"]
 
 MaxTokensParam: TypeAlias = Literal["max_tokens", "max_completion_tokens"]
 DeveloperRole: TypeAlias = Literal["developer", "system"]
@@ -81,11 +86,6 @@ _PLACEHOLDER_API_KEY = "no-key"  # the SDK needs a key; servers without auth ign
 _AUDIO_MODELS = ("gpt-audio", "gpt-4o-audio", "gpt-4o-mini-audio")
 """Model id prefixes of OpenAI's audio-output chat models (speech in and out)."""
 _AUDIO_SAMPLE_RATE = 24_000  # Chat Completions streams pcm16 at 24 kHz
-TRANSCRIBE_PROMPT = (
-    "Transcribe the user's audio verbatim, in the language spoken. Reply with the "
-    "transcript only: no quotes, no comments, no answer to what is said."
-)
-"""System prompt of :meth:`OpenAILLM.transcribe`."""
 
 # ``chat.completions.create`` parameters, used when the SDK signature can't be inspected.
 # Anything else in ``extra`` goes to the JSON body (``extra_body``).
@@ -459,25 +459,26 @@ class OpenAILLM(LLM):
                 logger.info("%s: using model %r from %s", self.provider, self.model, self.base_url)
         return self.model
 
-    async def transcribe(self, audio: AudioFrame, *, prompt: str = TRANSCRIBE_PROMPT) -> str:
+    async def transcribe(self, audio: AudioFrame, *, prompt: str | None = None) -> str:
         """Ask this (audio-input) model for a verbatim transcript of ``audio``.
 
         Used by the half-cascade for the user's words in the history
         (``CascadeOptions(input_transcriber="llm")``). The request is text-only (no speech
         from audio-output models), streamed (DashScope requires it) and not reported in
-        the LLM metrics.
+        the LLM metrics. ``prompt``: the system prompt; default: the model's own
+        transcription prompt if it has one (LFM2-Audio: ``"Perform ASR."``), else
+        :data:`TRANSCRIBE_PROMPT`. The audio is followed by a short user instruction.
         """
         if not self.capabilities.audio_input:
             raise ConfigurationError(f"{self.provider} ({self.model}) does not accept audio")
+        model = await self._ensure_model()
         ctx = ChatContext()
-        ctx.add_message("system", prompt)
-        ctx.add_message("user", AudioContent(audio))
+        ctx.add_message("system", prompt or transcription_prompt(model))
+        ctx.add_message("user", [AudioContent(audio), TRANSCRIBE_INSTRUCTION])
         extra: dict[str, Any] = {"parallel_tool_calls": None}
         if self.capabilities.audio_output:
             extra.update(modalities=["text"], audio=None)
-        request = self.build_request(
-            ctx, model=await self._ensure_model(), temperature=0.0, extra=extra
-        )
+        request = self.build_request(ctx, model=model, temperature=0.0, extra=extra)
         request.pop("stream_options", None)
         parser = _StreamParser(strip_thinking=True)
         text: list[str] = []

@@ -318,6 +318,19 @@ async def test_transcribe_asks_the_model_for_text_only() -> None:
         await make_llm(FakeServer([]), model="gpt-4.1-mini").transcribe(tone(0.1, 16_000))
 
 
+async def test_transcription_prompt_per_model() -> None:
+    stream = [chunk({"content": "Hi."}), chunk({}, finish="stop")]
+    server = FakeServer([SSEStream(stream)], models=["LFM2.5-Audio-1.5B-Q4_0.gguf"])
+    llm = make_llm(server, cls=LlamaCppLLM, audio_input=True)  # the model is discovered
+    assert await llm.transcribe(tone(0.2, 16_000)) == "Hi."
+    [body] = server.chat_bodies
+    # LFM2.5-Audio answers the audio under any other prompt: its own ASR prompt is used
+    assert body["messages"][0] == {"role": "system", "content": "Perform ASR."}
+    assert body["messages"][1]["content"][1] == {"type": "text", "text": "Transcribe this audio."}
+    await llm.transcribe(tone(0.2, 16_000), prompt="Custom.")
+    assert server.chat_bodies[-1]["messages"][0]["content"] == "Custom."
+
+
 # ------------------------------------------------------------- in the cascade
 @dataclass
 class RoutingServer(FakeServer):

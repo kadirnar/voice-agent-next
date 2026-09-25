@@ -13,7 +13,13 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["AUDIO_INPUT_MODELS", "is_audio_input_model"]
+__all__ = [
+    "AUDIO_INPUT_MODELS",
+    "TRANSCRIBE_INSTRUCTION",
+    "TRANSCRIBE_PROMPT",
+    "is_audio_input_model",
+    "transcription_prompt",
+]
 
 AUDIO_INPUT_MODELS: tuple[str, ...] = (
     # OpenAI Chat Completions audio models (audio in and out)
@@ -48,3 +54,28 @@ _PATTERN = re.compile("|".join(f"(?:{p})" for p in AUDIO_INPUT_MODELS), re.IGNOR
 def is_audio_input_model(model: str | None) -> bool:
     """Whether ``model`` is a known audio-input chat model."""
     return bool(model) and _PATTERN.search(model or "") is not None
+
+
+TRANSCRIBE_PROMPT = (
+    "You are a speech recognizer. Transcribe the user's audio verbatim, in the language "
+    "spoken. Reply with the transcript only: no quotes, no comments, and never an answer "
+    "to what is said."
+)
+"""Default system prompt of ``OpenAILLM.transcribe()``."""
+TRANSCRIBE_INSTRUCTION = "Transcribe this audio."
+"""User instruction sent after the audio by ``OpenAILLM.transcribe()``."""
+
+TRANSCRIBE_PROMPTS: tuple[tuple[str, str], ...] = (
+    # LFM2/2.5-Audio answer the audio under any other system prompt (measured on the
+    # Q4_0 GGUF through llama-server); "Perform ASR." is their trained ASR mode
+    (r"lfm2(\.5)?-audio", "Perform ASR."),
+)
+"""(model id pattern, system prompt) for models with their own transcription prompt."""
+
+
+def transcription_prompt(model: str | None) -> str:
+    """The system prompt that makes ``model`` transcribe instead of answer."""
+    for pattern, prompt in TRANSCRIBE_PROMPTS:
+        if model and re.search(pattern, model, re.IGNORECASE):
+            return prompt
+    return TRANSCRIBE_PROMPT
