@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Collection, Coroutine
 from typing import Any, Generic, TypeVar
 
 from .log import logger
@@ -154,10 +154,11 @@ class BackgroundTasks:
     def __len__(self) -> int:
         return len(self._tasks)
 
-    async def cancel_all(self) -> None:
-        """Cancel every task except the calling one (a task may cancel its siblings)."""
+    async def cancel_all(self, *, exclude: Collection[asyncio.Task[Any]] = ()) -> None:
+        """Cancel every task except the calling one (a task may cancel its siblings) and
+        those in ``exclude``."""
         current = asyncio.current_task()
-        others = [t for t in self._tasks if t is not current]
+        others = [t for t in self._tasks if t is not current and t not in exclude]
         await cancel_and_wait(*others)
         self._tasks.difference_update(others)
 

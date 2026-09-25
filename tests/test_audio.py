@@ -241,7 +241,12 @@ def test_stream_resampler_handles_rate_and_channel_changes() -> None:
     out = srs.push(stereo)
     assert out.channels == 1 and out.sample_rate == 16_000
     same = tone(440, 0.1, 16_000)
+    # the 48 kHz filter tail is emitted first (it used to be left in the stale
+    # resampler and come out *after* newer audio on the next flush)
+    switched = srs.push(same)
+    assert switched.data.endswith(same.data)
     assert srs.push(same) is same
+    assert not srs.flush()
 
 
 # --------------------------------------------------------------------------------- WAV

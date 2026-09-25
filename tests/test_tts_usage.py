@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 
 import pytest
 
@@ -41,6 +42,12 @@ async def _stream(tts: TTS, text: str) -> float:
     return duration
 
 
+async def _assert_adapter(tts: TTS) -> None:
+    stream = tts.stream()
+    assert isinstance(stream, SentenceStreamAdapter)
+    await stream.aclose()
+
+
 def _pushed(text: str) -> int:
     return sum(len(w) + 1 for w in text.split(" "))
 
@@ -66,7 +73,7 @@ async def test_native_stream_reports_usage_once() -> None:
 async def test_sentence_adapter_reports_usage_once() -> None:
     """The per-sentence ``synthesize()`` streams stay quiet: only the adapter reports."""
     tts = MockTTS(chars_per_second=200)
-    assert isinstance(tts.stream(), SentenceStreamAdapter)
+    await _assert_adapter(tts)
     got, usage = _record(tts)
     duration = await _stream(tts, TEXT)
     assert len(tts.requests) == 3  # three sentences were synthesized...
@@ -86,7 +93,7 @@ async def test_fallback_synthesis_reports_the_serving_provider_once() -> None:
 
 async def test_fallback_sentence_adapter_reports_usage_once() -> None:
     fb = FallbackTTS([MockTTS(model="a", chars_per_second=200), MockTTS(model="b")])
-    assert isinstance(fb.stream(), SentenceStreamAdapter)
+    await _assert_adapter(fb)
     got, usage = _record(fb)
     await _stream(fb, TEXT)
     assert len(got) == 1
@@ -114,3 +121,20 @@ async def test_cascade_session_counts_tts_characters_once(streaming: bool) -> No
     assert len(got) == 1
     assert session.usage.tts_characters == got[0].characters
     assert len(TEXT) <= session.usage.tts_characters <= len(TEXT) + 2
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_abandoned_stream_reports_nothing_when_garbage_collected(streaming: bool) -> None:
+    """A stream dropped without ``aclose()`` is garbage-collected at a random time (in
+    CI: in the middle of the next request). It must not report then — that was a second,
+    bogus ``TTSMetrics`` (``ttfb=None``) landing in another request's listeners."""
+    tts = MockTTS(streaming=streaming, chars_per_second=200)
+    tts.stream()  # dropped on the floor while its task is pending
+    for _ in range(5):
+        await asyncio.sleep(0)  # let its tasks park on their (unreachable) input channels
+    got, _usage = _record(tts)
+    gc.collect()  # what the collector did at an unlucky moment in the flaky run
+    assert got == []
+    duration = await _stream(tts, TEXT)  # the next request still reports exactly once
+    assert len(got) == 1 and got[0].characters == _pushed(TEXT)
+    assert got[0].audio_duration == pytest.approx(duration, abs=0.01)
