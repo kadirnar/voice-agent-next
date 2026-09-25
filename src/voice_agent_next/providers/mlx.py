@@ -8,12 +8,15 @@ Hugging Face repository id or a local directory with ``config.json`` and
 ``model.safetensors``. Whisper models run through :mod:`~voice_agent_next.providers.mlx_whisper`
 (``mlx_whisper/large-v3-turbo``).
 
-Streaming uses parakeet-mlx's cache-aware ``StreamingParakeet`` (local attention with a
-rotating key/value cache): audio is fed every ``chunk_duration`` seconds, finalized and
-draft tokens come back as interim transcripts, and :meth:`STTStream.flush` (the cascade
-calls it at the end of the user's turn) returns the final transcript of the utterance at
-once — no second pass over the audio. Each flushed utterance starts a new recognizer
-state. Batch calls (:meth:`STT.transcribe`) run the full model over the utterance.
+Streaming re-decodes the utterance so far every ``chunk_duration`` seconds of speech (an
+interim transcript), paced by the cost of the previous step and paused while the input is
+silent, so that the GPU is idle when :meth:`STTStream.flush` arrives (the cascade calls it
+at the end of the user's turn): the final transcript is then one pass over the utterance
+with full attention, the same as batch recognition. On an M1 that is about 100 ms for a
+3-second turn with the 110M model. ``incremental=True`` streams with parakeet-mlx's
+cache-aware ``StreamingParakeet`` instead (local attention, rotating key/value cache):
+compute per step stays bounded for utterances of minutes (dictation), at the price of a
+slower and slightly less accurate final transcript for short turns.
 
 MLX needs macOS on Apple silicon: install with ``pip install 'voice-agent-next[mlx]'``.
 Every MLX call runs on one shared worker thread (see :mod:`._mlx`). See
@@ -50,10 +53,12 @@ _EXTRA = "mlx"
 _SAMPLE_RATE = 16_000
 _FILES = ("config.json", "model.safetensors")
 _DTYPES = ("bfloat16", "float16", "float32")
-_MIN_TAIL = _SAMPLE_RATE // 20
+_MIN_AUDIO = _SAMPLE_RATE // 20
+"""Less audio than this (50 ms, a few mel windows) is not decoded."""
 _PACING = 2.0
 """Queue at least this many times the last step's duration of audio between steps."""
-"""Shorter audio left at a flush is not fed (50 ms: a few mel windows)."""
+_SILENCE_RMS = 0.003
+"""Pending audio quieter than this (about -50 dBFS) does not trigger an interim step."""
 
 DEFAULT_MODEL = "parakeet-tdt-0.6b-v3"
 
@@ -137,16 +142,20 @@ class ParakeetMLXSTT(STT):
             repository id or a local model directory.
         language: reported on transcripts. Parakeet v3 detects the language itself; the
             other models are English-only.
-        streaming: ``True`` streams with ``StreamingParakeet`` (interim results, final
-            transcript at once on :meth:`~voice_agent_next.stt.STTStream.flush`);
-            ``False`` declares a batch recognizer, which the cascade wraps in a
-            :class:`~voice_agent_next.stt.StreamAdapter` (one full pass per utterance).
+        streaming: ``True`` (default) declares a streaming recognizer: interim results
+            while the user speaks, the final transcript on
+            :meth:`~voice_agent_next.stt.STTStream.flush`. ``False`` declares a batch
+            recognizer, which the cascade wraps in a
+            :class:`~voice_agent_next.stt.StreamAdapter` (VAD-cut utterances).
         interim_results: emit ``INTERIM_TRANSCRIPT`` events while streaming.
-        chunk_duration: seconds of audio fed to the streaming recognizer at a time. Each
-            step re-encodes the attention context, so tiny chunks cost more GPU time.
-        context_size: ``(left, right)`` attention context of streaming, in encoder frames
-            (80 ms each).
-        depth: encoder layers whose cache is carried exactly across chunks (streaming).
+        chunk_duration: seconds of new speech between two interim steps (at least; a step
+            that takes longer than half of it spaces the next one out).
+        incremental: stream with parakeet-mlx's cache-aware ``StreamingParakeet``
+            (bounded compute for very long utterances) instead of re-decoding the
+            utterance.
+        context_size: ``(left, right)`` attention context of incremental streaming, in
+            encoder frames (80 ms each).
+        depth: encoder layers whose cache is carried exactly across chunks (incremental).
         dtype: ``"bfloat16"`` (default), ``"float16"`` or ``"float32"``.
         beam_size: 1 is greedy decoding (lowest latency); more runs beam search.
         local_files_only: never download; also implied by ``VAN_OFFLINE=1``.
@@ -162,6 +171,7 @@ class ParakeetMLXSTT(STT):
         streaming: bool = True,
         interim_results: bool = True,
         chunk_duration: float = 0.32,
+        incremental: bool = False,
         context_size: tuple[int, int] | Sequence[int] = (256, 256),
         depth: int = 1,
         dtype: str = "bfloat16",
@@ -198,6 +208,7 @@ class ParakeetMLXSTT(STT):
             language=language,
         )
         self.chunk_duration = chunk_duration
+        self.incremental = incremental
         self.context_size = (left, right)
         self.depth = depth
         self.dtype = dtype
@@ -355,23 +366,32 @@ def _to_transcript(result: Any, offset: float, language: str | None) -> Transcri
 
 
 class _ParakeetStream(STTStream):
-    """One ``StreamingParakeet`` per utterance; a flush finalizes it and starts the next."""
+    """Interim steps while the user speaks; a flush finalizes the utterance.
+
+    Re-decoding (default): the utterance's audio is kept and decoded whole at every step.
+    Incremental: one ``StreamingParakeet`` per utterance is fed the new audio.
+    """
 
     def __init__(self, stt: ParakeetMLXSTT, *, language: str | None) -> None:
         self._parakeet = stt
+        self._incremental = stt.incremental
         self._streamer: Any = None
+        self._utterance: list[npt.NDArray[np.float32]] = []
+        """Audio of the current utterance (re-decoding)."""
         self._pending: list[npt.NDArray[np.float32]] = []
         self._pending_samples = 0
+        self._voiced = False
+        """The pending audio (re-decoding: the utterance) has more than silence."""
         self._offset = 0
         """Input samples before the current utterance."""
         self._fed = 0
-        """Samples fed into the current utterance."""
+        """Samples of the current utterance taken from the input."""
         self._segment_id = new_id("seg_")
         self._partial = ""
         self._speaking = False
         self._chunk = max(1, round(stt.chunk_duration * _SAMPLE_RATE))
         self._step_time = 0.0
-        """Duration of the last streaming step on the MLX thread (seconds)."""
+        """Duration of the last interim step on the MLX thread (seconds)."""
         super().__init__(stt, language=language)
 
     # -------------------------------------------------------------- event loop
@@ -398,10 +418,13 @@ class _ParakeetStream(STTStream):
                     else:
                         assert isinstance(nxt, AudioFrame)
                         self._queue(nxt)
-                if self._pending_samples >= self._threshold or (flush and self._pending):
-                    self._update(await _mlx.WORKER.run(self._feed_sync, flush))
                 if flush:
                     self._finish(await _mlx.WORKER.run(self._finalize_sync))
+                elif self._pending_samples >= self._threshold:
+                    if self._incremental or self._pending_voiced():
+                        self._update(await _mlx.WORKER.run(self._step_sync))
+                    else:  # silence: no step, so the GPU is free when the flush comes
+                        self._take_pending()
         finally:
             if self._streamer is not None:
                 self._streamer = None
@@ -410,15 +433,32 @@ class _ParakeetStream(STTStream):
     @property
     def _threshold(self) -> int:
         """Samples to queue before the next step: ``chunk_duration``, or more when a step
-        takes longer than that. Every step re-encodes the right-context window, so this keeps
-        the MLX thread at most about half busy: a flush then rarely waits for a step
-        in flight, and the final transcript costs one step."""
+        takes longer than half of that, so that the MLX thread is at most about half busy
+        and a flush rarely waits for a step in flight."""
         return max(self._chunk, round(self._step_time * _PACING * _SAMPLE_RATE))
 
     def _queue(self, frame: AudioFrame) -> None:
         samples = frame.to_float32()
         self._pending.append(samples)
         self._pending_samples += len(samples)
+
+    def _pending_voiced(self) -> bool:
+        return any(
+            p.size and float(np.sqrt(np.mean(np.square(p)))) >= _SILENCE_RMS for p in self._pending
+        )
+
+    def _take_pending(self) -> npt.NDArray[np.float32]:
+        """Move the pending audio into the utterance; returns it."""
+        if self._pending_voiced():
+            self._voiced = True
+        pending, self._pending, self._pending_samples = self._pending, [], 0
+        if not pending:
+            return np.zeros(0, dtype=np.float32)
+        samples = pending[0] if len(pending) == 1 else np.concatenate(pending)
+        self._fed += len(samples)
+        if not self._incremental:
+            self._utterance.append(samples)
+        return samples
 
     def _update(self, result: Any) -> None:
         if result is None:
@@ -464,36 +504,55 @@ class _ParakeetStream(STTStream):
         return self._offset / _SAMPLE_RATE
 
     # ------------------------------------------------------------ worker thread
-    def _feed_sync(self, final: bool) -> Any:
-        """Feed the queued audio; returns the running result (finalized + draft tokens)."""
-        pending, self._pending, self._pending_samples = self._pending, [], 0
-        samples = pending[0] if len(pending) == 1 else np.concatenate(pending)
-        stt = self._parakeet
-        if final and len(samples) < _MIN_TAIL:
-            # a few ms left at a flush: too short for a mel frame, and silent anyway
-            self._fed += len(samples)
-            return None
+    def _step_sync(self) -> Any:
+        """One interim step; returns the utterance's running result."""
+        t0 = now()
+        samples = self._take_pending()
         try:
-            t0 = now()
-            if self._streamer is None:
-                self._streamer = stt._open_streamer()
-            self._streamer.add_audio(stt._audio(samples))
-            self._fed += len(samples)
-            result = self._streamer.result
-            self._step_time = now() - t0
-            return result
+            result = self._feed(samples) if self._incremental else self._decode()
         except Exception as exc:
             raise _mlx.map_error(exc, _PROVIDER, "streaming recognition") from exc
+        self._step_time = now() - t0
+        return result
+
+    def _decode(self) -> Any:
+        """Decode the whole utterance (re-decoding mode); ``None`` if there is none."""
+        audio = self._utterance
+        total = sum(len(a) for a in audio)
+        if total < _MIN_AUDIO:
+            return None
+        samples = audio[0] if len(audio) == 1 else np.concatenate(audio)
+        self._utterance = [samples]
+        stt = self._parakeet
+        return stt._generate(stt._ensure_model(), samples)
+
+    def _feed(self, samples: npt.NDArray[np.float32]) -> Any:
+        """Feed new audio to the utterance's ``StreamingParakeet`` (incremental mode)."""
+        if len(samples) < _MIN_AUDIO:  # a few ms left at a flush: too short for a mel frame
+            return None if self._streamer is None else self._streamer.result
+        if self._streamer is None:
+            self._streamer = self._parakeet._open_streamer()
+        self._streamer.add_audio(self._parakeet._audio(samples))
+        return self._streamer.result
 
     def _finalize_sync(self) -> Any:
-        """The utterance's result; the next audio starts a new recognizer state."""
-        streamer, self._streamer = self._streamer, None
-        if streamer is None:
-            return None
+        """The utterance's final result; the next audio starts a new utterance."""
+        samples = self._take_pending()
+        voiced, self._voiced = self._voiced, False
         try:
-            return streamer.result
+            if self._incremental:
+                result = self._feed(samples)
+                if self._streamer is not None:
+                    self._streamer = None
+                    self._parakeet._close_streamer()
+                return result
+            if not voiced:  # only silence (a VAD false alarm): nothing to decode
+                return None
+            return self._decode()
+        except Exception as exc:
+            raise _mlx.map_error(exc, _PROVIDER, "finalizing a transcript") from exc
         finally:
-            self._parakeet._close_streamer()
+            self._utterance = []
 
 
 for _name, _info in MODELS.items():

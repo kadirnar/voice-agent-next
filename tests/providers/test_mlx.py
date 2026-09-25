@@ -7,6 +7,7 @@ Apple silicon.
 
 from __future__ import annotations
 
+import asyncio
 import math
 from typing import Any
 
@@ -189,8 +190,8 @@ async def test_load_errors_are_mapped(mlx_fakes: MLXFakes) -> None:
 
 
 # ------------------------------------------------------------- parakeet streaming
-async def test_streaming_utterances(mlx_fakes: MLXFakes) -> None:
-    stt = create("stt", "mlx", chunk_duration=0.32)
+async def test_incremental_streaming_utterances(mlx_fakes: MLXFakes) -> None:
+    stt = create("stt", "mlx", chunk_duration=0.32, incremental=True)
     metrics: list[STTMetrics] = []
     stt.on("metrics", metrics.append)
     stream = stt.stream()
@@ -253,7 +254,7 @@ async def test_streaming_utterances(mlx_fakes: MLXFakes) -> None:
 
 
 async def test_concurrent_streams_share_local_attention(mlx_fakes: MLXFakes) -> None:
-    stt = create("stt", "mlx")
+    stt = create("stt", "mlx", incremental=True)
     a, b = stt.stream(), stt.stream()
     for frame in chunks(speech(0.4)):
         a.push_audio(frame)
@@ -304,7 +305,7 @@ async def test_no_interim_results_when_disabled(mlx_fakes: MLXFakes) -> None:
 
 
 async def test_closing_a_stream_mid_utterance_restores_attention(mlx_fakes: MLXFakes) -> None:
-    stt = create("stt", "mlx")
+    stt = create("stt", "mlx", incremental=True)
     stream = stt.stream()
     for frame in chunks(speech(0.7)):
         stream.push_audio(frame)
@@ -370,4 +371,80 @@ async def test_streaming_steps_pace_themselves(mlx_fakes: MLXFakes) -> None:
     assert stream._threshold == 5120  # type: ignore[attr-defined]
     stream._step_time = 0.4  # type: ignore[attr-defined]
     assert stream._threshold == 12_800  # type: ignore[attr-defined]  # 2 x 0.4 s of audio
+    await stream.aclose()
+
+
+async def _next_interim(stream: Any, events: list[STTEvent]) -> str:
+    async for ev in stream:
+        events.append(ev)
+        if ev.type == STTEventType.INTERIM_TRANSCRIPT:
+            return ev.text
+    raise AssertionError("stream ended")
+
+
+async def test_streaming_redecodes_the_utterance(mlx_fakes: MLXFakes) -> None:
+    stt = create("stt", "mlx", chunk_duration=0.32)
+    metrics: list[STTMetrics] = []
+    stt.on("metrics", metrics.append)
+    stream = stt.stream()
+    events: list[STTEvent] = []
+    frames = chunks(speech(1.3))
+    interims = []
+    for i in range(4):  # 16 frames of 20 ms = one 0.32 s step each
+        for frame in frames[16 * i : 16 * (i + 1)]:
+            stream.push_audio(frame)
+        interims.append(await _next_interim(stream, events))
+    assert interims == ["Hello", "Hello world,", "Hello world, this", "Hello world, this is"]
+    for frame in frames[64:]:
+        stream.push_audio(frame)
+    stream.flush()
+    for frame in chunks(speech(0.7)):
+        stream.push_audio(frame)
+    stream.end_input()
+    events += await drain(stream)
+    await stream.aclose()
+
+    finals = [e for e in events if e.type == STTEventType.FINAL_TRANSCRIPT]
+    assert [f.text for f in finals] == ["Hello world, this is", "Hello world,"]
+    # every step decodes the whole utterance so far; the final one includes the tail
+    assert mlx_fakes.generated[:6] == [8000, 5120, 10240, 15360, 20480, 20800]
+    assert mlx_fakes.generated[-1] == 11200
+    assert finals[1].transcript is not None and finals[1].transcript.words
+    assert finals[1].transcript.words[0].start == pytest.approx(1.3)
+    # full attention: no StreamingParakeet, no attention switch
+    assert mlx_fakes.streamers == [] and mlx_fakes.attention == []
+    assert len([m for m in metrics if m.streamed]) >= 1
+    assert mlx_fakes.threads == {"mlx-test_0"}
+
+
+async def test_silence_does_not_trigger_steps(mlx_fakes: MLXFakes) -> None:
+    stt = create("stt", "mlx", chunk_duration=0.32)
+    stream = stt.stream()
+    events: list[STTEvent] = []
+    frames = chunks(speech(0.64))
+    for frame in frames[:16]:
+        stream.push_audio(frame)
+    await _next_interim(stream, events)
+    for frame in frames[16:]:
+        stream.push_audio(frame)
+    await _next_interim(stream, events)
+    for frame in chunks(AudioFrame.silence(0.96, 16_000)):  # the user stopped talking
+        stream.push_audio(frame)
+    await asyncio.sleep(0.05)
+    stream.flush()
+    async for ev in stream:
+        if ev.type == STTEventType.FINAL_TRANSCRIPT:
+            assert ev.text == "Hello world, this is a"  # 1.6 s decoded
+            break
+    assert mlx_fakes.generated == [8000, 5120, 10240, 25600]  # no step on the silence
+
+    # an utterance of only silence (a VAD false alarm) is not decoded at all
+    for frame in chunks(AudioFrame.silence(1.0, 16_000)):
+        stream.push_audio(frame)
+    stream.flush()
+    async for ev in stream:
+        if ev.type == STTEventType.FINAL_TRANSCRIPT:
+            assert ev.text == ""
+            break
+    assert len(mlx_fakes.generated) == 4
     await stream.aclose()
