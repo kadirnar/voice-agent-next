@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
-import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -263,9 +262,9 @@ async def test_session_recording_aligns_user_and_agent_audio(tmp_path: Path) -> 
 
 
 async def test_a_stalled_event_loop_does_not_stretch_the_user_channel(tmp_path: Path) -> None:
-    # the loop blocks for 0.3 s mid-utterance (a loaded CI runner did this on its own):
-    # the frames queued meanwhile arrive late and at once, and are still recorded as
-    # the continuous 0.6 s of speech they were
+    # the loop blocks for 0.3 s in the middle of a 1 s utterance (a loaded CI runner did
+    # this on its own): the frames queued meanwhile arrive late and at once, and are still
+    # recorded as the continuous speech they were
     session = make_session("native", transcripts=["hello"], responses=["Hi."], record=tmp_path)
     transport = LoopbackTransport(realtime_playout=True)
     await session.start(Agent("x"), transport)
@@ -276,20 +275,25 @@ async def test_a_stalled_event_loop_does_not_stretch_the_user_channel(tmp_path: 
     stalled: list[float] = []
 
     def stall() -> None:
-        time.sleep(0.3)
+        # busy-wait: time.sleep may overshoot by 0.1 s+ on macOS, and a stall that
+        # outlasts the utterance would leave the source itself restarting late
+        end = now() + 0.3
+        while now() < end:
+            pass
         stalled.append(now())
 
     async with LoopLag() as lag:
         asyncio.get_running_loop().call_later(0.2, stall)
-        await transport.play_user_audio(synth_speech(0.6, 16_000))
+        await transport.play_user_audio(synth_speech(1.0, 16_000))
         await transport.play_user_audio(AudioFrame.silence(0.6, 16_000))
     await session.aclose()
+    assert stalled[0] - spoke_at < 0.9  # the source caught up before the utterance ended
     user, _, rate = channels(recorder.wav_path)
     u0, u1 = active(user, rate)
     assert u0 == pytest.approx(spoke_at - recorder.origin, abs=TOL)
     # what is left of the pause: up to _BACKLOG, plus how late the frames after the stall
     # were produced (a loaded runner), which reads as audio arriving on time
-    assert u1 - u0 == pytest.approx(0.6, abs=0.06 + lag.max_since(stalled[0]))
+    assert u1 - u0 == pytest.approx(1.0, abs=0.06 + lag.max_since(stalled[0]))
 
 
 async def test_barge_in_truncates_the_recorded_agent_audio(tmp_path: Path) -> None:
