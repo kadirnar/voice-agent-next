@@ -964,7 +964,7 @@ async def test_per_session_engine_factory_and_session_defaults() -> None:
     assert built[0].connections[0].options.voice == "alloy"
 
 
-async def test_engine_failure_is_reported() -> None:
+async def test_engine_failure_is_reported(caplog: pytest.LogCaptureFixture) -> None:
     class Broken(MockEngine):
         async def connect(self, options: EngineOptions) -> EngineConnection:
             raise ConnectionRefusedError("model server is down")
@@ -974,7 +974,11 @@ async def test_engine_failure_is_reported() -> None:
         await wait_for(lambda: c.errors())
         error = c.errors()[0]
         assert (error["type"], error["code"]) == ("server_error", "engine_unavailable")
-        assert "model server is down" in error["message"]
+        # a generic message with a correlation id; the details are only in the log
+        assert "model server is down" not in json.dumps(error)
+        (error_id,) = re.findall(r"err_[0-9a-f]+", error["message"])
+        logged = [r.getMessage() for r in caplog.records if error_id in r.getMessage()]
+        assert logged and "model server is down" in logged[0]
         assert c._reader is not None
         await asyncio.wait_for(c._reader, 5)
         assert c.ws is not None and c.ws.close_code == 1011

@@ -3,6 +3,7 @@
 Server + browser demo (the mock engine by default: offline, no API keys)::
 
     python examples/websocket_agent.py serve        # then open http://127.0.0.1:8765/
+    python examples/websocket_agent.py serve --host 0.0.0.0 --allowed-origin https://agent.lan:8765
     python examples/websocket_agent.py serve --engine openai/gpt-realtime
     python examples/websocket_agent.py serve --stt deepgram/nova-3 --llm openai/gpt-4.1-mini \\
         --tts cartesia/sonic-2 --vad silero
@@ -111,6 +112,9 @@ async def run_server(args: argparse.Namespace) -> None:
         host=args.host,
         port=args.port,
         max_sessions=args.max_sessions,
+        # browser pages from other origins than this machine's are refused (HTTP 403): the
+        # demo page opened from another host name needs its origin listed here
+        allowed_origins=args.allowed_origin,
         process_request=serve_demo_page(WEB_PAGE.read_text(encoding="utf-8")),
     )
     web_host = "127.0.0.1" if args.host in ("0.0.0.0", "::", "") else args.host
@@ -245,7 +249,14 @@ def main() -> None:
     srv.add_argument("--vad", help="cascade VAD, e.g. silero or energy")
     srv.add_argument("--instructions", default="You are a friendly, concise voice assistant.")
     srv.add_argument("--greeting", default="Hi! Talk to me, and feel free to interrupt me.")
-    srv.add_argument("--max-sessions", type=int, default=None)
+    srv.add_argument("--max-sessions", type=int, default=8)
+    srv.add_argument(
+        "--allowed-origin",
+        action="append",
+        default=[],
+        help="browser origin allowed besides http://localhost:* (repeatable), e.g. the "
+        "https:// address of this demo on your LAN",
+    )
 
     cli = sub.add_parser("client", help="talk to a running agent from Python")
     cli.add_argument("--url", default="ws://127.0.0.1:8765/")

@@ -48,14 +48,15 @@ import numpy as np
 
 from ..audio.frame import AudioFormat, AudioFrame
 from ..audio.resample import StreamResampler, resample
-from ..errors import TransportError
+from ..errors import SessionRefused, TransportError
+from ..server.security import DEFAULT_MAX_SESSIONS, report_error
 from ..utils.aio import BackgroundTasks, Chan, cancel_and_wait, wait_first
 from ..utils.clock import now
 from ..utils.deps import require
 from ..utils.ids import new_id
 from ..utils.log import logger
 from .base import Transport, TransportCapabilities
-from .websocket import SessionBridge, _describe, _dumps, _url_host, _wants_transport
+from .websocket import SessionBridge, _dumps, _url_host, _wants_transport
 
 if TYPE_CHECKING:
     from ..session.agent import Agent
@@ -750,7 +751,8 @@ class WebRTCAgentServer:
         client_ice_servers: ICE servers advertised to clients by ``GET /config`` (default:
             ``ice_servers``) — e.g. short-lived TURN credentials.
         ice_transport_policy: ``"relay"`` forces TURN relaying on both peers.
-        max_sessions: answer ``503`` beyond this many live peers.
+        max_sessions: answer ``503`` beyond this many live peers (default 64; ``None``:
+            no limit).
         forward_events: send transcripts, state changes, metrics and errors to clients.
         index_html: page served at ``GET /`` (e.g. the browser demo).
         cors_origins: origins allowed to call the endpoints from another page (``"*"`` = any).
@@ -771,7 +773,7 @@ class WebRTCAgentServer:
         ice_servers: Sequence[str | Mapping[str, Any]] | None = None,
         client_ice_servers: Sequence[str | Mapping[str, Any]] | None = None,
         ice_transport_policy: str = "all",
-        max_sessions: int | None = None,
+        max_sessions: int | None = DEFAULT_MAX_SESSIONS,
         forward_events: bool = True,
         index_html: str | None = None,
         cors_origins: Sequence[str] = (),
@@ -916,14 +918,23 @@ class WebRTCAgentServer:
                 bridge = SessionBridge(session, transport)
             await session.start(agent, transport)
             await wait_first(session.wait_closed(), transport.wait_disconnected())
+        except SessionRefused as exc:
+            logger.info("WebRTC session %s refused: %s", transport.session_id, exc)
+            reason = "refused"
+            transport.send_message_nowait(
+                {"type": "error", "code": exc.code, "message": str(exc), "fatal": True}
+            )
         except Exception as exc:
-            logger.exception("WebRTC session %s failed", transport.session_id)
             reason = "error"
+            error_id, message = report_error(
+                exc, "The session failed", session_id=transport.session_id
+            )
             transport.send_message_nowait(
                 {
                     "type": "error",
                     "code": "internal_error",
-                    "message": _describe(exc),
+                    "message": message,
+                    "error_id": error_id,
                     "fatal": True,
                 }
             )
@@ -1089,8 +1100,8 @@ class _SignalingServer:
             except TransportError as exc:
                 raise _HttpError(HTTPStatus.SERVICE_UNAVAILABLE, str(exc)) from None
             except Exception as exc:
-                logger.exception("WebRTC offer failed")
-                raise _HttpError(HTTPStatus.INTERNAL_SERVER_ERROR, _describe(exc)) from None
+                _, message = report_error(exc, "The offer failed")
+                raise _HttpError(HTTPStatus.INTERNAL_SERVER_ERROR, message) from None
             return _json_response(HTTPStatus.OK, answer)
         if method != "GET":
             raise _HttpError(HTTPStatus.METHOD_NOT_ALLOWED, f"{method} not allowed")

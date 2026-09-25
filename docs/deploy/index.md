@@ -25,6 +25,9 @@ before the first caller arrives (`van serve` warms engines up by default).
 * **Failover.** Give `stt`, `llm` and `tts` a fallback chain ([failover](../concepts/failover.md)).
 * **Observability.** Record calls (stereo WAV + JSONL timeline) and trace with
   OpenTelemetry ([observability](../concepts/observability.md)).
+* **Secure defaults.** Servers bind `127.0.0.1`, refuse browser pages from other websites
+  (`--allowed-origin` adds yours), limit sessions (count, duration, idle time), bound their
+  queues and send clients generic errors with an id ([secure defaults](serving.md#secure-defaults)).
 * **Authentication.** `van serve --api-key` (or `VAN_SERVER_API_KEY`). The WebSocket server
   can authenticate before the upgrade (`process_request`) or in the session factory from
   the client's hello metadata; mount the WebRTC offer handler behind your own auth (see
@@ -33,5 +36,5 @@ before the first caller arrives (`van serve` warms engines up by default).
   ([hardware](../hardware.md)). Pre-download models into images with `van models download`
   ([models](../models.md#docker-images-and-offline-machines)).
 * **Session limits.** Native engines with a provider session limit rotate transparently
-  (`EngineCapabilities.max_session_duration`); `van serve --max-session-duration` caps
-  sessions on your side.
+  (`EngineCapabilities.max_session_duration`); `van serve --max-session-duration` (default
+  one hour) and `--idle-timeout` (default 5 minutes) cap sessions on your side.

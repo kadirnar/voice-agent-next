@@ -112,7 +112,7 @@ no `conversation.item.done`.
 
 | Engine event | Server events |
 | --- | --- |
-| connection opened | `session.created` (with `expires_at` when a duration limit is set) |
+| connection opened | `session.created` (with `expires_at`: one hour by default) |
 | `InputSpeechStarted` / `InputSpeechStopped` | `input_audio_buffer.speech_started` / `.speech_stopped` (with `audio_start_ms` / `audio_end_ms`). Only with turn detection. |
 | `InputCommitted` | `input_audio_buffer.committed`, then `conversation.item.added` / `.done` for the user message |
 | `InputTranscript` | `conversation.item.input_audio_transcription.delta` / `.completed` (when transcription is enabled) |
@@ -140,8 +140,21 @@ only the client knows how much the user heard. It reports that with
 
 * **Authentication.** `Authorization: Bearer <key>`, an `api-key` header, or the browser
   subprotocol. Keys are compared in constant time and never logged. A bad key gets HTTP 401.
-* **TLS and origins.** Pass `serve_options={"ssl": ctx, "origins": [...]}` to
-  `RealtimeServer`, or terminate TLS at a reverse proxy (enable WebSocket upgrades on it).
+  `van serve` refuses to listen beyond this machine without `--api-key` unless you pass
+  `--insecure`; `RealtimeServer` logs a warning
+  ([secure defaults](serving.md#listening-beyond-this-machine)).
+* **Origins.** Browser pages from other websites are refused with HTTP 403
+  (`origin_not_allowed`). Allowed: clients without an `Origin` header, this machine's pages
+  (`http://localhost:*`...) and `allowed_origins=[...]` (`--allowed-origin`). See
+  [the Origin allow-list](serving.md#who-may-connect-the-origin-allow-list).
+* **Limits.** `max_sessions` (default 64), `max_session_duration` (default 3600 s,
+  `session_expired`) and `idle_timeout` (default 300 s without client events,
+  `session_idle`). `None` disables a limit.
+* **Errors.** Engine failures reach the client as `server_error` with a generic message and
+  an error id (`The engine is unavailable (error id err_...).`). The log has the details
+  under the same id.
+* **TLS.** Pass `ssl=ctx` to `RealtimeServer`, or terminate TLS at a reverse proxy (enable
+  WebSocket upgrades on it).
 * **Health.** `GET /health` returns `{"status": "ok", ...}`. `GET /v1/models` lists the
   served models. Under `van serve`, `GET /ready` and `GET /metrics` (Prometheus) are
   served too: see [Serving in production](serving.md#health-readiness-and-metrics).

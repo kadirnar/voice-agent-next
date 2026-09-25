@@ -39,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -54,7 +54,7 @@ from ..chat import (
     FunctionCallOutput,
 )
 from ..engine import EngineCapabilities, EngineConnection, EngineOptions, S2SEngine
-from ..errors import ConfigurationError
+from ..errors import ConfigurationError, ProviderConnectionError
 from ..events import (
     EngineErrorEvent,
     EngineEvent,
@@ -205,6 +205,23 @@ class _Pause:
     speech_end: float
     """When the user stopped speaking (``now()`` clock)."""
     timer: asyncio.TimerHandle | None = None
+
+
+@dataclass(slots=True)
+class _LateFlush:
+    """An STT flush whose final transcript did not arrive within
+    ``final_transcript_timeout``: when it does, it belongs to the turn ``item_id`` only."""
+
+    item_id: str
+    fallback: str | None
+    """The interim text used in its place (``None``: none)."""
+    audio_time: float
+    """Input stream position at the flush."""
+    at: float = field(default_factory=now)
+
+
+_LATE_FINAL_EXPIRY = 10.0
+"""Seconds after which an unanswered flush no longer claims the next final transcript."""
 
 
 class _Output:
@@ -511,6 +528,11 @@ class CascadeConnection(EngineConnection):
         self._stt_commit_task: asyncio.Task[None] | None = None
         self._vad_input = asyncio.Event()
         """Set whenever the VAD has processed input audio."""
+        self._late_flushes: deque[_LateFlush] = deque()
+        """Flushes that timed out, oldest first (their finals may still arrive)."""
+        self._stt_ended = False
+        """The STT stream is gone (ended or failed): no audio is pushed to it any more."""
+        self._closing = False
 
     # ---------------------------------------------------------------- user turn
     def _reset_turn(self) -> None:
@@ -525,7 +547,7 @@ class CascadeConnection(EngineConnection):
         return " ".join(t.strip() for t in self._turn_finals if t.strip())
 
     async def _send_audio(self, frame: AudioFrame) -> None:
-        if self._stt is not None:
+        if self._stt is not None and not self._stt_ended:
             self._stt.push_audio(frame)
         self._recent.append(frame)
         self._recent_duration += frame.duration
@@ -579,14 +601,51 @@ class CascadeConnection(EngineConnection):
     async def _wait_final_transcript(self) -> None:
         if self._stt is None:
             return
+        if self._stt_ended:
+            self._use_interim()
+            return
         self._final_event.clear()
         self._stt.flush()
+        audio_time = self.input_audio_time
         try:
             await asyncio.wait_for(self._final_event.wait(), self._opts.final_transcript_timeout)
+            if self._stt_ended:  # woken by the end of the STT stream, not by a final
+                self._use_interim()
         except TimeoutError:
-            if self._turn_interim:
-                self._turn_finals.append(self._turn_interim)  # fall back to the interim text
-                self._turn_interim = ""
+            # the final may still come: it then belongs to this turn only (see _late_final)
+            fallback = self._use_interim()
+            self._late_flushes.append(_LateFlush(self._turn_item_id, fallback, audio_time))
+
+    def _use_interim(self) -> str | None:
+        """No final transcript in time: fall back to the interim text (returned, if any)."""
+        interim, self._turn_interim = self._turn_interim, ""
+        if not interim:
+            return None
+        self._turn_finals.append(interim)
+        return interim
+
+    def _late_final(self, end_time: float | None) -> bool:
+        """A final transcript arrived: is it the late answer to a flush of an earlier
+        turn (to be dropped, it would leak into this one)? A late answer to a flush of
+        the current turn replaces the interim text used in its place."""
+        late = self._late_flushes
+        while late and now() - late[0].at > _LATE_FINAL_EXPIRY:
+            late.popleft()  # never answered (nothing to transcribe)
+        if not late:
+            return False
+        if end_time is not None:  # word timing tells which audio it transcribes
+            while late and end_time > late[0].audio_time + 0.1:
+                late.popleft()  # the STT has moved past these flushes
+            if not late:
+                return False
+        flush = late.popleft()
+        if flush.item_id != self._turn_item_id:
+            logger.debug("dropping a late final transcript of a committed turn")
+            return True
+        if flush.fallback is not None and flush.fallback in self._turn_finals:
+            finals = self._turn_finals
+            del finals[len(finals) - 1 - finals[::-1].index(flush.fallback)]
+        return False
 
     # ------------------------------------------------------------- endpointing
     def update_endpointing(
@@ -621,7 +680,19 @@ class CascadeConnection(EngineConnection):
 
     async def _commit_when_allowed(self) -> None:
         await self._commit_gate.wait()
-        await self._commit_turn()
+        await self._commit_shielded()
+
+    async def _commit_shielded(self) -> None:
+        """Commit the turn and start its reply as one step. From here on, speech that
+        resumes (or a new pause, or ``clear_input``) no longer cancels this commit: the
+        user message is committed, and it must not be left without a reply. Speech now
+        is a false commit (``_commit_watch``) or a barge-in on the reply."""
+        current = asyncio.current_task()
+        if self._endpoint_task is current:
+            self._endpoint_task = None
+        if self._stt_commit_task is current:
+            self._stt_commit_task = None
+        await asyncio.shield(self._tasks.spawn(self._commit_turn(), name="cascade-commit"))
 
     async def _wait_unconfirmed_speech(self) -> None:
         """Don't commit while the user may have just started speaking again.
@@ -701,6 +772,7 @@ class CascadeConnection(EngineConnection):
                 false_commit=false_commit,
                 audio_probability=d.audio_probability,
                 text_probability=d.text_probability,
+                detector_error=d.detector_error,
             ),
         )
 
@@ -710,26 +782,53 @@ class CascadeConnection(EngineConnection):
         ctx.add_message("user", text)
         return ctx
 
-    async def _fused_probability(self, fused: FusedTurnDetector) -> tuple[float, dict[str, Any]]:
+    async def _detect(
+        self, detector: Any, prediction: Awaitable[float | None], errors: list[str]
+    ) -> float | None:
+        """Await a turn-detector ``prediction``; a failing detector counts as no verdict
+        (``None``, its error added to ``errors``): the pause is then endpointed as without
+        a detector, never left uncommitted."""
+        try:
+            return await prediction
+        except Exception as exc:
+            logger.warning(
+                "turn detector %s failed; endpointing without it",
+                getattr(detector, "provider", type(detector).__name__),
+                exc_info=True,
+            )
+            errors.append(repr(exc))
+            return None
+
+    async def _fused_probability(
+        self, fused: FusedTurnDetector, errors: list[str]
+    ) -> tuple[float | None, dict[str, Any]]:
         """Run both halves of a fused detector: the audio half concurrently with the STT
         flush, the text half on the transcript — started on the interim text so that it
         overlaps the flush too, and run again only if the final transcript differs."""
         t0 = now()
         audio = self._turn_audio.to_frame() if self._turn_audio else None
-        audio_task = asyncio.ensure_future(fused.predict_audio(audio))
+        audio_task = asyncio.create_task(
+            self._detect(fused.audio, fused.predict_audio(audio), errors)
+        )
         guess = " ".join(p for p in (self._turn_text(), self._turn_interim.strip()) if p)
-        text_task: asyncio.Future[float | None] | None = None
+        text_task: asyncio.Task[float | None] | None = None
+        stale: asyncio.Task[float | None] | None = None
+
+        def predict_text(text: str) -> asyncio.Task[float | None]:
+            ctx = self._user_context(text)
+            return asyncio.create_task(self._detect(fused.text, fused.predict_text(ctx), errors))
+
         if guess:
-            text_task = asyncio.ensure_future(fused.predict_text(self._user_context(guess)))
+            text_task = predict_text(guess)
         try:
             await self._wait_final_transcript()
             final = self._turn_text()
             if _normalize(final) != _normalize(guess):
-                if text_task is not None:
-                    text_task.cancel()
-                text_task = None
+                stale, text_task = text_task, None
+                if stale is not None:
+                    stale.cancel()
                 if final:
-                    text_task = asyncio.ensure_future(fused.predict_text(self._user_context(final)))
+                    text_task = predict_text(final)
             pa = await audio_task
             if text_task is not None and not text_task.done():
                 # the audio verdict alone may already justify a (held) speculative reply:
@@ -737,25 +836,29 @@ class CascadeConnection(EngineConnection):
                 self._speculate(pa)
             pt = await text_task if text_task is not None else None
         finally:
-            for task in (audio_task, text_task):
-                if task is not None and not task.done():
-                    task.cancel()
+            await cancel_and_wait(audio_task, text_task, stale)
+        if pa is None and pt is None and errors:
+            return None, {}  # the detector failed: no verdict at all
         p = fused.report(fused.fuse(pa, pt), now() - t0)
         return p, {"audio_probability": pa, "text_probability": pt}
 
     async def _endpoint(self) -> None:
         t_end = self._speech_end_wall if self._speech_end_wall is not None else now()
         detector = self._e.turn_detector
+        errors: list[str] = []
         if isinstance(detector, FusedTurnDetector):
-            fused, parts = await self._fused_probability(detector)
-            decision = replace(self._endpointer.decide(fused, detector.threshold), **parts)
+            fused, parts = await self._fused_probability(detector, errors)
+            decision = self._endpointer.decide(fused, detector.threshold)
+            error = errors[0] if errors else None
+            decision = replace(decision, detector_error=error, **parts)
             await self._wait_and_commit(decision, t_end, fused)
             return
-        early: asyncio.Future[float] | None = None
+        early: asyncio.Task[float | None] | None = None
         if detector is not None and detector.modality == "audio" and self._turn_audio:
             # audio-only detectors don't need the transcript: overlap them with the STT flush
-            early = asyncio.ensure_future(
-                detector.predict_end_of_turn(audio=self._turn_audio.to_frame())
+            audio = self._turn_audio.to_frame()
+            early = asyncio.create_task(
+                self._detect(detector, detector.predict_end_of_turn(audio=audio), errors)
             )
         try:
             await self._wait_final_transcript()
@@ -766,18 +869,23 @@ class CascadeConnection(EngineConnection):
                 elif self._turn_text() or self._turn_audio:
                     ctx = self._llm_context(None)
                     ctx.add_message("user", self._turn_text())
-                    prob = await detector.predict_end_of_turn(
-                        audio=self._turn_audio.to_frame() if self._turn_audio else None,
-                        chat_ctx=ctx,
+                    prob = await self._detect(
+                        detector,
+                        detector.predict_end_of_turn(
+                            audio=self._turn_audio.to_frame() if self._turn_audio else None,
+                            chat_ctx=ctx,
+                        ),
+                        errors,
                     )
                 else:
                     prob = 1.0
         finally:
-            if early is not None and not early.done():
-                early.cancel()
+            await cancel_and_wait(early)
         decision = self._endpointer.decide(
             prob, detector.threshold if detector is not None else None
         )
+        if errors:
+            decision = replace(decision, detector_error=errors[0])
         await self._wait_and_commit(decision, t_end, prob)
 
     async def _wait_and_commit(
@@ -793,12 +901,13 @@ class CascadeConnection(EngineConnection):
         await self._wait_unconfirmed_speech()
         self._pause = None
         self._watch_commit(pause)
-        await self._commit_turn()
+        await self._commit_shielded()
 
     async def _stt_loop(self) -> None:
-        assert self._stt is not None
+        stt = self._stt
+        assert stt is not None
         try:
-            async for ev in self._stt:
+            async for ev in stt:
                 if ev.type == STTEventType.INTERIM_TRANSCRIPT:
                     self._turn_interim = ev.text
                     partial = " ".join(p for p in (self._turn_text(), ev.text) if p)
@@ -806,8 +915,11 @@ class CascadeConnection(EngineConnection):
                         InputTranscript(item_id=self._turn_item_id, text=partial, is_final=False)
                     )
                 elif ev.type == STTEventType.FINAL_TRANSCRIPT:
-                    if ev.transcript is not None and ev.transcript.end_time is not None:
-                        self._last_final_end = ev.transcript.end_time
+                    end_time = ev.transcript.end_time if ev.transcript is not None else None
+                    if end_time is not None:
+                        self._last_final_end = end_time
+                    if self._late_final(end_time):
+                        continue  # the late answer to a flush of an already committed turn
                     if ev.text.strip():
                         self._turn_finals.append(ev.text)
                         self._emit(
@@ -838,9 +950,21 @@ class CascadeConnection(EngineConnection):
                     self._speculate(text=eager)
                 elif ev.type == STTEventType.TURN_RESUMED:
                     self._discard_speculation("resumed")
+            if not self._closing:
+                # the provider closed the stream: without it the cascade is deaf
+                logger.error("the STT stream ended unexpectedly")
+                error = ProviderConnectionError(
+                    "the STT stream ended", provider=getattr(self._e.stt, "provider", None)
+                )
+                self._emit(EngineErrorEvent(error=error, recoverable=False))
         except Exception as exc:
             logger.exception("STT stream failed")
             self._emit(EngineErrorEvent(error=exc, recoverable=False))
+        finally:
+            # nothing reads the stream's input any more: stop feeding (and buffering) it
+            self._stt_ended = True
+            self._final_event.set()
+            await stt.aclose()
 
     async def _commit_turn(self) -> None:
         text = self._turn_text()
@@ -1100,6 +1224,7 @@ class CascadeConnection(EngineConnection):
         return True
 
     async def aclose(self) -> None:
+        self._closing = True
         if self._commit_watch is not None:
             self._resolve_commit(self._commit_watch, None)
         self._discard_speculation("closed")

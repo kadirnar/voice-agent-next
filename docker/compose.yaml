@@ -17,6 +17,9 @@ x-agent: &agent
     OLLAMA_HOST: http://ollama:11434
     OLLAMA_MODEL: ${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}
     VAN_OFFLINE: "1" # every model is in the volume already: never download in a call
+    # Browser pages allowed besides http://localhost:* (space-separated). The demos are on
+    # http://localhost:${WEB_PORT}; add your https:// name to open them from another host.
+    VAN_ALLOWED_ORIGINS: ${VAN_ALLOWED_ORIGINS:-http://localhost:${WEB_PORT:-8080}}
   volumes:
     - models:/models
     - ./config/local-cpu.yaml:/config/agent.yaml:ro

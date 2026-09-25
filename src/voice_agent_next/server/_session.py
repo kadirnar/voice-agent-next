@@ -22,6 +22,7 @@ import base64
 import binascii
 import contextlib
 import json
+import logging
 import math
 import re
 import time
@@ -68,6 +69,7 @@ from ._protocol import (
     parse_item,
     parse_response_modalities,
 )
+from .security import INBOX_HIGH, INBOX_LOW, OUTBOX_HIGH, OUTBOX_LOW, report_error
 
 if TYPE_CHECKING:
     from .realtime import RealtimeModel, RealtimeServer
@@ -82,9 +84,9 @@ _MAX_HELD_AUDIO: Final = 300.0
 """A held response that grows beyond this much audio is discarded."""
 _REQUEST_TTL: Final = 30.0
 """A requested response that has not started after this long is forgotten."""
-_INBOX_HIGH, _INBOX_LOW = 4 * 2**20, 2**20
+_INBOX_HIGH, _INBOX_LOW = INBOX_HIGH, INBOX_LOW
 """Queued client bytes at which the reader pauses / resumes (TCP backpressure)."""
-_OUTBOX_HIGH, _OUTBOX_LOW = 2 * 2**20, 512 * 2**10
+_OUTBOX_HIGH, _OUTBOX_LOW = OUTBOX_HIGH, OUTBOX_LOW
 """Bytes queued for the client at which engine events stop / resume being taken."""
 _FLUSH_TIMEOUT: Final = 2.0
 # ``EngineConnection.say`` and ``OpenAIRealtimeEngine.say`` ask for verbatim speech with
@@ -112,6 +114,7 @@ class _Sentinel:
 
 _DISCONNECTED: Final = _Sentinel("disconnected")
 _EXPIRED: Final = _Sentinel("expired")
+_IDLE: Final = _Sentinel("idle")
 _ENGINE_CLOSED: Final = _Sentinel("engine closed")
 
 
@@ -216,6 +219,8 @@ class RealtimeSession:
         # client side
         self._client: Chan[str | bytes | _Sentinel] = Chan()
         self._client_bytes = 0
+        self._last_client = now()
+        """When the last client message arrived (idle timeout)."""
         self._client_space = asyncio.Event()
         self._client_space.set()
         self._disconnected = False
@@ -276,8 +281,12 @@ class RealtimeSession:
         reader = asyncio.create_task(self._read_loop(), name=f"realtime-read-{self.id}")
         writer = asyncio.create_task(self._write_loop(), name=f"realtime-write-{self.id}")
         expiry: asyncio.Task[None] | None = None
+        idle: asyncio.Task[None] | None = None
         if self.server.max_session_duration:
             expiry = asyncio.create_task(self._expire(self.server.max_session_duration))
+        idle_timeout = getattr(self.server, "idle_timeout", None)
+        if idle_timeout:
+            idle = asyncio.create_task(self._watch_idle(idle_timeout))
         reason, code = "client disconnected", _CLOSE_NORMAL
         remote = self.websocket.remote_address
         logger.info(
@@ -291,13 +300,11 @@ class RealtimeSession:
         except _Stop as stop:
             reason, code = stop.reason, stop.code
         except Exception as exc:
-            logger.exception("realtime session %s failed", self.id)
-            self._send_error(
-                {"type": "server_error", "code": "internal_error", "message": _describe(exc)}
-            )
-            reason, code = f"internal error: {_describe(exc)}", _CLOSE_INTERNAL
+            error_id, message = report_error(exc, "The session failed", session_id=self.id)
+            self._send_error({"type": "server_error", "code": "internal_error", "message": message})
+            reason, code = f"internal error ({error_id})", _CLOSE_INTERNAL
         finally:
-            await cancel_and_wait(reader, expiry)
+            await cancel_and_wait(reader, expiry, idle)
             await self._close_engine()
             if self._owns_engine and self._engine is not None:
                 with contextlib.suppress(Exception):
@@ -330,6 +337,17 @@ class RealtimeSession:
                             }
                         )
                         raise _Stop("session expired")
+                    if item is _IDLE:
+                        idle = getattr(self.server, "idle_timeout", None) or 0
+                        self._send_error(
+                            {
+                                "type": "invalid_request_error",
+                                "code": "session_idle",
+                                "message": "The session was closed after "
+                                f"{idle:g} seconds without client events.",
+                            }
+                        )
+                        raise _Stop("session idle")
                     raise _Stop("client disconnected")
                 else:
                     await self._on_client_message(item)
@@ -397,6 +415,7 @@ class RealtimeSession:
     async def _read_loop(self) -> None:
         try:
             async for message in self.websocket:
+                self._last_client = now()
                 self._client_bytes += len(message)
                 self._client.send_nowait(message)
                 if self._client_bytes > _INBOX_HIGH:
@@ -442,6 +461,17 @@ class RealtimeSession:
         await asyncio.sleep(seconds)
         if not self._client.closed:
             self._client.send_nowait(_EXPIRED)
+
+    async def _watch_idle(self, seconds: float) -> None:
+        while True:
+            if self._client_bytes > 0:  # messages are waiting: the client is not idle
+                self._last_client = now()
+            remaining = self._last_client + seconds - now()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(remaining, 1.0) + 0.001)
+        if not self._client.closed:
+            self._client.send_nowait(_IDLE)
 
     # --------------------------------------------------------------------- sending
     def _send(self, etype: str, **fields: Any) -> None:
@@ -563,14 +593,15 @@ class RealtimeSession:
         except (_Stop, asyncio.CancelledError):
             raise
         except Exception as exc:  # an engine call failed
-            logger.warning(
-                "realtime session %s: %s failed: %s", self.id, event["type"], _describe(exc)
-            )
+            _, message = report_error(
+                exc, f"Handling {event['type']} failed", session_id=self.id,
+                level=logging.WARNING, traceback=False,
+            )  # fmt: skip
             self._send_error(
                 {
                     "type": "server_error",
                     "code": "engine_error",
-                    "message": _describe(exc),
+                    "message": message,
                     "event_id": event_id,
                 }
             )
@@ -892,16 +923,15 @@ class RealtimeSession:
         elif isinstance(ev, (ResponseText, ResponseAudio, ResponseToolCall, ResponseDone)):
             await self._on_response_event(ev)
         elif isinstance(ev, EngineErrorEvent):
-            logger.warning(
-                "realtime session %s: engine error (%s): %s",
-                self.id, "recoverable" if ev.recoverable else "fatal", _describe(ev.error),
+            kind = "recoverable" if ev.recoverable else "fatal"
+            error_id, message = report_error(
+                ev.error, f"The engine reported a {kind} error", session_id=self.id,
+                level=logging.WARNING, traceback=False,
             )  # fmt: skip
-            self._send_error(
-                {"type": "server_error", "code": "engine_error", "message": _describe(ev.error)}
-            )
+            self._send_error({"type": "server_error", "code": "engine_error", "message": message})
             if not ev.recoverable:
-                self._fail_active(_describe(ev.error))
-                raise _Stop(f"engine error: {_describe(ev.error)}", _CLOSE_INTERNAL)
+                self._fail_active(message)
+                raise _Stop(f"engine error ({error_id})", _CLOSE_INTERNAL)
         elif isinstance(ev, EngineStatus):
             logger.info("realtime session %s: engine %s (%s)", self.id, ev.status, ev.detail)
         elif isinstance(ev, ToolCallCancelled):
@@ -1382,14 +1412,11 @@ class RealtimeSession:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.error("realtime session %s: engine connection failed: %s", self.id,
-                         _describe(exc))  # fmt: skip
+            _, message = report_error(
+                exc, "The engine is unavailable", session_id=self.id, traceback=False
+            )
             self._send_error(
-                {
-                    "type": "server_error",
-                    "code": "engine_unavailable",
-                    "message": f"The engine is unavailable: {_describe(exc)}",
-                }
+                {"type": "server_error", "code": "engine_unavailable", "message": message}
             )
             raise _Stop("engine unavailable", _CLOSE_INTERNAL) from exc
         self._conn = conn
@@ -1476,11 +1503,6 @@ def _required_str(ev: Mapping[str, Any], key: str) -> str:
             f"Missing required parameter: '{key}'.", code="missing_required_parameter", param=key
         )
     return value
-
-
-def _describe(exc: BaseException) -> str:
-    text = str(exc)
-    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 def _peer(remote: Any) -> str:

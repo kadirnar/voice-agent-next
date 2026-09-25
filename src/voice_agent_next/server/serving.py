@@ -42,11 +42,12 @@ from websockets.asyncio.server import ServerConnection
 from websockets.http11 import Request, Response
 
 from ..engine import EngineOptions, S2SEngine
-from ..errors import ConfigurationError
+from ..errors import ConfigurationError, SessionRefused
 from ..utils.log import logger
 from .ops import ServeState, set_session_id
 from .pool import EnginePool
 from .realtime import RealtimeModel, RealtimeServer
+from .security import DEFAULT_MAX_SESSIONS
 
 __all__ = [
     "AGENT_PROTOCOLS",
@@ -259,7 +260,7 @@ def build_agent_served(
     preconnect: bool = True,
     max_idle: float | None = 300.0,
     warmup: bool = True,
-    max_sessions: int | None = None,
+    max_sessions: int | None = DEFAULT_MAX_SESSIONS,
     worker: int | None = None,
     host: str = "127.0.0.1",
     port: int = 8765,
@@ -276,8 +277,11 @@ def build_agent_served(
             process, one connection per session).
         prewarm: prewarmed engines (connections) to keep ready.
         preconnect: open prewarmed connections with the agent's options.
+        max_sessions: per-process session limit (default 64; ``None``: no limit).
         server_options: extra arguments of the protocol server (``ssl``, ``ice_servers``,
-            ``serializer_options``...).
+            ``serializer_options``, ``allowed_origins``, ``max_session_duration``,
+            ``idle_timeout``...). For ``webrtc``, ``allowed_origins`` become CORS origins
+            and the session duration / idle limits are not supported (ignored).
     """
     from ..app import build_agent
     from ..config import AppConfig, load_config
@@ -321,7 +325,7 @@ def build_agent_served(
         refusal = state.refusal()
         if refusal is not None:  # raced with the handshake check
             state.reject(refusal[1])
-            raise ConfigurationError(refusal[2])
+            raise SessionRefused(refusal[2], code=f"server_{refusal[1]}", close_code=1013)
         engine = await pool.lease()
         session = AgentSession(engine, options=SessionOptions(**cfg.session))
         state.session_started()
@@ -351,6 +355,13 @@ def build_agent_served(
     if protocol == "webrtc":
         from ..transports.webrtc import WebRTCAgentServer
 
+        server_options = dict(server_options)
+        origins = server_options.pop("allowed_origins", None) or ()
+        origins = [origins] if isinstance(origins, str) else list(origins)
+        if origins:
+            server_options["cors_origins"] = [*server_options.get("cors_origins", ()), *origins]
+        for unsupported in ("max_session_duration", "idle_timeout"):
+            server_options.pop(unsupported, None)
         server = WebRTCAgentServer(
             session_factory, agent_factory, host=host, port=port, max_sessions=max_sessions,
             **server_options,
