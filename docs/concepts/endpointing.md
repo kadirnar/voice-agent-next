@@ -20,7 +20,9 @@ speech ends ──► VAD END_OF_SPEECH (min_silence_duration later: a candidate
    └─ p <  threshold                  → commit at  max_endpointing_delay
                                         (the fixed policy; see "Endpointing policies")
    │
-   └─ speech resumes before the commit → cancel; the same turn continues
+   ├─ speech resumes before the commit → cancel; the same turn continues
+   ├─ speech has begun but the VAD has not confirmed it yet → wait for the VAD's verdict
+   └─ the user spoke over the agent → wait for the session's interruption verdict
 ```
 
 * Without a turn detector the cascade can't tell a finished sentence from a hesitation,
@@ -33,6 +35,14 @@ speech ends ──► VAD END_OF_SPEECH (min_silence_duration later: a candidate
 * If the STT doesn't deliver the final transcript within `final_transcript_timeout`
   (1 s), the interim text is used.
 * A pause with no transcript at all (noise) commits nothing.
+* The VAD confirms speech only after `min_speech_duration` (0.1 s) plus a window, about
+  0.15 s after the user resumes. A commit falling in that gap would answer over them, so
+  while the speech probability is above the activation threshold without a confirmed
+  start, the commit waits (at most `min_speech_duration` + 0.1 s): a confirmed start
+  cancels it, silence lets it go through.
+* While the user speaks over the agent, the session defers commits until its
+  [interruption policy](interruptions.md#engines) has decided: a backchannel is dropped
+  instead of being committed and answered.
 
 ## Tuning
 
@@ -41,6 +51,8 @@ speech ends ──► VAD END_OF_SPEECH (min_silence_duration later: a candidate
 | Snappier replies | a turn detector (`turn_detector="smart_turn"`), then lower `min_endpointing_delay` (0.2–0.3 s) |
 | Fewer cut-offs for slow or thoughtful speakers | `endpointing: dynamic` (learns the user's pauses), raise the detector's `threshold` or `min_endpointing_delay` |
 | Numbers, addresses, dictated notes | [dictation mode](#dictation-mode) |
+| Users who pause between complete sentences | `min_endpointing_delay` ~1 s with `preemptive_tts` ([measured](#the-local-presets-issue-113)) |
+| No 2.5 s silences when the detector misjudges short answers ("Yes.") | `max_endpointing_delay: 1.5` (the local presets) |
 | Hide the LLM's time to first token | [preemptive generation](preemptive-generation.md): the reply starts during the endpointing silence and is released at the commit |
 | Faster final transcripts | a streaming STT with forced finalization (sherpa-onnx, Moonshine, Deepgram, AssemblyAI) |
 
@@ -140,6 +152,25 @@ clamped to `[min, max]`. Two kinds of pause are learned:
 
 The learned pauses belong to the connection (one per session). Changing the policy at
 runtime keeps them.
+
+### Cut-off guard
+
+An audio turn detector judges *prosody*: Smart Turn v3.2 gives 0.97 to "Where is my
+order?" and 0.99 to "Please change my flight." whether or not the user goes on with "I
+placed it last week." Such confident pauses commit at the floor whatever hold delay has
+been learned, so the policy above cannot stop cutting off a user who pauses between
+sentences.
+
+When the detector said "done" (*p* ≥ θ) and the user went on anyway — a false commit, or a
+confident pause they resumed from before the commit — the dynamic policy stops trusting
+confident verdicts: confident pauses wait at least the (learned) hold delay. Every commit
+the user leaves alone gives trust back: the guard's excess over the floor shrinks by
+`pause_alpha` (a quarter) per commit. The fixed policy and dictation mode never use it.
+
+The price is latency after a cut-off. On the T4 battery (below) the guard halves the
+premature replies of the local CPU stack (100 % → 50 % of the mid-turn pauses, the first
+cut-off of each session is unavoidable) but raises that session's voice-to-voice p50 from
+~0.6 s to ~1.5 s: this user pauses a lot, and every question after the first cut-off waits.
 
 ## Dictation mode
 
@@ -266,12 +297,63 @@ Smart Turn, TTS) are inflated. Only the chosen delays and the cut-offs are compa
 
 Smart Turn judges "I would like to book a table for" complete on this synthetic voice, so
 both policies answer that fragment every time. Neither policy can fix a confident wrong
-verdict; only dictation mode or a better detector can. On the other fragments, dynamic
+verdict at its first occurrence; only dictation mode or a better detector can (since
+#113 the [cut-off guard](#cut-off-guard) keeps the dynamic policy from repeating it). On
+the other fragments, dynamic
 endpointing answered 2 of 18 fragments over both runs, against 5 of 18 with the fixed
 policy. Its chosen delay is ~75 ms shorter at the
 median. In run 1 that shortened the end of turn by 40 ms. The v2v numbers are dominated
 by Kokoro int8's first audio (1.2–1.7 s, and more on the shared CPU) and vary too much
 between runs to show a 40–80 ms change. Use the end-of-turn delay to compare policies.
+
+## The local presets (issue #113)
+
+The T4 battery (`van bench turn-taking -s benchmarks/scenarios/turn-taking-local.yaml`)
+found 92 % premature replies in mid-turn pauses, 100 % false barge-ins on "uh-huh" and
+29 % dead air on the local CPU cascade. What each number came from:
+
+* **Dead air:** Smart Turn says "not done" at the end of short or clipped answers ("Yes.",
+  "For two people tonight."; *p* = 0.02–0.24), and the fixed policy then waited 2.5 s. On
+  eot-bench English (400 real turns) it does so at **25.5 %** of the turn ends.
+* **Premature replies:** Smart Turn is confident at every mid-turn pause of the battery
+  (0.57–0.99): three first parts are complete sentences, and even "I would like to book
+  a table," scores 0.88 on this voice (0.46 when the "uh-huh" transcript below had leaked
+  into the turn). The reply then starts ~0.55 s into a 0.5–1.0 s pause. Only the 0.5 s
+  pause is now safe: the commit waits while the VAD has not yet confirmed resumed speech.
+* **Backchannels:** see [interruptions](interruptions.md#short-utterances-small-asr-models).
+
+eot-bench English with Smart Turn v3.2 (int8), the cascade's fixed policy at several
+bounds (`van bench turns --detector smart_turn`, re-evaluated per span):
+
+| min / max delay | false cutoffs | mean end-of-turn latency | turn ends waiting > 1.7 s |
+|---|---:|---:|---:|
+| 0.4 / 2.5 s (default) | 10.8 % | 936 ms | 25.5 % |
+| 0.4 / 1.5 s | 13.9 % | 680 ms | 0 % |
+| **0.5 / 1.5 s** (local presets) | **10.8 %** | **755 ms** | **0 %** |
+| 0.6 / 1.5 s | 8.7 % | 830 ms | 0 % |
+| 1.0 / 1.5 s | 6.4 % | 1,128 ms | 0 % |
+| dynamic, default bounds 0.25 / 2.5 s (nothing learned yet) | 18.3 % | 683 ms | 16.5 % |
+
+`local-cpu`, `local-gpu` and `apple` therefore use `min_endpointing_delay: 0.5`,
+`max_endpointing_delay: 1.5` and preemptive generation with preemptive TTS — the reply is
+synthesized during the endpointing silence, so the extra 0.1 s does not reach the user
+(`hybrid` gets the bounds without preemptive generation, which would cost cloud tokens
+per discarded attempt). See `voice_agent_next.presets.LOCAL_TURN_TAKING`.
+
+**What no default fixes.** A pause after a complete sentence *is* a turn end as far as
+the audio can tell. Answering within ~0.6 s of it and never answering inside a 1 s
+mid-turn pause are incompatible. On the battery (below), the reply lands in the pause
+unless the commit comes after the pause plus the VAD's onset delay:
+
+| local CPU stack, T4 battery | premature | v2v p50 |
+|---|---:|---:|
+| fixed 0.5 / 1.5 s (local presets) | 75 % | ~0.6–0.7 s |
+| dynamic with the cut-off guard | 50 % | ~1.5 s |
+| fixed **1.0** / 1.5 s | **0 %** | ~1.1 s |
+
+For users who pause between sentences (dictating, thinking aloud, older users), raise
+`min_endpointing_delay` towards 1 s — with preemptive TTS the reply is ready when the
+silence ends — or switch to dictation mode while they read something out.
 
 ## Limitations
 
@@ -279,7 +361,8 @@ between runs to show a 40–80 ms change. Use the end-of-turn delay to compare p
   and from false commits within `false_commit_window`. A user who is cut off and then
   waits for the agent to finish before correcting it is not learned from.
 * A false commit is any speech within the window after a commit. Echo of the agent's
-  first words, or a quick "uh-huh", also counts. Keep echo cancellation on.
+  first words, or a quick "uh-huh", also counts (and, in the dynamic policy, raises the
+  cut-off guard after a confident commit). Keep echo cancellation on.
 * Changing the policy or dictation mode affects the next pause, not a pending one.
 * The dynamic policy does not look at the transcript itself (trailing "and", digits…).
   That is the turn detector's job.

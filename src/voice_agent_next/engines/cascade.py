@@ -35,6 +35,7 @@ cascade (see ``docs/concepts/omni-models.md``).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
@@ -470,6 +471,12 @@ class CascadeConnection(EngineConnection):
         """When the audio delivered so far (probably) stops playing."""
         self._speech_rate = engine.options.speech_rate
         """Characters per second of the audio LLM's speech (see ``_heard_llm_audio``)."""
+        self._commit_gate = asyncio.Event()
+        """Clear while automatic commits are deferred (:meth:`defer_commit`)."""
+        self._commit_gate.set()
+        self._stt_commit_task: asyncio.Task[None] | None = None
+        self._vad_input = asyncio.Event()
+        """Set whenever the VAD has processed input audio."""
 
     # ---------------------------------------------------------------- user turn
     def _reset_turn(self) -> None:
@@ -502,6 +509,7 @@ class CascadeConnection(EngineConnection):
                 self._on_speech_started(self.input_audio_time - ev.speech_duration)
             elif ev.type == VADEventType.END_OF_SPEECH:
                 self._on_speech_stopped(self.input_audio_time - ev.silence_duration)
+        self._vad_input.set()
 
     def _on_speech_started(self, audio_time: float | None) -> None:
         onset = self.audio_time_to_wall(audio_time) if audio_time is not None else None
@@ -564,12 +572,50 @@ class CascadeConnection(EngineConnection):
         """This connection's endpointing state (policy, learned pauses)."""
         return self._endpointer
 
+    def defer_commit(self, deferred: bool) -> None:
+        """Hold automatic commits (endpointing, STT end of turn) while ``deferred``.
+
+        The session defers them while its interruption policy judges user speech over the
+        agent: a backchannel must be dropped (``clear_input``) before the endpointing delay
+        commits it — committing would answer it and cancel the paused reply. Pauses are
+        still scored meanwhile; a commit that fell due is made when the deferral ends.
+        """
+        if deferred:
+            self._commit_gate.clear()
+        else:
+            self._commit_gate.set()
+
+    async def _commit_when_allowed(self) -> None:
+        await self._commit_gate.wait()
+        await self._commit_turn()
+
+    async def _wait_unconfirmed_speech(self) -> None:
+        """Don't commit while the user may have just started speaking again.
+
+        The VAD confirms speech only after ``min_speech_duration`` (+ a window), ~0.15 s
+        after its onset; a commit made in that gap answers over a user who resumed. While
+        the speech probability is above the activation threshold without a confirmed
+        start, wait (at most ``min_speech_duration`` + 0.1 s): ``START_OF_SPEECH`` cancels
+        this endpointing (the turn goes on), silence lets it commit."""
+        vad = self._vad
+        if vad is None or self._e.vad is None or vad.speaking:
+            return
+        opts = self._e.vad.options
+        deadline = now() + opts.min_speech_duration + 0.1
+        while vad.probability >= opts.activation_threshold and now() < deadline:
+            self._vad_input.clear()  # set by the next input frame the VAD has seen
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._vad_input.wait(), max(0.0, deadline - now()))
+
     def _on_resumed(self, pause: _Pause | None, onset: float) -> None:
         """The user spoke again before the pending pause was committed."""
         if self._speech_end_wall is None:
             return
         length = max(0.0, onset - self._speech_end_wall)
-        self._endpointer.observe_pause(length)
+        if pause is not None and _confident(pause.decision):
+            self._endpointer.observe_cutoff(length)
+        else:
+            self._endpointer.observe_pause(length)
         if pause is not None:
             self._emit_endpointing(pause, committed=False, length=length)
 
@@ -591,7 +637,11 @@ class CascadeConnection(EngineConnection):
         if self.chat_ctx.get(pause.item_id) is None:
             return  # nothing was committed (no transcript)
         length = None if onset is None else max(0.0, onset - pause.speech_end)
-        if length is not None:
+        if length is None:
+            self._endpointer.observe_commit()
+        elif _confident(pause.decision):
+            self._endpointer.observe_cutoff(length)
+        else:
             self._endpointer.observe_pause(length)
         self._emit_endpointing(
             pause, committed=True, length=length, false_commit=length is not None
@@ -651,6 +701,8 @@ class CascadeConnection(EngineConnection):
                 # only the silence is left to wait for: the reply can start meanwhile
                 self._speculate(prob)
                 await asyncio.sleep(remaining)
+            await self._commit_gate.wait()  # the session may still drop this turn
+            await self._wait_unconfirmed_speech()
         finally:
             if early is not None and not early.done():
                 early.cancel()
@@ -695,7 +747,7 @@ class CascadeConnection(EngineConnection):
                 elif ev.type == STTEventType.END_OF_TURN and self.options.turn_detection:
                     if self._endpoint_task is not None and not self._endpoint_task.done():
                         self._endpoint_task.cancel()
-                    self._tasks.spawn(self._commit_turn())
+                    self._stt_commit_task = self._tasks.spawn(self._commit_when_allowed())
                 elif ev.type == STTEventType.EAGER_END_OF_TURN:
                     eager = " ".join(p for p in (self._turn_text(), ev.text.strip()) if p)
                     self._speculate(text=eager)
@@ -843,6 +895,8 @@ class CascadeConnection(EngineConnection):
     async def clear_input(self) -> None:
         if self._endpoint_task is not None and not self._endpoint_task.done():
             self._endpoint_task.cancel()
+        if self._stt_commit_task is not None and not self._stt_commit_task.done():
+            self._stt_commit_task.cancel()
         self._pause = None
         self._discard_speculation("cleared")
         self._user_speaking = False
@@ -1171,6 +1225,12 @@ class CascadeConnection(EngineConnection):
 
 async def _once(text: str) -> AsyncIterator[str]:
     yield text
+
+
+def _confident(decision: EndpointingDecision) -> bool:
+    """The turn detector said the user was done at this pause."""
+    p, threshold = decision.probability, decision.threshold
+    return p is not None and threshold is not None and p >= threshold
 
 
 def _normalize(text: str) -> str:

@@ -16,11 +16,11 @@ session drives it and handles pausing, truncation and events.
 | From | When | To | What the session does |
 |---|---|---|---|
 | agent speaking | the user starts speaking | overlap | pause playback |
-| overlap | a speech segment ≥ `min_interruption_duration` and ≥ `min_interruption_words` non-backchannel words | interrupted | stop, cancel the response if it is still being generated, truncate it to what was heard |
+| overlap | a speech segment ≥ `min_interruption_duration` and ≥ `min_interruption_words` non-backchannel words (with `max_backchannel_duration`: not a [short utterance](#short-utterances-small-asr-models)) | interrupted | stop, cancel the response if it is still being generated, truncate it to what was heard |
 | overlap | still no words after `false_interruption_timeout` (noise, a TV) | overlap | stop holding the agent (it talks again); keep watching |
 | overlap | the user goes quiet | paused | start the `false_interruption_timeout` timer |
 | paused | the user speaks again | overlap | the timer stops; words keep adding up |
-| paused | the final transcript has only backchannels | agent speaking | resume at once; emit `agent_false_interruption(resumed=True)` |
+| paused | the final transcript has only backchannels, or is a short utterance without an interruption word | agent speaking | drop the input (`clear_input`), resume at once; emit `agent_false_interruption(resumed=True)` |
 | paused | quiet for `false_interruption_timeout`, no meaningful words | agent speaking | resume; emit `agent_false_interruption(resumed=True)` |
 | paused | quiet for `false_interruption_timeout`, meaningful words | interrupted | stop, cancel, truncate |
 | overlap / paused | the engine commits the user's turn or cancels the response itself | interrupted | truncate to what was heard (no cancel: the engine has moved on) |
@@ -61,6 +61,8 @@ All options are fields of `SessionOptions` (and of the `session:` block in confi
 | `min_interruption_duration` | `0.5` | Seconds of user speech needed to confirm a barge-in. |
 | `min_interruption_words` | `0` | Non-backchannel words needed as well, counted in interim transcripts. `0` means duration only. |
 | `backchannel_words` | `None` | Words and phrases that never count as an interruption. `None` means the built-in list for the agent's language. |
+| `max_backchannel_duration` | `None` | The [short-utterance rule](#short-utterances-small-asr-models): user speech shorter than this, with at most two words and no interruption word, is a backchannel whatever the STT made of it. `None` turns it off; the local presets use `1.0`. |
+| `interruption_words` | `None` | Words that make even a short utterance a real barge-in ("stop", "wait", "no", question words). `None` means the built-in list for the agent's language. |
 | `false_interruption_timeout` | `2.0` | Seconds of silence without meaningful words before paused speech resumes. `None` disables pause-and-resume. |
 | `resume_false_interruption` | `True` | Pause while the verdict is pending. `False` keeps the agent talking until the barge-in is confirmed. |
 | `discard_audio_if_uninterruptible` | `True` | Send silence instead of the user's audio while uninterruptible speech plays. |
@@ -106,6 +108,43 @@ async def on_false_interruption(ev):
 * **Wordless sound** (a fan, a TV) with `min_interruption_words` ≥ 1 holds the agent at
   most `false_interruption_timeout` seconds. After that the agent talks again while the
   session keeps watching: words that turn up later still interrupt.
+
+## Short utterances (small ASR models)
+
+Small streaming ASR models are trained on transcripts without fillers, so they rarely
+write "uh-huh". Measured with Kokoro-voiced clips (issue #113):
+
+| spoken | sherpa-onnx NeMo streaming 80 ms | sherpa-onnx Kroko |
+|---|---|---|
+| "Uh-huh." | `but high` | `Earth high` |
+| "Mm-hmm." | `m` | `Memhum` |
+| "Yeah." | `yaf` | `Yeah.` |
+| "Okay." / "Right." / "Stop." / "Wait." | correct | correct |
+
+No backchannel list matches "but high". Kokoro's "Uh-huh." also lasts 0.6 s, longer than
+`min_interruption_duration`, so the duration rule alone confirmed **100 %** of the
+backchannels of the T4 battery (`van bench turn-taking`) as barge-ins: the agent stopped
+and answered "but high".
+
+`max_backchannel_duration` (the local presets use 1.0 s) adds a rule based on what the ASR
+gets right — duration and word count — and on the words it does transcribe reliably:
+
+* while the user has spoken less than `max_backchannel_duration` seconds in the overlap,
+  with at most two meaningful words and no **interruption word**, duration never confirms
+  the barge-in (the agent stays paused);
+* when the user goes quiet and the final transcript of such a short utterance arrives, it
+  is a backchannel: the session clears the engine's input and the agent resumes at once;
+* an interruption word ("stop", "wait", "no", "sorry", "hold on", "what", "why"...)
+  makes any utterance a real barge-in under the usual rules; so does a third word, or
+  speech that lasts longer than `max_backchannel_duration`.
+
+The duration counts until the VAD reports the end of speech, so it includes the VAD's
+hangover (Silero: ~0.3 s): 1.0 s leaves room for a 0.6 s "uh-huh". The built-in
+interruption words come from `interruption_words_for(agent.language)` (English, `de`, `es`,
+`fr`, `it`, `pt`, `tr`, `ja`, `zh`; other languages get a few English words). Replace them
+with `interruption_words=[...]`. The price of the rule: a short request made of two
+ordinary words ("go back") resumes the agent instead of stopping it — add such words to
+`interruption_words` if your users need them.
 
 ## Backchannels
 
@@ -159,6 +198,13 @@ backchannels. Pass your own list to change this:
   meaningful, the session calls `clear_input()` first. The backchannel is dropped instead
   of being answered. Only finals are conclusive: a late interim could still grow into
   "okay, stop".
+* **Deferred commits.** With a streaming STT the final transcript arrives ~0.1 s after the
+  VAD's end of speech, when little or nothing of the endpointing delay is left; the
+  cascade could commit the backchannel before the session had seen its transcript (with
+  Smart Turn this race was lost in the T4 battery). While an overlap awaits its verdict
+  the session therefore calls `CascadeConnection.defer_commit(True)`: the cascade still
+  scores pauses but holds its commits. They are released as soon as the final transcript
+  shows a real utterance, the interruption is confirmed, or the overlap ends.
 * **Ordering.** The session decides only after it has handled every event the engine
   already queued. A queued `InputCommitted` means the engine took the turn. On a
   confirmed interruption it cancels only a response that is still being generated; a

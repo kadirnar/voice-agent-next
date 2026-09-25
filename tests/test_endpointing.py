@@ -119,6 +119,29 @@ def test_dictation_waits_for_the_detector_and_never_commits_early() -> None:
     assert e.decide(1.0, 0.5).delay == pytest.approx(0.25)
 
 
+def test_dynamic_policy_stops_trusting_a_detector_that_cut_the_user_off() -> None:
+    """Issue #113: Smart Turn is ~0.97 sure that "Where is my order?" ends the turn, so the
+    confident branch kept committing at the floor although the user had been cut off."""
+    e = endpointer(endpointing="dynamic")
+    assert e.decide(0.97, 0.5).delay < 0.3
+    e.observe_cutoff(0.8)  # the user went on 0.8 s after a confident commit
+    guarded = e.decide(0.97, 0.5).delay
+    assert guarded == pytest.approx(e.hold()) and guarded > 0.8  # the learned hold
+    assert e.decide(1.0, 0.5).delay == pytest.approx(guarded)
+    for _ in range(3):  # commits the user leaves alone: trust comes back
+        e.observe_commit()
+    assert 0.25 < e.decide(0.97, 0.5).delay < guarded
+    for _ in range(30):
+        e.observe_commit()
+    assert e.guard is None and e.decide(0.97, 0.5).delay < 0.35  # (the learned hold moved)
+    fixed = endpointer()
+    fixed.observe_cutoff(0.8)  # the fixed policy stays fixed
+    assert fixed.guard is None and fixed.decide(0.97, 0.5).delay == 0.4
+    dictation = endpointer(endpointing="dynamic", dictation=True)
+    dictation.observe_cutoff(3.0)
+    assert dictation.guard is None and dictation.pauses.count == 0
+
+
 def test_unknown_mode_is_rejected() -> None:
     with pytest.raises(ValueError):
         endpointer(endpointing="eager")
@@ -293,3 +316,43 @@ async def test_preemptive_generation_with_dynamic_endpointing() -> None:
     assert len(llm.requests) == 1
     turn: TurnMetrics = rec.turn_metrics()[0]
     assert turn.end_of_turn_delay == pytest.approx(0.37, abs=0.1)
+
+
+async def test_confident_false_commit_raises_the_confident_delay() -> None:
+    session = cascade(ScriptedDetector(0.99), endpointing="dynamic")
+    rec = Recorder(session)
+    transport = LoopbackTransport()
+    await session.start(Agent("x"), transport)
+    conn: Any = session.connection
+    await pause_then_continue(transport, 0.8)  # cut off at the floor, then goes on
+    await wait_for(lambda: len(rec.turn_metrics()) == 2, 6)
+    await session.aclose()
+    first = endpointing(rec)[0]
+    assert first.committed and first.false_commit and first.probability == 0.99
+    assert conn.endpointer.guard is not None and conn.endpointer.guard > 0.8
+    assert conn.endpointer.decide(0.99, 0.5).delay > 0.8
+
+
+async def test_no_commit_while_resumed_speech_is_unconfirmed() -> None:
+    """The VAD confirms speech only after ``min_speech_duration`` (0.3 s here): a user who
+    resumes just before the commit must not be answered in that gap."""
+    session = AgentSession(
+        stt=MockSTT(latency=0.01),
+        llm=MockLLM(responses=lambda ctx: "Okay."),
+        tts=MockTTS(chars_per_second=200.0),
+        vad=EnergyVAD(min_speech_duration=0.3),
+        cascade_options=CascadeOptions(min_endpointing_delay=0.5),  # VAD only
+    )
+    rec = Recorder(session)
+    transport = LoopbackTransport()
+    await session.start(Agent("x"), transport)
+    await transport.play_user_audio(synth_speech(0.4, SR), realtime=False)
+    await transport.play_user_audio(AudioFrame.silence(0.35, SR))  # resumes 0.15 s early...
+    await transport.play_user_audio(synth_speech(0.5, SR))  # ...confirmed ~0.15 s too late
+    await transport.play_user_audio(AudioFrame.silence(0.8, SR), realtime=False)
+    await wait_for(lambda: bool(rec.turn_metrics()), 6)
+    await asyncio.sleep(0.5)
+    await session.aclose()
+    assert len(rec.turn_metrics()) == 1  # one turn: the pause was not committed
+    [hold] = [m for m in endpointing(rec) if not m.committed]
+    assert hold.pause == pytest.approx(0.35, abs=0.1)

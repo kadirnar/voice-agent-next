@@ -44,6 +44,18 @@ preset's `rationale` (shown by `van presets <name>`) has the details.
   contention as the main risk of this profile. For better tool calling, use
   `--llm ollama/qwen3.5:4b` (note 03 §7.5). Kokoro v1.0 fp16 is the measured TTS: the
   first clause takes about 400 ms on this CPU.
+* **Turn-taking of the local cascades** (`local-cpu`, `local-gpu`, `apple`; `hybrid`
+  without preemptive generation). The T4 battery (#113) found 100 % false barge-ins on
+  "uh-huh" and 29 % dead air with the library defaults. The presets set
+  `cascade: {min_endpointing_delay: 0.5, max_endpointing_delay: 1.5,
+  preemptive_generation: true, preemptive_tts: true}` and
+  `session: {max_backchannel_duration: 1.0}`: no 2.5 s waits when Smart Turn misjudges a
+  short answer, the reply prepared during the endpointing silence, and short utterances
+  over the agent treated as backchannels unless they contain an interruption word
+  ([endpointing](concepts/endpointing.md#the-local-presets-issue-113),
+  [interruptions](concepts/interruptions.md#short-utterances-small-asr-models)). Override
+  any of them in your config (`cascade: {min_endpointing_delay: 1.0}` for users who pause
+  between sentences).
 * **local-gpu.** On an RTX 5070 Ti with CUDA float16, faster-whisper's final transcript
   drops from 391 ms to 51 ms, and v2v p50 drops from 1,523 ms to 969 ms
   ([hardware.md](hardware.md#measurements)). `large-v3-turbo` covers 99 languages at that

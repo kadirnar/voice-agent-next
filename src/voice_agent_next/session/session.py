@@ -155,6 +155,17 @@ class SessionOptions:
     """Words and phrases that never count as an interruption ("uh-huh", "okay"...).
     ``None`` = the built-in list for the agent's language (see
     :func:`~voice_agent_next.session.interruptions.backchannel_words_for`)."""
+    max_backchannel_duration: float | None = None
+    """The short-utterance rule: user speech over the agent shorter than this (seconds,
+    counted until the VAD reports its end), with at most two words and no
+    ``interruption_words``, is a backchannel whatever the STT made of it — small ASR models
+    turn "uh-huh" into words like "but high". Such an utterance never confirms a barge-in
+    by duration and is dropped instead of answered. ``None`` = off. The local presets use
+    1.0 s (see ``docs/concepts/interruptions.md``)."""
+    interruption_words: Sequence[str] | None = None
+    """Words that make even a short utterance a real barge-in ("stop", "wait", "no",
+    question words...). ``None`` = the built-in list for the agent's language (see
+    :func:`~voice_agent_next.session.interruptions.interruption_words_for`)."""
     false_interruption_timeout: float | None = 2.0
     """Seconds the user must stay quiet, without meaningful words, before paused speech
     resumes. ``None`` disables pause-and-resume."""
@@ -190,6 +201,10 @@ class SessionOptions:
             raise ValueError("false_interruption_timeout must be >= 0 or None")
         if isinstance(self.backchannel_words, str):
             raise TypeError("backchannel_words must be a list of words, not a string")
+        if self.max_backchannel_duration is not None and self.max_backchannel_duration < 0:
+            raise ValueError("max_backchannel_duration must be >= 0 or None")
+        if isinstance(self.interruption_words, str):
+            raise TypeError("interruption_words must be a list of words, not a string")
         if self.tool_filler_delay is not None and self.tool_filler_delay < 0:
             raise ValueError("tool_filler_delay must be >= 0 or None")
         if isinstance(self.tool_fillers, str):
@@ -422,6 +437,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         # interruption policy: the overlap awaiting a verdict and the playback pause state
         self._barge: _BargeIn | None = None
         self._barge_timer: asyncio.TimerHandle | None = None
+        self._commits_deferred = False  # the engine holds its commits (see defer_commit)
         self._committed_items: deque[str] = deque(maxlen=8)
         self._say_requests: deque[_SayRequest] = deque()
         self._send_gate = asyncio.Event()  # cleared while playback is paused
@@ -1506,6 +1522,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         overlap = Overlap.begin(policy, start, held=policy.pauses)
         barge = _BargeIn(overlap, resp, frozenset(self._committed_items))
         self._barge = barge
+        self._defer_engine_commits(True)
         if policy.pauses:
             await self._pause_playback(barge)
         await self._evaluate_barge_in()
@@ -1546,6 +1563,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         # the engine cancelled the response itself (e.g. server-side VAD): resuming is
         # impossible, so treat it as a real interruption and keep watching for a false one
         barge.overlap.confirmed = True
+        self._defer_engine_commits(False)
         await self._interrupt(barge.response, cancel=False)
         self._watch_aftermath(barge)
 
@@ -1569,11 +1587,14 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
                 logger.warning("engine clear_input failed: %s", exc)
             if self._barge is not barge:
                 return
+        elif overlap.is_turn():
+            self._defer_engine_commits(False)  # a real utterance: the engine may commit it
         verdict = overlap.verdict(now())
         if verdict is None:
             self._schedule_barge_in_check(barge)
         elif verdict == Verdict.INTERRUPT:
             overlap.confirmed = True
+            self._defer_engine_commits(False)
             # only a response still being generated needs cancelling; a complete one is just
             # truncated (a cancel might hit a response the engine started meanwhile)
             await self._interrupt(barge.response, cancel=not barge.response.done)
@@ -1646,6 +1667,18 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         if self._barge is barge:
             self._barge = None
             self._cancel_barge_in_timer()
+            self._defer_engine_commits(False)
+
+    def _defer_engine_commits(self, deferred: bool) -> None:
+        """Ask the engine (a cascade) to hold its automatic commits while an overlap awaits
+        its verdict, so a backchannel can be dropped before it is answered."""
+        if deferred == self._commits_deferred or self._conn is None:
+            return
+        defer = getattr(self._conn, "defer_commit", None)
+        if defer is None:
+            return
+        self._commits_deferred = deferred
+        defer(deferred)
 
     def _schedule_barge_in_check(self, barge: _BargeIn, *, delay: float | None = None) -> None:
         """Re-evaluate ``barge`` at its next deadline (or after ``delay`` seconds)."""
