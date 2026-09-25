@@ -470,6 +470,10 @@ class CascadeConnection(EngineConnection):
         """When the audio delivered so far (probably) stops playing."""
         self._speech_rate = engine.options.speech_rate
         """Characters per second of the audio LLM's speech (see ``_heard_llm_audio``)."""
+        self._commit_gate = asyncio.Event()
+        """Clear while automatic commits are deferred (:meth:`defer_commit`)."""
+        self._commit_gate.set()
+        self._stt_commit_task: asyncio.Task[None] | None = None
 
     # ---------------------------------------------------------------- user turn
     def _reset_turn(self) -> None:
@@ -564,6 +568,23 @@ class CascadeConnection(EngineConnection):
         """This connection's endpointing state (policy, learned pauses)."""
         return self._endpointer
 
+    def defer_commit(self, deferred: bool) -> None:
+        """Hold automatic commits (endpointing, STT end of turn) while ``deferred``.
+
+        The session defers them while its interruption policy judges user speech over the
+        agent: a backchannel must be dropped (``clear_input``) before the endpointing delay
+        commits it — committing would answer it and cancel the paused reply. Pauses are
+        still scored meanwhile; a commit that fell due is made when the deferral ends.
+        """
+        if deferred:
+            self._commit_gate.clear()
+        else:
+            self._commit_gate.set()
+
+    async def _commit_when_allowed(self) -> None:
+        await self._commit_gate.wait()
+        await self._commit_turn()
+
     def _on_resumed(self, pause: _Pause | None, onset: float) -> None:
         """The user spoke again before the pending pause was committed."""
         if self._speech_end_wall is None:
@@ -651,6 +672,7 @@ class CascadeConnection(EngineConnection):
                 # only the silence is left to wait for: the reply can start meanwhile
                 self._speculate(prob)
                 await asyncio.sleep(remaining)
+            await self._commit_gate.wait()  # the session may still drop this turn
         finally:
             if early is not None and not early.done():
                 early.cancel()
@@ -695,7 +717,7 @@ class CascadeConnection(EngineConnection):
                 elif ev.type == STTEventType.END_OF_TURN and self.options.turn_detection:
                     if self._endpoint_task is not None and not self._endpoint_task.done():
                         self._endpoint_task.cancel()
-                    self._tasks.spawn(self._commit_turn())
+                    self._stt_commit_task = self._tasks.spawn(self._commit_when_allowed())
                 elif ev.type == STTEventType.EAGER_END_OF_TURN:
                     eager = " ".join(p for p in (self._turn_text(), ev.text.strip()) if p)
                     self._speculate(text=eager)
@@ -843,6 +865,8 @@ class CascadeConnection(EngineConnection):
     async def clear_input(self) -> None:
         if self._endpoint_task is not None and not self._endpoint_task.done():
             self._endpoint_task.cancel()
+        if self._stt_commit_task is not None and not self._stt_commit_task.done():
+            self._stt_commit_task.cancel()
         self._pause = None
         self._discard_speculation("cleared")
         self._user_speaking = False
