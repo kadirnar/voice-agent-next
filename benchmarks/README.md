@@ -12,7 +12,7 @@ local or cloud — that measures what the user *hears*. Design rationale:
 | **T3 TTS** | TTFA (leading silence counts), RTF, underruns, round-trip WER/CER, hard-text accuracy, DNSMOS | `van bench tts` |
 | **T4 VAD / turn-taking** | VAD frame metrics and onset/offset lag; end-of-turn on eot-bench; turn-taking battery (premature replies, barge-in, false barge-ins) | `van bench vad`, `van bench turns`, `van bench turn-taking` |
 | T5 S2S quality | Big Bench Audio, VoiceBench | planned (#44) |
-| T6 tool use | scripted tool scenarios, τ-Voice | planned (#45) |
+| **T6 tool use** | scripted spoken calls against deterministic mock tools: pass@1 / pass^k, tool F1, argument and entity accuracy, say-do violations, hallucinated results, tool-round latency, fillers | `van bench tools` |
 | **T7 framework overhead** | `v2v − Σ injected delays`, flush, jitter, loop lag, capacity, hot paths; CI regression gate | `van bench overhead` |
 
 ## Quick start
@@ -45,6 +45,11 @@ van bench tts --tts kokoro --stt faster-whisper/small.en --mos dnsmos
 van bench vad --vad energy --vad silero --vad sherpa-onnx/ten-vad
 van bench turns --detector smart_turn
 van bench turn-taking -c agent.yaml -s benchmarks/scenarios/turn-taking-local.yaml
+
+# T6: tool use on 11 scripted calls with mock tools (the default is a scripted reference
+# engine: a harness check); a real system hears the caller through Kokoro
+van bench tools --preset local-cpu
+van bench tools -c agent.yaml --trials 3 --only book-table --only refund-slow
 
 # T7: what the runtime itself adds (mocks with known delays, offline, ~2 min)
 van bench overhead
@@ -471,6 +476,105 @@ with ~4 s replies; the mock engine gets user transcripts only when it commits a 
 answers backchannels (100 % false barge-ins) — a real STT with the session's backchannel
 filter does better.
 
+## T6: tool use (`van bench tools`)
+
+```bash
+van bench tools                                    # scripted reference engine, offline (~2 min)
+van bench tools --preset local-cpu                 # local cascade; the caller speaks via Kokoro
+van bench tools --preset local-cpu --llm ollama/qwen3.5:4b --trials 3
+van bench tools -c agent.yaml -s my-tools.yaml --only cancel-order --caller-tts kokoro
+```
+
+Scripted customer-service calls against **deterministic mock tools**, on the T1 harness
+(real-time caller, loopback, stereo recording, reference VAD), for any system that
+supports tools. Each scenario gives the agent instructions and a few tools of the mock
+world — `lookup_order`, `cancel_order`, `request_refund` (2 s: exercises fillers),
+`update_address`, `lookup_customer`, `check_availability`, `book_table`, `cancel_booking`,
+`transfer_to_human` — over a per-call database of orders, customers, bookings and table
+availability. Tools validate their arguments, enforce simple policies (a shipped order
+cannot be cancelled) and take a fixed delay (0.3 s, equal for every system as in
+Full-Duplex-Bench v3); `--tool-delay-scale 0` makes them instant.
+
+The pinned **smoke** suite (`src/voice_agent_next/bench/data/tools_smoke.yaml`, hashed in
+the manifest with a hash per scenario) has 11 calls of 3–4 turns: order status, a
+cancellation, a cancellation the policy refuses, a slow refund, an address change, two
+table bookings (a free slot; a full slot and an alternative time), a booking
+cancellation, an account look-up by a spoken email ("jane dot doe at example dot com"),
+an escalation to a human and a question that needs no tool. Numbers are spoken the way
+callers say them ("order one oh four two"). The caller is **scripted**: it says its next
+line once the agent has answered and been quiet for `gap_after_reply`, whatever the agent
+said, so scripts give information in a natural order.
+
+Without a system, `van bench tools` runs the **reference engine**: a scripted mock that
+hears the script and makes exactly the expected calls, so every rate is 100 %. It checks
+the harness (CI), not a model. Real systems get synthetic caller speech replaced by
+Kokoro (`am_adam`) unless `--caller-tts` says otherwise.
+
+| Metric | Definition |
+| --- | --- |
+| `pass_at_1` | share of calls in which the final database equals the expected state **and** the agent said every expected fact (`expect_said`, case-insensitive, any of the alternatives) |
+| `pass_hat_k` | share of scenarios whose `k` trials all passed (`--trials k`; τ-bench's pass^k) |
+| `state_ok_rate`, `outputs_ok_rate` | the two halves of a pass |
+| `tool_precision`, `tool_recall`, `tool_f1` | calls matched to expected calls by name (the candidate with the most correct arguments wins) / calls made; required expected calls matched / required. Optional expected calls (a look-up before a cancellation) count as matched but are not required |
+| `arg_acc` | correct scored arguments of the matched calls. Arguments are normalized by kind before comparison: dates (`October 3rd` = `2026-10-03`), times (`7 pm` = `19:00`), emails (`jane dot doe at example dot com`), IDs (`one oh four two` = `1042`), numbers, text (`St.` = `street`) |
+| `entity_capture_acc` | the same for names, emails, phone numbers and IDs |
+| `unnecessary_call_rate` | calls that match no expected call (repeated look-ups, wrong tools, failed attempts); `unexpected_writes` counts the ones that changed the database |
+| `say_do_violation_rate` | calls in which the agent claimed an action (a write tool's claim pattern in a sentence that is neither a question nor negated: "your order has been cancelled") that no successful call of that tool had performed by the end of the turn |
+| `hallucination_rate` | agent turns stating a number or an order status ("it has shipped") that no tool returned and that the caller or the instructions did not mention |
+| `tool_round_latency_ms` | end of the user's speech → first agent speech onset after the turn's last tool result, on the recording. If the agent is still talking at the result (a preamble or filler running straight into the answer) the result time is used (a lower bound; `answer_glued` in the turn details) |
+| `pre_tool_ms`, `tool_exec_ms`, `post_tool_ms` | speech end → first call; the mock's execution time; tool result → speech |
+| `first_response_ms` | speech end → first agent speech in a tool round (e.g. "let me check") |
+| `filler_rate` | tool rounds in which the session's watchdog filler fired (`SessionOptions.tool_filler_delay`) |
+| `spoke_before_result_rate` | tool rounds with agent speech before the result (filler or the model's own preamble) |
+| `tool_dead_air_rate` | tool rounds with no agent speech within 2 s of the end of the user's speech |
+| `turns_to_completion` | first turn after which the database was right and the facts had been said |
+| `v2v_ms`, `missed_rate` | as in T1, for turns without tool calls / all turns |
+
+The expected final state is, by default, the initial database after replaying the
+expected write calls with the same tool implementations (τ-bench's method); a scenario can
+also give `expected_state`. `items.jsonl` has one line per call with every tool call
+(arguments, output, timing), the per-turn transcripts and timings, the database diff of
+a failed call, wrong arguments, the flagged say-do sentences and ungrounded tokens;
+`report.md` lists them under *Findings*. The say-do and hallucination checks are
+deterministic heuristics over the agent's own text transcript (not a judge model): read
+the flagged sentences before quoting the rates.
+
+Scenario format:
+
+```yaml
+name: my-tools
+version: 1
+today: "2026-09-29"                # told to the agent; dates without a year use it
+instructions: |-                   # {today} -> "Tuesday, September 29, 2026"
+  You are the phone assistant of Northwind. Today is {today}. ...
+stimuli: tts                       # caller speech: synthetic | tts
+tts: {provider: kokoro/v1.0-fp16, voice: am_adam}
+reply_timeout: 12.0
+gap_after_reply: 1.0
+tool_delay: 0.3
+database:                          # shared initial state (tables of records)
+  orders: {"2077": {status: processing, items: [coffee grinder], total: 45.5}}
+scenarios:
+  - id: cancel-order
+    tools: [lookup_order, cancel_order]
+    database: {}                   # per-scenario tables merged over the shared ones
+    turns:
+      - text: "Hello, I need to cancel an order."
+      - text: "It's order two oh seven seven."
+        expect_calls: [{name: lookup_order, args: {order_id: "2077"}, optional: true}]
+      - text: "Yes, please cancel it."
+        expect_calls: [{name: cancel_order, args: {order_id: "2077"}}]
+    expect_said: [[cancel]]        # any-of alternatives
+    tool_delays: {cancel_order: 1.0}
+```
+
+**τ-Voice / τ²-bench.** Not bundled. τ²-bench tasks (MIT) are not a small pinned file:
+each domain's tools are Python implementations over a large JSON database, and the caller
+is an LLM user simulator following the task's instructions (τ-Voice adds a voice layer
+with TTS, noise and interruptions). The planned adapter runs that user simulator as the
+caller (LLM → TTS → our caller emulator) and scores with τ²-bench's own evaluator; the
+metrics above (pass^k, final-state check, tool F1) are already defined the same way.
+
 ## T7: framework overhead (`van bench overhead`)
 
 The library claims its runtime adds (almost) nothing to the latency of its components.
@@ -623,6 +727,23 @@ results = asyncio.run(
     )
 )
 print(results.summary.rates["wer"], results.summary.extra["rtfx"])
+```
+
+```python
+from voice_agent_next.bench import BenchSystem
+from voice_agent_next.bench.tool_env import load_tool_suite
+from voice_agent_next.bench.tracks.tools import ToolsOptions, run_tools_benchmark
+
+system = BenchSystem.from_options(config="agent.yaml")
+results = asyncio.run(
+    run_tools_benchmark(
+        system,
+        load_tool_suite("smoke").with_caller({"provider": "kokoro/v1.0-fp16", "voice": "am_adam"}),
+        ToolsOptions(trials=3),
+        out_dir="bench-results",
+    )
+)
+print(results.summary.rates["pass_at_1"], results.summary.rates["tool_f1"])
 ```
 
 ```python

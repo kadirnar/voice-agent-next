@@ -52,7 +52,7 @@ _TABLE_METRICS = (
 
 @app.callback()
 def _bench() -> None:
-    """Benchmark suite: T1 latency, T2 ASR, T3 TTS, T4 VAD / turn-taking, T7 overhead."""
+    """Benchmark suite: T1 latency, T2 ASR, T3 TTS, T4 VAD / turn-taking, T6 tools, T7 overhead."""
 
 
 def _num(value: float | None) -> str:
@@ -226,6 +226,7 @@ def report(
     """Re-render report.md from a run directory and print it."""
     from ..bench.results import REPORT_FILE, load_run
     from ..bench.tracks import asr, latency, overhead, turn_taking, turns
+    from ..bench.tracks import tools as tools_track
     from ..bench.tracks import tts as tts_track
     from ..bench.tracks import vad as vad_track
 
@@ -237,6 +238,7 @@ def report(
         vad_track.TRACK: vad_track.render_vad_report,
         turns.TRACK: turns.render_turns_report,
         turn_taking.TRACK: turn_taking.render_turn_taking_report,
+        tools_track.TRACK: tools_track.render_tools_report,
     }
     try:
         results = load_run(run_dir)
@@ -1243,3 +1245,9 @@ def turn_taking_cmd(
     else:
         typer.echo(turn_taking_markdown_table(results))
         _print_notes(results)
+
+
+# ------------------------------------------------------------------------ T6 tools
+from .bench_tools import tools_cmd  # noqa: E402  (kept in its own module)
+
+app.command("tools")(tools_cmd)
