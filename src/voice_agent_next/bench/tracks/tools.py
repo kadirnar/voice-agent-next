@@ -22,8 +22,12 @@ Scoring (:mod:`voice_agent_next.bench.tool_scoring`, research note 06 §8.3 T6):
   ``filler_rate`` (the session's watchdog filler fired), ``spoke_before_result_rate``,
   ``tool_dead_air_rate``; ``turns_to_completion``.
 
-The caller is scripted: it says the next line whatever the agent answered (a τ-bench
-style LLM caller is a follow-up), so the scripts give information in a natural order.
+The caller is scripted by default: it says the next line whatever the agent answered,
+so the scripts give information in a natural order. ``caller="llm:<spec>"`` (``van bench
+tools --caller llm:<spec>``) lets an LLM play the caller instead
+(:class:`~voice_agent_next.bench.llm_caller.LLMCaller`, τ-bench style): persona and goal
+from the scenario, the scripted lines as the details it knows, temperature 0 and a fixed
+seed; it reacts to what the agent said and hangs up when done. The scoring is the same.
 """
 
 from __future__ import annotations
@@ -42,11 +46,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...audio.frame import AudioFormat
 from ...engine import S2SEngine
+from ...llm import LLM
+from ...registry import create
 from ...session import Agent, AgentSession
 from ...transports.loopback import LoopbackTransport
+from ...tts import TTS
 from ...utils.clock import now
-from ..caller import TurnTiming
+from ..caller import NextStimulus, TurnTiming
 from ..environment import collect_environment
+from ..llm_caller import LLMCaller, LLMCallerOptions, describe_caller, parse_caller
 from ..onset import OnsetDetector
 from ..report import ReportSpec, fmt, markdown_table, render_report
 from ..results import (
@@ -59,7 +67,7 @@ from ..results import (
     write_run,
 )
 from ..stimuli import Stimulus, render_stimuli
-from ..system import BenchSystem
+from ..system import BenchSystem, parse_component_spec
 from ..tool_env import CallRecord, ToolScenario, ToolSuite, build_tools, state_hash
 from ..tool_scoring import TurnObservation, score_scenario
 from .latency import (
@@ -104,14 +112,29 @@ class ToolsOptions:
     warmup_engine: bool = True
     seed: int = 0
     bootstrap_resamples: int = 2000
+    caller: str = "scripted"
+    """``scripted`` (default) or ``llm:<llm spec>``: an LLM plays the caller."""
+    caller_max_turns: int | None = None
+    """LLM caller: most lines per call (default: the scripted turns + 3)."""
+    caller_temperature: float = 0.0
+    caller_seed: int | None = 0
 
     def validate(self) -> None:
         if self.trials < 1:
             raise ValueError("trials must be >= 1")
+        parse_caller(self.caller)
+        self.caller_options().validate()
         if self.tool_delay_scale < 0:
             raise ValueError("tool_delay_scale must be >= 0")
         if self.dead_air_threshold <= 0:
             raise ValueError("dead_air_threshold must be > 0")
+
+    def caller_options(self) -> LLMCallerOptions:
+        return LLMCallerOptions(
+            max_turns=self.caller_max_turns,
+            temperature=self.caller_temperature,
+            seed=self.caller_seed,
+        )
 
 
 class ToolScenarioItem(BaseModel):
@@ -160,6 +183,9 @@ class ToolScenarioItem(BaseModel):
     """Mean ``tool_round_latency_ms`` of this call's tool rounds."""
     turn_details: list[dict[str, Any]] = Field(default_factory=list)
     calls_detail: list[dict[str, Any]] = Field(default_factory=list)
+    caller_lines: list[dict[str, str | None]] = Field(default_factory=list)
+    """LLM caller: every exchange (``agent`` said, ``caller`` answered; ``None`` = hung
+    up). Empty for the scripted caller."""
     errors: list[str] = Field(default_factory=list)
 
 
@@ -183,6 +209,7 @@ class _Call:
     fillers: list[float]
     snapshots: dict[int, str]
     final_db: dict[str, Any]
+    caller: LLMCaller | None = None
     analysis: Any = None
 
 
@@ -217,9 +244,8 @@ def _analyze_call(
         in_turn = [c for c in call.calls if w0 <= c.started < w1]
         fillers = [t for t in call.fillers if w0 <= t < w1]
         agent_text = item.agent_transcript or ""
-        observations.append(
-            TurnObservation(k, call.scenario.turns[k].text, agent_text, w1, call.snapshots.get(k))
-        )
+        user_text = turn.stimulus.text or ""  # the scripted line, or what the LLM caller said
+        observations.append(TurnObservation(k, user_text, agent_text, w1, call.snapshots.get(k)))
         first = next((t for t in onsets if uoff <= t < window_end), None)
         detail: dict[str, Any] = {
             "turn": k,
@@ -290,7 +316,9 @@ def _analyze_call(
         tool_round_ms=round(sum(latencies) / len(latencies), 3) if latencies else None,
         turn_details=details,
         calls_detail=[c.describe(origin) for c in call.calls],
-        errors=[e for it in items for e in it.errors],
+        caller_lines=call.caller.transcript() if call.caller is not None else [],
+        errors=[e for it in items for e in it.errors]
+        + (call.caller.errors if call.caller is not None else []),
     )
     return ToolScenarioItem.model_validate(data)
 
@@ -446,8 +474,7 @@ _ITEM_COLUMNS = (
 )
 _METHOD = """\
 * Every scenario is one real-time call over the loopback transport (T1 caller, stereo
-  recording, reference VAD {vad}). The caller is scripted: it says the next line after the
-  agent has answered and been quiet for {gap:g} s, whatever the agent said.
+  recording, reference VAD {vad}). {caller}
 * The agent gets the scenario's instructions and tools. Tools are deterministic mocks over
   a per-call database with a fixed delay ({delay:g} s; the refund tool 2 s, × {scale:g}).
 * pass = the final database equals the expected state (initial state + the expected write
@@ -510,9 +537,24 @@ def _failures(results: RunResults) -> str:
 def render_tools_report(results: RunResults) -> str:
     opts = results.manifest.options
     vad = (opts.get("onset") or {}).get("reference_vad", {})
+    policy = opts.get("caller_policy") or {"type": "scripted"}
+    if policy.get("type") == "llm":
+        llm = policy.get("llm") or {}
+        caller = (
+            f"An LLM plays the caller (`{llm.get('provider')}/{llm.get('model')}`, temperature "
+            f"{policy.get('temperature')}, seed {policy.get('seed')}): persona and goal from the "
+            "scenario, the scripted lines as the details it knows. It speaks after the agent "
+            f"has answered and been quiet for {opts.get('gap_after_reply_s', 1.0):g} s, reacts "
+            "to what the agent said and hangs up when done (its lines are in `caller_lines`)."
+        )
+    else:
+        caller = (
+            "The caller is scripted: it says the next line after the agent has answered and "
+            f"been quiet for {opts.get('gap_after_reply_s', 1.0):g} s, whatever the agent said."
+        )
     method = _METHOD.format(
+        caller=caller,
         vad=", ".join(f"{k}={v}" for k, v in vad.items()) or "rms",
-        gap=opts.get("gap_after_reply_s", 1.0),
         delay=opts.get("tool_delay_s", 0.3),
         scale=opts.get("tool_delay_scale", 1.0),
         k=opts.get("trials", 1),
@@ -549,6 +591,7 @@ async def run_tools_benchmark(
     engine_factory: EngineFactory | None = None,
     on_turn: Callable[[str, int, TurnTiming], None] | None = None,
     on_scenario: Callable[[ToolScenarioItem], None] | None = None,
+    caller_llm: LLM | None = None,
 ) -> RunResults:
     """Run the T6 tool-use track and (if ``out_dir``) write ``<out_dir>/<run_id>/``.
 
@@ -560,6 +603,8 @@ async def run_tools_benchmark(
             ``system.build_engine()`` (the scripted reference engine needs one per call).
         on_turn: progress ``(scenario id, trial, turn timing)``.
         on_scenario: called with each scored call.
+        caller_llm: the LLM that plays the caller (default: created from
+            ``options.caller`` when it is ``llm:<spec>``; not closed when passed in).
     """
     options = options or ToolsOptions()
     options.validate()
@@ -573,8 +618,15 @@ async def run_tools_benchmark(
     created = utc_timestamp()
     t_start = now()
     base_agent = system.build_agent()
+    caller_spec = parse_caller(options.caller)
+    own_llm = caller_llm is None and caller_spec is not None
+    if own_llm:
+        caller_llm = create("llm", parse_component_spec(caller_spec))
+    caller_tts: TTS | None = None
     try:
-        stimuli = await render_stimuli(suite.stimulus_scenario())
+        if caller_llm is not None and suite.tts is not None:
+            caller_tts = create("tts", suite.tts)  # one voice for every generated line
+        stimuli = await render_stimuli(suite.stimulus_scenario(), tts=caller_tts)
         per_scenario: dict[str, list[Stimulus]] = {}
         for stim in stimuli:
             per_scenario.setdefault(stim.id.split("/", 1)[0], []).append(stim)
@@ -614,6 +666,8 @@ async def run_tools_benchmark(
                         lat,
                         options,
                         on_turn,
+                        caller_llm,
+                        caller_tts,
                     )
                     index += 1
                     analysis = await asyncio.to_thread(_analyze_session, call.run, detector, lat)
@@ -632,6 +686,11 @@ async def run_tools_benchmark(
         if directory is not None and not any(directory.iterdir()):
             directory.rmdir()
         raise
+    finally:
+        if caller_tts is not None:
+            await caller_tts.aclose()
+        if own_llm and caller_llm is not None:
+            await caller_llm.aclose()
 
     metrics, rates, counts, extra = summarize_tools(
         items, trials=options.trials, seed=options.seed, n_resamples=options.bootstrap_resamples
@@ -644,6 +703,23 @@ async def run_tools_benchmark(
     notes: list[str] = []
     if engine_factory is not None:
         notes.append("Scripted reference engine: a harness check, not a capability score.")
+    llm_calls = [c.caller for c in calls if c.caller is not None]
+    if llm_calls:
+        notes.append(
+            "LLM-driven caller: the conversations differ from the script (see `caller_lines`); "
+            "compare with scripted runs only as a robustness check."
+        )
+        if suite.tts is None:
+            notes.append(
+                "The LLM caller speaks synthetic speech: only systems that do not transcribe "
+                "the audio (e.g. the reference engine) can follow it; use --caller-tts."
+            )
+        hung_up = sum(c.ended for c in llm_calls)
+        if hung_up < len(llm_calls):
+            notes.append(
+                f"{len(llm_calls) - hung_up} LLM-caller call(s) ended at the turn limit or on "
+                "an error instead of the caller hanging up."
+            )
     if counts["missed_turns"]:
         notes.append(f"{counts['missed_turns']} turn(s) got no reply within the reply timeout.")
     if any(a.info.get("aborted") for a in analyses):
@@ -681,6 +757,11 @@ async def run_tools_benchmark(
             **asdict(options),
             "scenarios": [s.id for s in suite.scenarios],
             "caller": suite.stimuli if suite.tts is None else {"tts": suite.tts},
+            "caller_policy": (
+                {"type": "scripted"}
+                if caller_llm is None
+                else {"type": "llm", **describe_caller(caller_llm, options.caller_options())}
+            ),
             "tool_delay_s": suite.tool_delay,
             "reply_timeout_s": options.reply_timeout or suite.reply_timeout,
             "gap_after_reply_s": (
@@ -730,6 +811,8 @@ async def _run_call(
     lat: LatencyOptions,
     options: ToolsOptions,
     on_turn: Callable[[str, int, TurnTiming], None] | None,
+    caller_llm: LLM | None = None,
+    caller_tts: TTS | None = None,
 ) -> _Call:
     db = suite.initial_db(scenario)
     log: list[CallRecord] = []
@@ -743,9 +826,27 @@ async def _run_call(
     proxy = _ScenarioSystem(system.config, system.label, agent=agent)
     fillers: list[float] = []
     snapshots: dict[int, str] = {}
+    heard: list[str] = []  # the agent's transcript since the caller last spoke
+    caller = (
+        None
+        if caller_llm is None
+        else LLMCaller(caller_llm, suite, scenario, options.caller_options(), tts=caller_tts)
+    )
+    source: Sequence[Stimulus] | NextStimulus = stimuli
+    if caller is not None:
+        llm_caller = caller
+
+        async def next_stimulus(index: int, _turns: Sequence[TurnTiming]) -> Stimulus | None:
+            reply = "".join(heard).strip()
+            heard.clear()
+            line = await llm_caller.next_line(reply)
+            return None if line is None else await llm_caller.render(index, line)
+
+        source = next_stimulus
 
     def hook(session: AgentSession, _t: LoopbackTransport) -> None:
         session.on("tool_filler", lambda _e: fillers.append(now()))
+        session.on("agent_transcript", lambda ev: heard.append(ev.delta))
 
     def turn_done(turn: TurnTiming) -> None:
         snapshots[turn.index] = state_hash(db)
@@ -756,9 +857,9 @@ async def _run_call(
     assert engine is not None
     try:
         run = await _run_session(
-            index, engine, proxy, stimuli, stim_scenario, lat, turn_done, on_start=hook
+            index, engine, proxy, source, stim_scenario, lat, turn_done, on_start=hook
         )
     finally:
         if engine_factory is not None:
             await engine.aclose()
-    return _Call(scenario, trial, run, log, fillers, snapshots, db)
+    return _Call(scenario, trial, run, log, fillers, snapshots, db, caller)

@@ -16,6 +16,10 @@
   audio (a *missed* turn), then speaks the next utterance. A stimulus with ``barge_in``
   is spoken that many seconds after the agent's reply to the previous turn started, over
   the agent (interruptions, backchannels, coughs);
+* instead of a list, ``run()`` can take a function that returns the next stimulus (or
+  ``None`` to hang up) once the caller may speak: the LLM-driven caller of the tool-use
+  track writes each line after hearing the reply. The microphone keeps streaming silence
+  while the line is prepared;
 * agent audio is taken from the transport's playout log (``played_log``), i.e. placed at
   the time it started playing, and truncated at playback clears (barge-in).
 
@@ -26,10 +30,12 @@ agent right) plus the timing of every turn.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from typing import TypeAlias
 
 from ..audio.frame import AudioFrame
 from ..audio.resample import resample
@@ -38,7 +44,7 @@ from ..utils.clock import now
 from .recording import DuplexRecording
 from .stimuli import Stimulus
 
-__all__ = ["CallResult", "CallerEmulator", "TurnTiming"]
+__all__ = ["CallResult", "CallerEmulator", "NextStimulus", "TurnTiming"]
 
 
 async def _sleep_until(deadline: float) -> None:
@@ -95,6 +101,10 @@ class TurnTiming:
     @property
     def end(self) -> float:
         return self.start + self.stimulus.duration
+
+
+NextStimulus: TypeAlias = Callable[[int, Sequence[TurnTiming]], Awaitable[Stimulus | None]]
+"""``(turn index, turns so far) -> next stimulus`` (``None``: hang up) of a dynamic call."""
 
 
 @dataclass(slots=True)
@@ -176,7 +186,7 @@ class CallerEmulator:
     # ------------------------------------------------------------------ public
     async def run(
         self,
-        stimuli: Sequence[Stimulus],
+        stimuli: Sequence[Stimulus] | NextStimulus,
         *,
         lead_in: float = 0.5,
         reply_timeout: float = 8.0,
@@ -185,7 +195,9 @@ class CallerEmulator:
     ) -> CallResult:
         """Speak every stimulus in order; return the recording and per-turn timing.
 
-        A caller places one call: create a new instance (and transport) for the next one.
+        ``stimuli`` may be a :data:`NextStimulus` function, called whenever the caller may
+        speak (silence streams on until it returns; ``barge_in`` is not used then). A
+        caller places one call: create a new instance (and transport) for the next one.
         """
         if self._used:
             raise RuntimeError("CallerEmulator.run() can only be called once")
@@ -197,8 +209,13 @@ class CallerEmulator:
         # e.g. a greeting: never start talking over the agent
         await self._wait_until_quiet(gap_after_reply, max_reply)
         step = self._chunk_samples * 2
-        for i, stim in enumerate(stimuli):
-            if self._aborted:
+        i = 0
+        while not self._aborted:
+            if callable(stimuli):
+                stim = await self._streaming_while(stimuli(i, turns))
+            else:
+                stim = stimuli[i] if i < len(stimuli) else None
+            if stim is None:
                 break
             audio = self._prepare(stim.audio)
             turn = TurnTiming(i, stim, start=self._t_stream + self._sent * self._chunk_dur)
@@ -206,11 +223,12 @@ class CallerEmulator:
             for k in range(0, len(audio.data), step):
                 if not await self._send(audio.data[k : k + step]):
                     break
-            nxt = stimuli[i + 1] if i + 1 < len(stimuli) else None
+            nxt = None if callable(stimuli) or i + 1 >= len(stimuli) else stimuli[i + 1]
             barge_in = nxt.barge_in if nxt is not None else None
             await self._after_turn(turn, reply_timeout, gap_after_reply, max_reply, barge_in)
             if self.on_turn is not None:
                 self.on_turn(turn)
+            i += 1
         if not self._aborted:
             await self._stream_silence(self.tail)
         stream_end = self._t_stream + self._sent * self._chunk_dur
@@ -242,6 +260,21 @@ class CallerEmulator:
         self._user.append(pcm)
         self._sent += 1
         return True
+
+    async def _streaming_while(self, pending: Awaitable[Stimulus | None]) -> Stimulus | None:
+        """Keep the microphone streaming silence until ``pending`` is ready."""
+        task = asyncio.ensure_future(pending)
+        silence = bytes(self._chunk_samples * 2)
+        try:
+            while not task.done():
+                if not await self._send(silence):
+                    return None
+            return task.result()
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     async def _stream_silence(self, duration: float) -> None:
         silence = bytes(self._chunk_samples * 2)

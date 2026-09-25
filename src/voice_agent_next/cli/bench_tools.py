@@ -52,6 +52,18 @@ def tools_cmd(
             "reference engine, else the suite's TTS or Kokoro)"
         ),
     ] = None,
+    caller: Annotated[
+        str,
+        typer.Option(
+            help="Who plays the caller: 'scripted' (the scenario's lines, whatever the agent "
+            "says) or 'llm:<llm spec>' (an LLM with the scenario's persona and goal reacts "
+            "to the agent; temperature 0, fixed seed)"
+        ),
+    ] = "scripted",
+    caller_max_turns: Annotated[
+        int | None,
+        typer.Option(min=1, help="LLM caller: most lines per call (default: script + 3)"),
+    ] = None,
     tool_delay_scale: Annotated[
         float, typer.Option(min=0.0, help="Multiply every mock tool's delay (0 = instant)")
     ] = 1.0,
@@ -87,6 +99,8 @@ def tools_cmd(
         van bench tools --preset local-cpu --llm ollama/qwen3.5:4b -k 3
 
         van bench tools -c agent.yaml -s my-scenarios.yaml --only book-table
+
+        van bench tools --preset local-cpu --caller llm:ollama/qwen3.5:4b
     """
     from ..bench.caller import TurnTiming
     from ..bench.onset import OnsetDetector, make_reference_vad
@@ -135,14 +149,17 @@ def tools_cmd(
             tool_delay_scale=tool_delay_scale,
             reply_timeout=reply_timeout,
             save_audio=audio,
+            caller=caller,
+            caller_max_turns=caller_max_turns,
         )
         options.validate()
     except (VoiceAgentError, ValueError) as exc:
         err.print(f"[red]error:[/red] {exc}")
         raise typer.Exit(2) from exc
-    caller = "synthetic" if suite.tts is None else json.dumps(suite.tts)
+    speech = "synthetic" if suite.tts is None else json.dumps(suite.tts)
     err.print(
-        f"[bold]van bench tools[/bold] · {system.label} · {suite.name} · caller {caller}",
+        f"[bold]van bench tools[/bold] · {system.label} · {suite.name} · caller {caller} "
+        f"({speech})",
         highlight=False,
     )
 

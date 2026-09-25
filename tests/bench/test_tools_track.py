@@ -386,6 +386,9 @@ def test_reference_engine_passes_every_check(tmp_path: Path) -> None:
     loaded = load_run(results.directory)  # type: ignore[arg-type]
     assert loaded.manifest.scenario["scenarios"][0]["sha256"]
     assert "Tool use (T6)" in render_tools_report(loaded)
+    # the scripted caller is the default
+    assert loaded.manifest.options["caller_policy"] == {"type": "scripted"}
+    assert item["caller_lines"] == [] and "The caller is scripted" in (results.report or "")
     assert (results.directory / "artifacts/session-001/stereo.wav").exists()  # type: ignore[operator]
 
 

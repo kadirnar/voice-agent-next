@@ -51,7 +51,7 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import yaml
@@ -62,6 +62,9 @@ from ..audio.resample import resample
 from ..audio.wav import read_wav
 from ..errors import ConfigurationError
 from .onset import frame_levels_db
+
+if TYPE_CHECKING:
+    from ..tts import TTS
 
 __all__ = [
     "BUILTIN_SCENARIOS",
@@ -456,14 +459,17 @@ def _pad_to_chunks(audio: AudioFrame, chunk: float) -> AudioFrame:
     return AudioFrame.concat([audio, pad]) if audio else pad
 
 
-async def _render_tts(spec: str | dict[str, Any], texts: Sequence[str]) -> list[AudioFrame]:
+async def _render_tts(
+    spec: str | dict[str, Any], texts: Sequence[str], tts: TTS | None = None
+) -> list[AudioFrame]:
     from ..registry import create
 
-    tts = create("tts", spec)
+    engine = tts if tts is not None else create("tts", spec)
     try:
-        return [(await tts.synthesize(text).collect()).to_mono() for text in texts]
+        return [(await engine.synthesize(text).collect()).to_mono() for text in texts]
     finally:
-        await tts.aclose()
+        if tts is None:
+            await engine.aclose()
 
 
 def noise_burst(duration: float, sample_rate: int, *, seed: int = 0) -> AudioFrame:
@@ -517,10 +523,14 @@ def _join_parts(
     return AudioFrame.concat(pieces), tuple(spans)
 
 
-async def render_stimuli(scenario: Scenario, *, turns: int | None = None) -> list[Stimulus]:
+async def render_stimuli(
+    scenario: Scenario, *, turns: int | None = None, tts: TTS | None = None
+) -> list[Stimulus]:
     """Render ``turns`` stimuli (default: one per scenario turn, cycling when more).
 
-    Each distinct scenario turn is rendered once; repetitions share the audio.
+    Each distinct scenario turn is rendered once; repetitions share the audio. ``tts``:
+    an open TTS to voice ``tts`` turns with instead of creating ``scenario.tts`` (it is
+    not closed), e.g. when rendering one line at a time.
     """
     from ..providers.mock import synth_speech
 
@@ -547,7 +557,7 @@ async def render_stimuli(scenario: Scenario, *, turns: int | None = None) -> lis
             (scenario.turns[i].parts or [])[k].text if k is not None else scenario.turns[i].text
             for i, k in tts_keys
         ]
-        rendered = await _render_tts(scenario.tts, [t or "" for t in texts])
+        rendered = await _render_tts(scenario.tts, [t or "" for t in texts], tts)
         tts_audio = {key: resample(a, rate) for key, a in zip(tts_keys, rendered, strict=True)}
 
     cache: dict[int, Stimulus] = {}
