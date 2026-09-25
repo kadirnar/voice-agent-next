@@ -95,6 +95,17 @@ Audio-streaming TTS removes the clause-rendering wait. It is the largest single 
 - 0 % missed turns, 0 % dead air.
 - This is about 3× faster than the best cascade measured here (≈ 0.9 s with Pocket TTS on CPU). The cost: no tools, no user transcript, and turn-taking you can't control. See `docs/providers/moshi.md`.
 
+## T1 · Omni model on CPU: LFM2.5-Audio-1.5B (2026-09-25, #75)
+
+`liquid-audio/lfm2.5-audio-1.5b` (GGUF Q4_0 via `llama-liquid-audio-server`, Linux x64 CPU runner). One model replaces STT + LLM + TTS; the cascade provides endpointing.
+
+| run | turns | v2v p50 | v2v p90 |
+|---|---:|---:|---:|
+| quiet machine | 11 | 1,834 ms | 1,958 ms |
+| shared machine | 23 | 1,845 ms | 3,954 ms |
+
+On CPU the omni model is slower than the best CPU cascade (≈ 0.9 s with Pocket TTS). The runner has no GPU backend yet; a GPU build is the obvious follow-up.
+
 ## T2 · ASR on CPU (2026-09-24, `van bench asr`)
 
 LibriSpeech test-clean smoke subset (50 utterances, 10 speakers), Ryzen 5 5600 CPU, Whisper-style normalization. `TTFS` is the time from the end of the audio to the final transcript: in streaming mode it is measured from `flush()`, in batch mode it is the whole transcription time.
