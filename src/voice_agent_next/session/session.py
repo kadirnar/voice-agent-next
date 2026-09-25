@@ -30,7 +30,7 @@ import random
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, cast
 
 from ..audio.frame import AudioFrame
 from ..audio.processing import AudioProcessor, ProcessorChain
@@ -632,6 +632,20 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
     async def update_instructions(self, instructions: str) -> None:
         self.agent.instructions = instructions
         await self.connection.update(instructions=instructions)
+
+    def update_endpointing(
+        self, *, mode: Literal["fixed", "dynamic"] | None = None, dictation: bool | None = None
+    ) -> None:
+        """Switch the cascade's endpointing policy and/or dictation mode from the next user
+        pause on (e.g. from a tool before the user reads out a phone number). See
+        ``docs/concepts/endpointing.md``. Engines that own turn detection themselves
+        (native speech-to-speech models) raise :class:`ConfigurationError`."""
+        update = getattr(self.connection, "update_endpointing", None)
+        if update is None:
+            raise ConfigurationError(
+                f"{type(self.connection).__name__} does not support endpointing updates"
+            )
+        update(mode=mode, dictation=dictation)
 
     async def handoff(
         self,

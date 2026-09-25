@@ -1,0 +1,31 @@
+# T1 latency with mid-turn pauses, voiced by Kokoro (am_adam) inside sherpa-onnx: the
+# `latency-pauses` script with real speech, for comparing endpointing policies on a local
+# cascade with a turn detector (Smart Turn) — see docs/concepts/endpointing.md.
+#
+# A fragment (`expect_reply: false`) is followed by `pause` seconds of silence, then the
+# rest of the question; an agent reply to a fragment counts as a cut-off (`cutoff_rate`).
+name: latency-local-sherpa-pauses
+version: 1
+description: >-
+  Customer-service questions, some said in two parts with a 0.45-0.8 s mid-turn pause,
+  spoken by Kokoro through sherpa-onnx (fully offline): v2v latency and cut-off rate.
+sample_rate: 16000
+loudness_dbfs: -20.0
+lead_in: 0.5
+stimuli: tts
+tts: {provider: sherpa-onnx/kokoro-multi-lang-v1_0-int8, voice: am_adam}
+reply_timeout: 15.0
+gap_after_reply: 0.5
+turns:
+  - {id: "time", text: "What time does the store open tomorrow?"}
+  - {id: "table-1", text: "I would like to book a table for", expect_reply: false, pause: 0.6}
+  - {id: "table-2", text: "two people tonight."}
+  - {id: "sunday", text: "Are you open on Sunday afternoon?"}
+  - {id: "order-1", text: "My order number is", expect_reply: false, pause: 0.8}
+  - {id: "order-2", text: "four five seven nine."}
+  - {id: "refund", text: "How long does a refund usually take?"}
+  - {id: "flight-1", text: "Can you change my flight to", expect_reply: false, pause: 0.45}
+  - {id: "flight-2", text: "Friday morning?"}
+  - {id: "jacket-1", text: "The refund was for the", expect_reply: false, pause: 0.7}
+  - {id: "jacket-2", text: "blue jacket I sent back last week."}
+  - {id: "thanks", text: "Thanks, that is all."}

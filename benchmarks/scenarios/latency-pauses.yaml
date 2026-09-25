@@ -1,0 +1,35 @@
+# T1 latency with mid-turn pauses (synthetic speech): endpointing speed vs cut-offs.
+#
+# Complete questions alternate with questions said in two parts: a fragment
+# (`expect_reply: false`) followed by `pause` seconds of silence, then the rest. An agent
+# reply to a fragment is a cut-off (`cutoff_rate` in the report); v2v is measured on the
+# turns that expect a reply. The pauses (0.45-0.8 s) straddle the cascade's fixed 0.6 s
+# VAD-only delay. Compare endpointing policies back to back, e.g.:
+#
+#   van bench latency --stt mock --llm mock --tts mock --vad energy \
+#       -s benchmarks/scenarios/latency-pauses.yaml --turns 40 -c fixed.yaml
+#   (fixed.yaml / dynamic.yaml: `cascade: {endpointing: fixed | dynamic}`)
+name: latency-pauses
+version: 1
+description: >-
+  Questions with and without a mid-turn pause (synthetic speech), for comparing
+  endpointing policies: voice-to-voice latency and cut-off rate.
+sample_rate: 16000
+loudness_dbfs: -20.0
+lead_in: 0.5
+stimuli: synthetic
+reply_timeout: 8.0
+gap_after_reply: 0.3
+turns:
+  - {id: "time", text: "What time is it?", duration: 0.6}
+  - {id: "table-1", text: "I would like to book a table for", duration: 1.0, expect_reply: false, pause: 0.6}
+  - {id: "table-2", text: "two people tonight.", duration: 0.8}
+  - {id: "open", text: "Are you open on Sunday?", duration: 0.7}
+  - {id: "order-1", text: "My order number is", duration: 0.7, expect_reply: false, pause: 0.8}
+  - {id: "order-2", text: "four five seven nine.", duration: 1.0}
+  - {id: "card", text: "I lost my card.", duration: 0.5}
+  - {id: "flight-1", text: "Can you change my flight to", duration: 0.9, expect_reply: false, pause: 0.45}
+  - {id: "flight-2", text: "Friday morning?", duration: 0.7}
+  - {id: "refund-1", text: "The refund was for the", duration: 0.7, expect_reply: false, pause: 0.7}
+  - {id: "refund-2", text: "blue jacket I sent back.", duration: 0.9}
+  - {id: "thanks", text: "Thanks, that is all.", duration: 0.6}

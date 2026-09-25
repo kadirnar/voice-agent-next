@@ -18,6 +18,8 @@ from typing import Any, Literal, TypeAlias
 
 __all__ = [
     "EOTMetrics",
+    "EndpointingMetrics",
+    "EndpointingPolicy",
     "EngineMetrics",
     "LLMMetrics",
     "Metrics",
@@ -206,6 +208,45 @@ class SpeculationMetrics:
     type: Literal["speculation"] = "speculation"
 
 
+EndpointingPolicy: TypeAlias = Literal["fixed", "dynamic", "dictation"]
+"""How the cascade chose an endpointing delay (see ``docs/concepts/endpointing.md``)."""
+
+
+@dataclass(slots=True, kw_only=True)
+class EndpointingMetrics:
+    """One endpointing decision of the cascade: a pause after user speech, and the delay
+    it waited before committing the turn (``CascadeOptions.endpointing``).
+
+    Emitted when the outcome is known: at once when the user resumed before the commit
+    (``committed=False``), otherwise ``false_commit_window`` after the commit (or earlier,
+    when the user started speaking again within it: ``false_commit=True``).
+    """
+
+    provider: str
+    model: str
+    item_id: str
+    """The user turn the pause belongs to."""
+    policy: EndpointingPolicy
+    delay: float
+    """Chosen silence (seconds from the end of speech) before the commit."""
+    probability: float | None = None
+    """The turn detector's end-of-turn probability (``None``: no detector)."""
+    threshold: float | None = None
+    hold: float | None = None
+    """Dynamic policy: the delay at the detector threshold (learned from the user's
+    mid-turn pauses)."""
+    committed: bool = True
+    """``False``: the user resumed before the delay elapsed (the turn continued)."""
+    pause: float | None = None
+    """Seconds from the end of speech until the user spoke again (resumed pauses and
+    false commits)."""
+    false_commit: bool = False
+    """The turn was committed, but the user started speaking again within
+    ``false_commit_window``: probably cut off mid-thought."""
+    timestamp: float = field(default_factory=_ts)
+    type: Literal["endpointing"] = "endpointing"
+
+
 @dataclass(slots=True, kw_only=True)
 class TurnMetrics:
     """Session-level metrics for one agent turn (user speech -> agent reply)."""
@@ -234,6 +275,7 @@ Metrics: TypeAlias = (
     | EOTMetrics
     | EngineMetrics
     | SpeculationMetrics
+    | EndpointingMetrics
     | TurnMetrics
     | RotationMetrics
 )

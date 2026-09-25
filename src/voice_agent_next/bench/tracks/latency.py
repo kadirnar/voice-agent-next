@@ -24,7 +24,11 @@ Reported next to it:
   ``greeting_ms``;
 * ``dead_air_rate`` — share of turns with ``v2v_ms`` above 2,000 ms (configurable) or
   without any reply; ``missed_rate``, ``premature_rate`` (the agent started before the
-  user finished) and ``interrupted_rate``.
+  user finished) and ``interrupted_rate``;
+* ``cutoff_rate`` — share of mid-turn fragments (scenario turns with
+  ``expect_reply: false``: the user pauses, then goes on) that the agent answered, i.e.
+  the user was cut off; with the cascade's ``false_commits`` (commits the user spoke
+  again right after, :class:`~voice_agent_next.metrics.EndpointingMetrics`) per session.
 """
 
 from __future__ import annotations
@@ -43,7 +47,15 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...audio.frame import AudioFormat
-from ...metrics import EngineMetrics, LLMMetrics, Metrics, STTMetrics, TTSMetrics, TurnMetrics
+from ...metrics import (
+    EndpointingMetrics,
+    EngineMetrics,
+    LLMMetrics,
+    Metrics,
+    STTMetrics,
+    TTSMetrics,
+    TurnMetrics,
+)
 from ...session import AgentSession, AgentState
 from ...transports.loopback import LoopbackTransport
 from ...utils.clock import now
@@ -158,6 +170,8 @@ class LatencyItem(BaseModel):
     premature: bool = False
     dead_air: bool = False
     interrupted: bool = False
+    cut_off: bool = False
+    """A mid-turn fragment (``expect_reply: false``) that the agent answered anyway."""
     user_transcript: str | None = None
     agent_transcript: str | None = None
     errors: list[str] = Field(default_factory=list)
@@ -385,6 +399,7 @@ def _analyze_session(
                 and (missed or (v2v is not None and v2v > options.dead_air_threshold * 1000)),
                 interrupted=bool(tm is not None and tm.interrupted)
                 or bool(_between(((t, t) for t in probe.interruptions), w0, w1)),
+                cut_off=not stim.expect_reply and turn.reply_start is not None,
                 user_transcript=finals[-1] if finals else None,
                 agent_transcript=agent_text or None,
                 errors=errors,
@@ -400,6 +415,8 @@ def _analyze_session(
     first_uon = rec.to_offset(turns[0].speech_start) if turns else None
     greeting = first_onset_between(onsets, 0.0, first_uon)
     lags = run.call.push_lag
+    endpointing = [m for _, m in probe.components if isinstance(m, EndpointingMetrics)]
+    commits = [m.delay for m in endpointing if m.committed]
     info = {
         "session": run.index,
         "session_ready_ms": _ms(run.ready - run.origin),
@@ -413,6 +430,10 @@ def _analyze_session(
         "push_lag_max_ms": _ms(run.call.max_push_lag),
         "errors": [e for _, e in probe.errors],
     }
+    if endpointing:
+        info["endpointing_delay_p50_ms"] = _ms(percentile(commits, 50)) if commits else None
+        info["false_commits"] = sum(m.false_commit for m in endpointing)
+        info["resumed_pauses"] = sum(not m.committed for m in endpointing)
     return _SessionAnalysis(items, labels, info)
 
 
@@ -453,12 +474,15 @@ def summarize_latency(
     def rate(flag: str) -> float | None:
         return round(sum(bool(getattr(it, flag)) for it in main) / len(main), 6) if main else None
 
+    fragments = [it for it in items if not it.expect_reply and not it.warmup]
     rates = {
         "dead_air_rate": rate("dead_air"),
         "missed_rate": rate("missed"),
         "premature_rate": rate("premature"),
         "interrupted_rate": rate("interrupted"),
     }
+    if fragments:
+        rates["cutoff_rate"] = round(sum(it.cut_off for it in fragments) / len(fragments), 6)
     counts = {
         "sessions": len(sessions) or len({it.session for it in items}),
         "turns": len(items),
@@ -471,6 +495,11 @@ def summarize_latency(
         "premature": sum(it.premature for it in main),
         "errors": sum(len(it.errors) for it in items),
     }
+    if fragments:
+        counts["fragments"] = len(fragments)
+        counts["cut_offs"] = sum(it.cut_off for it in fragments)
+    if any("false_commits" in s for s in sessions):
+        counts["false_commits"] = sum(s.get("false_commits", 0) for s in sessions)
     spans = {
         key.removesuffix("_ms"): metrics[key].p50
         for key in ("eou_delay_ms", "response_ttfb_ms", "stt_latency_ms", "llm_ttft_ms",
@@ -568,6 +597,7 @@ def latency_report_spec(results: RunResults) -> ReportSpec:
             "missed_rate": "missed (no reply)",
             "premature_rate": "premature (agent started before the user finished)",
             "interrupted_rate": "interrupted replies",
+            "cutoff_rate": "cut off (a mid-turn pause was answered)",
         },
         item_columns=_ITEM_COLUMNS,
         sections=[("Method", method)],
