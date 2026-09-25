@@ -56,6 +56,7 @@ __all__ = [
     "load_config",
     "merge_config",
     "resolve_callable",
+    "resolve_extends",
 ]
 
 SingleComponentSpec = str | dict[str, Any]
@@ -147,7 +148,7 @@ def load_config(source: str | os.PathLike[str] | dict[str, Any]) -> AppConfig:
             raise ConfigurationError(f"unsupported config format: {suffix}")
     if not isinstance(data, dict):
         raise ConfigurationError("config root must be a mapping")
-    data = _apply_extends(data)
+    data = resolve_extends(data)
     cfg = AppConfig.model_validate(_expand_env(data))
     cfg.validate_components()
     return cfg
@@ -157,7 +158,10 @@ _COMPONENT_KEYS = ("engine", "stt", "llm", "tts", "vad", "turn_detector")
 _CASCADE_KEYS = ("stt", "llm", "tts", "vad", "turn_detector")
 
 
-def _apply_extends(data: dict[str, Any]) -> dict[str, Any]:
+def resolve_extends(data: dict[str, Any]) -> dict[str, Any]:
+    """A raw config mapping with its ``extends:`` preset merged underneath, as
+    :func:`load_config` does it. Code that fills in defaults on a raw config ("no LLM: use
+    the mock engine") must look at the resolved mapping: the preset may provide them."""
     name = data.get("extends")
     if name is None:
         return data

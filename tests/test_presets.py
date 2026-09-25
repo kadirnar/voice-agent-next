@@ -475,3 +475,57 @@ def test_cli_run_auto_picks_a_ready_preset(cli: Callable[..., Any]) -> None:
     # explicit components: no auto-pick (the previous behavior)
     code, out, ran = cli("run", "--engine", "mock", env=nothing)
     assert code == 0 and "preset" not in out and ran[-1].engine == "mock"
+
+
+# ------------------------------------------------ `extends:` without components (#128)
+LOCAL_CPU = PRESETS["local-cpu"].config
+
+
+def test_bench_system_inherits_the_preset_components(tmp_path: Path) -> None:
+    from voice_agent_next.bench.system import BenchSystem
+
+    config = tmp_path / "bench.yaml"
+    config.write_text("extends: local-cpu\nagent: {instructions: Be brief.}\n", encoding="utf-8")
+    system = BenchSystem.from_options(config=config)  # default_engine="mock"
+    cfg = system.config
+    assert cfg.engine is None and cfg.llm == LOCAL_CPU["llm"]  # not the mock engine
+    assert cfg.stt == LOCAL_CPU["stt"] and cfg.extends == "local-cpu"
+    assert cfg.agent.instructions == "Be brief." and system.kind == "cascade"
+    assert system.describe()["config"]["extends"] == "local-cpu"
+    assert BenchSystem.from_options(config=cfg).config == cfg  # an AppConfig round-trips
+
+    native = BenchSystem.from_options(config={"extends": "openai-realtime"})
+    assert native.config.engine == PRESETS["openai-realtime"].config["engine"]
+    # a provider-less mapping (in the file or as a flag) tweaks the preset's component
+    tweaked = BenchSystem.from_options(
+        config={"extends": "local-cpu", "stt": {"language": "en"}}, tts={"speed": 1.2}
+    )
+    assert tweaked.config.stt == {"provider": LOCAL_CPU["stt"], "language": "en"}
+    assert isinstance(tweaked.config.tts, dict) and tweaked.config.tts["speed"] == 1.2
+    assert tweaked.config.llm == LOCAL_CPU["llm"]
+    # explicit specs still win over the preset
+    swapped = BenchSystem.from_options(config=config, llm="mock")
+    assert swapped.config.llm == "mock" and swapped.config.stt == cfg.stt
+    mocked = BenchSystem.from_options(config=config, engine="mock")
+    assert mocked.config.engine == "mock" and mocked.config.llm is None
+    assert mocked.config.extends == "local-cpu"
+
+
+def test_serve_config_inherits_the_preset_components(tmp_path: Path) -> None:
+    from voice_agent_next.cli.serve import SourceOptions, build_app_config
+
+    config = tmp_path / "agent.yaml"
+    config.write_text("extends: local-cpu\nagent: {greeting: Hello}\n", encoding="utf-8")
+    cfg = build_app_config(SourceOptions(config=str(config)))
+    assert cfg.engine is None and cfg.llm == LOCAL_CPU["llm"] and cfg.extends == "local-cpu"
+    assert cfg.agent.greeting == "Hello"
+
+
+def test_cli_run_config_extends_inherits_the_llm(cli: Callable[..., Any], tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    config.write_text("extends: local-cpu\nagent: {greeting: Hello}\n", encoding="utf-8")
+    code, out, ran = cli("run", "--config", str(config))
+    assert code == 0, out
+    assert "mock engine" not in out
+    assert ran[-1].engine is None and ran[-1].llm == LOCAL_CPU["llm"]
+    assert ran[-1].extends == "local-cpu" and ran[-1].agent.greeting == "Hello"

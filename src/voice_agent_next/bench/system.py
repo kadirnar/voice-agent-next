@@ -20,7 +20,7 @@ from typing import Any, Literal
 import yaml
 
 from ..app import build_agent
-from ..config import AppConfig, ComponentSpec, load_config
+from ..config import AppConfig, ComponentSpec, load_config, resolve_extends
 from ..engine import S2SEngine
 from ..engines.cascade import CascadeEngine, CascadeOptions
 from ..errors import ConfigurationError
@@ -122,8 +122,10 @@ class BenchSystem:
         """Combine a config file/mapping with explicit specs (explicit specs win).
 
         The file may hold only agent/session settings when the engine comes from the
-        arguments; without any engine or LLM configured, ``default_engine`` is used.
+        arguments; without any engine or LLM configured (counting the ``extends:`` preset's
+        components), ``default_engine`` is used.
         """
+        resolved = isinstance(config, AppConfig)  # its preset is already merged in
         if isinstance(config, AppConfig):
             data: dict[str, Any] = config.model_dump()
         elif isinstance(config, Mapping):
@@ -132,6 +134,7 @@ class BenchSystem:
             data = _read_config_file(Path(config))
         else:
             data = {}
+        extends = data.pop("extends", None)
         cascade = {"stt": stt, "llm": llm, "tts": tts, "turn_detector": turn_detector}
         explicit_cascade = any(v is not None for v in cascade.values())
         if engine is not None and explicit_cascade:
@@ -143,9 +146,16 @@ class BenchSystem:
             data.update({k: v for k, v in cascade.items() if v is not None})
         if vad is not None:
             data["vad"] = vad
+        if extends is not None and not resolved:
+            # The preset goes under the file and the explicit specs (`stt: {language: fr}`
+            # tweaks its STT) and is merged before the default engine is considered: the
+            # preset's own engine/LLM must win over the mock (#128).
+            data = resolve_extends({**data, "extends": extends})
+            extends = data.pop("extends")
         if data.get("engine") is None and data.get("llm") is None and default_engine:
             data["engine"] = default_engine
         cfg = load_config(data)  # validated once, after merging
+        cfg.extends = extends
         return cls(cfg, label or cls.default_label(cfg))
 
     @staticmethod
