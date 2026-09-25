@@ -53,13 +53,6 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: uv sync
       - run: uv run pytest -q
-      - name: TEMP repeat the stabilized tests 5x (remove before merge)
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          for i in 1 2 3 4 5; do
-            uv run pytest -q -p no:randomly tests/test_openai_rotation.py tests/test_recording.py tests/test_telephony.py "tests/test_session.py::test_resampled_responses_are_played_to_the_end" "tests/test_session.py::test_loopback_playout_keeps_its_sample_clock_through_late_wakeups" "tests/test_session.py::test_loopback_playout_never_starts_a_frame_in_the_future" tests/bench/test_overhead.py tests/test_moshi.py || exit 1
-          done
       - name: providers import without optional dependencies
         run: uv run van providers --json > /dev/null
       - name: echo cancellation with the native livekit wheel (extra `aec`)
@@ -82,13 +75,6 @@ jobs:
       # `cuda` is ~700 MB of NVIDIA runtime wheels, useless on a GPU-less runner
       - run: uv sync --all-extras --no-extra cuda
       - run: uv run pytest -q
-      - name: TEMP repeat the stabilized tests 5x (remove before merge)
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          for i in 1 2 3 4 5; do
-            uv run pytest -q -p no:randomly tests/test_openai_rotation.py tests/test_recording.py tests/test_telephony.py "tests/test_session.py::test_resampled_responses_are_played_to_the_end" "tests/test_session.py::test_loopback_playout_keeps_its_sample_clock_through_late_wakeups" "tests/test_session.py::test_loopback_playout_never_starts_a_frame_in_the_future" tests/bench/test_overhead.py tests/test_moshi.py || exit 1
-          done
       - run: uv run van providers --json > /dev/null
 
   # Windows runs on every pull request: asyncio networking (Proactor loop, TCP connect
@@ -105,13 +91,6 @@ jobs:
           python-version: "3.12"
       - run: uv sync
       - run: uv run pytest -q
-      - name: TEMP repeat the stabilized tests 5x (remove before merge)
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          for i in 1 2 3 4 5; do
-            uv run pytest -q -p no:randomly tests/test_openai_rotation.py tests/test_recording.py tests/test_telephony.py "tests/test_session.py::test_resampled_responses_are_played_to_the_end" "tests/test_session.py::test_loopback_playout_keeps_its_sample_clock_through_late_wakeups" "tests/test_session.py::test_loopback_playout_never_starts_a_frame_in_the_future" tests/bench/test_overhead.py tests/test_moshi.py || exit 1
-          done
       - run: uv run van providers --json
       - name: echo cancellation with the native livekit wheel (extra `aec`)
         run: uv run --extra aec pytest -q -m model tests/test_aec.py
@@ -175,13 +154,6 @@ jobs:
           python-version: "3.12"
       - run: uv sync
       - run: uv run pytest -q
-      - name: TEMP repeat the stabilized tests 5x (remove before merge)
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          for i in 1 2 3 4 5; do
-            uv run pytest -q -p no:randomly tests/test_openai_rotation.py tests/test_recording.py tests/test_telephony.py "tests/test_session.py::test_resampled_responses_are_played_to_the_end" "tests/test_session.py::test_loopback_playout_keeps_its_sample_clock_through_late_wakeups" "tests/test_session.py::test_loopback_playout_never_starts_a_frame_in_the_future" tests/bench/test_overhead.py tests/test_moshi.py || exit 1
-          done
       - run: uv run van providers --json
       - name: echo cancellation with the native livekit wheel (extra `aec`)
         run: uv run --extra aec pytest -q -m model tests/test_aec.py

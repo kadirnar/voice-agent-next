@@ -50,10 +50,4 @@ jobs:
           key: models-${{ runner.os }}-${{ hashFiles('src/voice_agent_next/providers/**/*.py', 'tests/providers/**/*.py', 'tests/test_aec.py') }}
           restore-keys: models-${{ runner.os }}-
       - run: uv sync --extra silero --extra smart-turn --extra faster-whisper --extra kokoro --extra aec --extra moonshine
-      - name: TEMP kokoro diagnostics (remove before merge)
-        if: runner.os == 'macOS'
-        continue-on-error: true
-        shell: bash
-        run: |
-          VAN_KOKORO_TEST_MODEL=v1.0-int8 uv run pytest -q -m model tests/providers/test_kokoro.py || true
       - run: uv run pytest -q -m model --durations=15
