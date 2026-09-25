@@ -16,6 +16,7 @@ __all__ = [
     "ProviderNotFoundError",
     "ProviderTimeoutError",
     "RateLimitError",
+    "SessionRefused",
     "ToolError",
     "TransportError",
     "VoiceAgentError",
@@ -95,6 +96,26 @@ class EngineError(VoiceAgentError):
 
 class TransportError(VoiceAgentError):
     """An audio transport (local audio, WebSocket, WebRTC, telephony...) failed."""
+
+
+class SessionRefused(TransportError):
+    """Raised by a server's session or agent factory to refuse a client.
+
+    Unlike other exceptions (which clients only see as a generic ``internal_error`` with
+    an error id), the message is sent to the client as is: keep it free of internals.
+
+    Args:
+        message: what the client is told, e.g. ``"invalid token"``.
+        code: the ``error`` message's code.
+        close_code: the WebSocket close code (1008: policy violation).
+    """
+
+    def __init__(
+        self, message: str, *, code: str = "session_refused", close_code: int = 1008
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.close_code = close_code
 
 
 class ToolError(VoiceAgentError):

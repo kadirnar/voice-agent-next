@@ -24,6 +24,12 @@ Protocol summary (full specification: ``docs/transports/websocket.md``):
 
 WebSocket runs over TCP, so a lost packet stalls the stream (head-of-line blocking). It is
 a good fit for backends, LANs and prototypes; prefer WebRTC for clients on lossy networks.
+
+Secure by default: browser pages from other websites are refused (``allowed_origins``),
+sessions are limited in number, duration and idle time, both directions are bounded (a
+flooding client is slowed down by TCP backpressure, a client that never reads is
+disconnected with 1008), and errors reach clients as a generic message with an
+``error_id`` (the details are only logged).
 """
 
 from __future__ import annotations
@@ -34,18 +40,33 @@ import binascii
 import contextlib
 import inspect
 import json
+import logging
 import math
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
+from websockets.http11 import Request, Response
 
 from ..audio.frame import AudioFormat, AudioFrame
 from ..audio.resample import StreamResampler
-from ..errors import TransportError
+from ..errors import SessionRefused, TransportError
 from ..metrics import metrics_to_dict
+from ..server.security import (
+    DEFAULT_IDLE_TIMEOUT,
+    DEFAULT_MAX_SESSION_DURATION,
+    DEFAULT_MAX_SESSIONS,
+    INBOX_HIGH,
+    INBOX_LOW,
+    MAX_SEND_BUFFER,
+    OriginPolicy,
+    exposure_warning,
+    header_origin,
+    report_error,
+)
 from ..session.events import AgentState
 from ..utils.aio import BackgroundTasks, Chan, cancel_and_wait, wait_first
 from ..utils.clock import now
@@ -81,10 +102,13 @@ CODEC = "pcm_s16le"
 _CODECS = frozenset({"pcm_s16le", "pcm16", "s16le"})
 _FRAMINGS = frozenset({"binary", "base64"})
 _MIN_RATE, _MAX_RATE = 8_000, 48_000
+_MAX_PENDING_TEXT = 8
+"""Typed messages waiting for a reply beyond which new ones are refused (``rate_limited``)."""
 
 # WebSocket close codes (RFC 6455 §7.4.1)
 CLOSE_NORMAL = 1000
 CLOSE_PROTOCOL_ERROR = 1002
+CLOSE_POLICY_VIOLATION = 1008
 CLOSE_INTERNAL_ERROR = 1011
 CLOSE_TRY_AGAIN_LATER = 1013
 
@@ -99,6 +123,100 @@ class _Outgoing:
     payload: str | bytes
     samples: int = 0
     """Agent audio samples carried by this message (0 for control messages)."""
+
+
+class _Outbox(Chan[_Outgoing]):
+    """The messages queued for the client, bounded in bytes.
+
+    Beyond ``limit`` bytes the client is not reading what it is sent: the queue is dropped,
+    later messages are discarded and ``on_overflow`` is called (the transport closes the
+    connection) — memory never grows without bound, whoever fills the queue (agent audio,
+    replies to a flood of client messages...).
+    """
+
+    def __init__(self, limit: int | None, on_overflow: Callable[[], None]) -> None:
+        super().__init__()
+        self.limit = limit
+        self.bytes = 0
+        self.overflowed = False
+        self._on_overflow = on_overflow
+
+    def send_nowait(self, item: _Outgoing) -> None:
+        if self.overflowed:
+            return
+        super().send_nowait(item)
+        self.bytes += len(item.payload)
+        if self.limit is not None and self.bytes > self.limit:
+            self.overflowed = True
+            self.clear()
+            self._on_overflow()
+
+    def recv_nowait(self) -> _Outgoing:
+        item = super().recv_nowait()
+        self.bytes -= len(item.payload)
+        return item
+
+    async def recv(self) -> _Outgoing:
+        item = await super().recv()
+        self.bytes -= len(item.payload)
+        return item
+
+    def clear(self) -> list[_Outgoing]:
+        items = super().clear()
+        self.bytes = 0
+        return items
+
+
+class _Inbox(Chan[AudioFrame]):
+    """User audio received but not consumed by the session yet, counted in bytes.
+
+    The reader stops reading the socket above ``high`` bytes (:meth:`wait_space`) and
+    resumes below ``low``: TCP backpressure then slows a client that sends faster than the
+    session consumes (the Realtime server's high-water marks).
+    """
+
+    def __init__(self, high: int = INBOX_HIGH, low: int = INBOX_LOW) -> None:
+        super().__init__()
+        self.high, self.low = high, low
+        self.bytes = 0
+        self._space = asyncio.Event()
+        self._space.set()
+
+    @property
+    def full(self) -> bool:
+        return self.bytes > self.high
+
+    def send_nowait(self, item: AudioFrame) -> None:
+        super().send_nowait(item)
+        self.bytes += len(item.data)
+        if self.bytes > self.high:
+            self._space.clear()
+
+    def _took(self, item: AudioFrame) -> AudioFrame:
+        self.bytes -= len(item.data)
+        if self.bytes <= self.low:
+            self._space.set()
+        return item
+
+    def recv_nowait(self) -> AudioFrame:
+        return self._took(super().recv_nowait())
+
+    async def recv(self) -> AudioFrame:
+        return self._took(await super().recv())
+
+    def clear(self) -> list[AudioFrame]:
+        items = super().clear()
+        self.bytes = 0
+        self._space.set()
+        return items
+
+    def close(self) -> None:
+        super().close()
+        self._space.set()  # nobody will consume: do not keep the reader waiting
+
+    async def wait_space(self) -> None:
+        """Wait until the session consumed enough (or the inbox was closed)."""
+        await self._space.wait()
 
 
 class _HandshakeError(TransportError):
@@ -135,8 +253,14 @@ class WebSocketServerTransport(Transport):
         frame_duration: maximum duration of each agent audio message, in seconds.
         hello_timeout: seconds to wait for ``hello`` before closing the connection.
         flush_timeout: on close, seconds to wait for queued control messages to be sent.
+        max_send_buffer: bytes queued for a client that does not read them before the
+            connection is closed with 1008 (``None``: unbounded).
+        allowed_origins: standalone mode: browser origins allowed besides this machine's
+            own pages and clients without an ``Origin`` header (see
+            :class:`~voice_agent_next.server.security.OriginPolicy`); others get HTTP 403.
         serve_options: extra arguments for ``websockets.asyncio.server.serve`` (standalone
-            mode), e.g. ``ssl``, ``origins`` or ``process_request``.
+            mode), e.g. ``ssl`` or ``process_request``. ``origins`` (the ``websockets``
+            allow-list) replaces ``allowed_origins``.
     """
 
     capabilities = TransportCapabilities(playback_position=True, messages=True)
@@ -152,6 +276,8 @@ class WebSocketServerTransport(Transport):
         frame_duration: float = 0.02,
         hello_timeout: float = 10.0,
         flush_timeout: float = 1.0,
+        max_send_buffer: int | None = MAX_SEND_BUFFER,
+        allowed_origins: str | Sequence[str] | None = (),
         serve_options: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
@@ -167,6 +293,8 @@ class WebSocketServerTransport(Transport):
         self.hello_timeout = hello_timeout
         self.flush_timeout = flush_timeout
         self.serve_options = dict(serve_options or {})
+        self.origin_policy = OriginPolicy(allowed_origins)
+        self.max_send_buffer = max_send_buffer
         self.session_id = new_id("ws_")
         self.hello: dict[str, Any] = {}
         """The client's ``hello`` message (``hello.get("metadata")`` holds app data)."""
@@ -180,8 +308,9 @@ class WebSocketServerTransport(Transport):
         self._ready = False
         self._closed = False
         self._disconnected = asyncio.Event()
-        self._input: Chan[AudioFrame] = Chan()
-        self._outbox: Chan[_Outgoing] = Chan()
+        self._input = _Inbox()
+        self._outbox = _Outbox(max_send_buffer, self._on_overflow)
+        self._last_received = now()
         self._reader: asyncio.Task[None] | None = None
         self._writer: asyncio.Task[None] | None = None
         self._tasks = BackgroundTasks("ws-transport")
@@ -213,6 +342,12 @@ class WebSocketServerTransport(Transport):
         """The handshake completed and the client has not disconnected yet."""
         return self._ready and not self._disconnected.is_set()
 
+    def idle_time(self) -> float:
+        """Seconds since the client last sent anything (0 while its input is queued)."""
+        if self._input.bytes > 0:
+            return 0.0
+        return max(0.0, now() - self._last_received)
+
     # ------------------------------------------------------------------- lifecycle
     async def listen(self) -> None:
         """Standalone mode: start listening (idempotent). :attr:`port` is then the bound port."""
@@ -222,9 +357,20 @@ class WebSocketServerTransport(Transport):
             raise RuntimeError("listen() is only available in standalone mode")
         self._pending = asyncio.Queue()
         options: dict[str, Any] = {"compression": None, **self.serve_options}
+        if "origins" not in options:
+            options["process_request"] = _check_origin(
+                self.origin_policy, options.get("process_request")
+            )
         self._server = await serve(self._accept, self.host, self.port, **options)
         self.port = _bound_port(self._server, self.port)
         logger.info("WebSocket transport waiting for a client on %s", self.url)
+        warning = exposure_warning(
+            self.host,
+            authenticated=self.serve_options.get("process_request") is not None,
+            what="the WebSocket transport",
+        )
+        if warning is not None:
+            logger.warning(warning)
 
     async def start(self) -> None:
         """Perform the ``hello``/``ready`` handshake (standalone: wait for a client first).
@@ -357,6 +503,22 @@ class WebSocketServerTransport(Transport):
             self._outbox.send_nowait(item)
         self._out_samples -= dropped
 
+    def _on_overflow(self) -> None:
+        """The client does not read what it is sent: disconnect it (1008)."""
+        logger.warning(
+            "WebSocket client %s does not read fast enough (over %s bytes queued): closing",
+            self.session_id, self.max_send_buffer,
+        )  # fmt: skip
+        self.close_code = CLOSE_POLICY_VIOLATION
+        self.close_reason = "client does not read fast enough"
+        websocket = self.websocket
+        if websocket is not None:
+            self._tasks.spawn(
+                _close_quietly(websocket, self.close_code, self.close_reason),
+                name="ws-overflow-close",
+            )
+        self._on_disconnected()
+
     def _on_disconnected(self) -> None:
         if self._disconnected.is_set():
             return
@@ -469,10 +631,13 @@ class WebSocketServerTransport(Transport):
         assert websocket is not None
         try:
             async for message in websocket:
+                self._last_received = now()
                 if isinstance(message, str):
                     self._on_text(message)
                 else:
                     self._on_audio(bytes(message))
+                if self._input.full:  # backpressure: stop reading until the session catches up
+                    await self._input.wait_space()
         except ConnectionClosed:
             pass
         except Exception:
@@ -597,6 +762,7 @@ class SessionBridge:
         self.transport = transport
         self.text_input = text_input
         self._items: dict[str, _AgentItem] = {}
+        self._pending_replies = 0
         self._tasks = BackgroundTasks("ws-bridge")
         self._started = asyncio.Event()
         handlers: list[tuple[Any, str, Callable[..., Any]]] = [
@@ -710,11 +876,18 @@ class SessionBridge:
         self._send({"type": "metrics", "kind": kind, "data": data})
 
     def _on_error(self, ev: SessionError) -> None:
+        kind = "recoverable" if ev.recoverable else "fatal"
+        error_id, message = report_error(
+            ev.error, f"The agent hit a {kind} error",
+            session_id=getattr(self.transport, "session_id", None),
+            level=logging.WARNING, traceback=False,
+        )  # fmt: skip
         self._send(
             {
                 "type": "error",
                 "code": "session_error",
-                "message": _describe(ev.error),
+                "message": message,
+                "error_id": error_id,
                 "fatal": not ev.recoverable,
             }
         )
@@ -729,7 +902,21 @@ class SessionBridge:
                 {"type": "error", "code": "invalid_message", "message": "`text.text` is empty"}
             )
             return
-        self._tasks.spawn(self._reply(text.strip()), name="bridge-text")
+        if self._pending_replies >= _MAX_PENDING_TEXT:  # a flood of typed messages
+            self._send(
+                {
+                    "type": "error",
+                    "code": "rate_limited",
+                    "message": "Too many typed messages are waiting for a reply; wait for one.",
+                }
+            )
+            return
+        self._pending_replies += 1
+        task = self._tasks.spawn(self._reply(text.strip()), name="bridge-text")
+        task.add_done_callback(self._reply_done)
+
+    def _reply_done(self, task: asyncio.Task[None]) -> None:
+        self._pending_replies -= 1
 
     async def _reply(self, text: str) -> None:
         await self._started.wait()  # the session may still be connecting its engine
@@ -738,8 +925,14 @@ class SessionBridge:
         try:
             await self.session.generate_reply(user_input=text)
         except Exception as exc:
-            logger.warning("typed input failed: %s", exc)
-            self._send({"type": "error", "code": "text_failed", "message": _describe(exc)})
+            error_id, message = report_error(
+                exc, "The reply to the typed message failed",
+                session_id=getattr(self.transport, "session_id", None),
+                level=logging.WARNING, traceback=False,
+            )  # fmt: skip
+            self._send(
+                {"type": "error", "code": "text_failed", "message": message, "error_id": error_id}
+            )
 
 
 # ------------------------------------------------------------------------------ server
@@ -756,17 +949,31 @@ class WebSocketAgentServer:
     :class:`WebSocketServerTransport` (see its ``hello``, ``path`` and ``session_id``).
     They may be coroutine functions.
 
+    A factory that raises :class:`~voice_agent_next.errors.SessionRefused` refuses the
+    client with that message (e.g. failed authentication); any other exception reaches the
+    client as a generic ``internal_error`` with an ``error_id`` (the details are logged).
+
     Args:
         session_factory: builds the :class:`AgentSession` for a connection.
         agent_factory: builds the :class:`Agent` for a connection.
         host / port: listening address (``port=0`` picks a free port; see :attr:`port`).
-        max_sessions: refuse clients (close code 1013) beyond this many live sessions.
+        max_sessions: refuse clients (close code 1013) beyond this many live sessions
+            (default 64; ``None``: no limit).
+        max_session_duration: end sessions after this many seconds with a
+            ``session_expired`` error (default one hour; ``None``: no limit).
+        idle_timeout: end sessions after this many seconds without any client message
+            with a ``session_idle`` error (default 5 minutes; ``None``: never).
+        allowed_origins: browser origins allowed besides this machine's own pages
+            (``http://localhost:*``...) and clients without an ``Origin`` header (native
+            clients, telephony providers); others get HTTP 403. See
+            :class:`~voice_agent_next.server.security.OriginPolicy`.
         forward_events: send transcripts, state changes, metrics and errors to clients.
-        input_sample_rate / output_sample_rate / frame_duration / hello_timeout: per
-            connection transport options (see :class:`WebSocketServerTransport`).
+        input_sample_rate / output_sample_rate / frame_duration / hello_timeout /
+            max_send_buffer: per connection transport options (see
+            :class:`WebSocketServerTransport`).
         serve_options: extra ``websockets.asyncio.server.serve`` arguments, e.g. ``ssl``
-            (TLS), ``origins`` (browser origin allow-list) or ``process_request`` (HTTP
-            routes, authentication).
+            (TLS) or ``process_request`` (HTTP routes, authentication). ``origins`` (the
+            ``websockets`` allow-list) replaces ``allowed_origins``.
     """
 
     protocol: str = PROTOCOL
@@ -783,15 +990,28 @@ class WebSocketAgentServer:
         output_sample_rate: int = 24_000,
         frame_duration: float = 0.02,
         hello_timeout: float = 10.0,
-        max_sessions: int | None = None,
+        max_sessions: int | None = DEFAULT_MAX_SESSIONS,
+        max_session_duration: float | None = DEFAULT_MAX_SESSION_DURATION,
+        idle_timeout: float | None = DEFAULT_IDLE_TIMEOUT,
+        allowed_origins: str | Sequence[str] | None = (),
+        max_send_buffer: int | None = MAX_SEND_BUFFER,
         forward_events: bool = True,
         **serve_options: Any,
     ) -> None:
+        for option, value in (
+            ("max_session_duration", max_session_duration),
+            ("idle_timeout", idle_timeout),
+        ):
+            if value is not None and value <= 0:
+                raise ValueError(f"{option} must be > 0 (None: no limit)")
         self.session_factory = session_factory
         self.agent_factory = agent_factory
         self.host = host
         self.port = port
         self.max_sessions = max_sessions
+        self.max_session_duration = max_session_duration
+        self.idle_timeout = idle_timeout
+        self.origin_policy = OriginPolicy(allowed_origins)
         self.forward_events = forward_events
         self.serve_options = serve_options
         self._transport_options: dict[str, Any] = {
@@ -799,6 +1019,7 @@ class WebSocketAgentServer:
             "output_sample_rate": output_sample_rate,
             "frame_duration": frame_duration,
             "hello_timeout": hello_timeout,
+            "max_send_buffer": max_send_buffer,
         }
         self._server: Server | None = None
         self._sessions: set[AgentSession] = set()
@@ -820,9 +1041,20 @@ class WebSocketAgentServer:
         if self._server is not None:
             return
         options: dict[str, Any] = {"compression": None, **self.serve_options}
+        if "origins" not in options:
+            options["process_request"] = _check_origin(
+                self.origin_policy, options.get("process_request")
+            )
         self._server = await serve(self._handle, self.host, self.port, **options)
         self.port = _bound_port(self._server, self.port)
         logger.info("serving voice agents on %s (%s)", self.url, self.protocol)
+        warning = exposure_warning(
+            self.host,
+            authenticated=self.serve_options.get("process_request") is not None,
+            what=f"the {self.protocol} server",
+        )
+        if warning is not None:
+            logger.warning(warning)
 
     async def serve_forever(self) -> None:
         """Serve until :meth:`aclose` is called or this coroutine is cancelled."""
@@ -861,6 +1093,34 @@ class WebSocketAgentServer:
         """The transport of an accepted connection (subclasses serve other dialects)."""
         return WebSocketServerTransport(websocket, **self._transport_options)
 
+    async def _watchdog(self, transport: WebSocketServerTransport) -> str:
+        """Returns (after telling the client) once the session is too old or idle."""
+        started = now()
+        limit, idle = self.max_session_duration, self.idle_timeout
+        while True:
+            t = now()
+            waits = [1.0]
+            if limit is not None:
+                if t - started >= limit:
+                    code = "session_expired"
+                    message = f"The session reached its maximum duration of {limit:g} seconds."
+                    break
+                waits.append(started + limit - t)
+            if idle is not None:
+                idle_for = transport.idle_time()
+                if idle_for >= idle:
+                    code = "session_idle"
+                    message = f"The session was closed after {idle:g} seconds without messages."
+                    break
+                waits.append(idle - idle_for)
+            await asyncio.sleep(min(waits) + 0.001)
+        logger.info("WebSocket session %s: %s", transport.session_id, code)
+        transport.send_message_nowait(
+            {"type": "error", "code": code, "message": message, "fatal": True}
+        )
+        transport.close_reason = code.replace("_", " ")
+        return code
+
     async def _run(self, websocket: ServerConnection) -> None:
         transport = self._create_transport(websocket)
         try:
@@ -878,15 +1138,32 @@ class WebSocketAgentServer:
             if self.forward_events:
                 bridge = SessionBridge(session, transport)
             await session.start(agent, transport)
-            await wait_first(session.wait_closed(), transport.wait_disconnected())
+            waits: list[Awaitable[Any]] = [session.wait_closed(), transport.wait_disconnected()]
+            watchdog: asyncio.Task[str] | None = None
+            if self.max_session_duration is not None or self.idle_timeout is not None:
+                watchdog = asyncio.ensure_future(self._watchdog(transport))
+                waits.append(watchdog)
+            await wait_first(*waits)
+            if watchdog is not None and watchdog.done() and not watchdog.cancelled():
+                reason = watchdog.result()
+        except SessionRefused as exc:
+            logger.info("WebSocket session %s refused: %s", transport.session_id, exc)
+            reason = "refused"
+            transport.send_message_nowait(
+                {"type": "error", "code": exc.code, "message": str(exc), "fatal": True}
+            )
+            transport.close_code, transport.close_reason = exc.close_code, str(exc)
         except Exception as exc:
-            logger.exception("WebSocket session %s failed", transport.session_id)
             reason = "error"
+            error_id, message = report_error(
+                exc, "The session failed", session_id=transport.session_id
+            )
             transport.send_message_nowait(
                 {
                     "type": "error",
                     "code": "internal_error",
-                    "message": _describe(exc),
+                    "message": message,
+                    "error_id": error_id,
                     "fatal": True,
                 }
             )
@@ -956,8 +1233,50 @@ def _int_field(message: dict[str, Any], key: str, default: int, low: int, high: 
 
 
 def _describe(exc: BaseException) -> str:
+    """``Type: message`` — for logs only (clients get :func:`report_error` messages)."""
     text = str(exc)
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _check_origin(
+    policy: OriginPolicy, user: Callable[..., Any] | None
+) -> Callable[..., Awaitable[Response | None]]:
+    """A ``process_request`` hook: ``user`` (HTTP routes, authentication) first, then the
+    ``Origin`` allow-list (HTTP 403 for other websites' pages)."""
+
+    async def process_request(connection: ServerConnection, request: Request) -> Response | None:
+        if user is not None:
+            result = user(connection, request)
+            if inspect.isawaitable(result):
+                result = await result
+            if result is not None:
+                return result
+        origin = header_origin(request.headers.get_all("Origin"))
+        if policy.allows(origin):
+            return None
+        logger.warning(
+            "refused a WebSocket client from origin %r (allowed_origins / --allowed-origin)",
+            origin,
+        )
+        body = _dumps(
+            {
+                "type": "error",
+                "code": "origin_not_allowed",
+                "message": "This origin may not connect to this server.",
+                "fatal": True,
+            }
+        )
+        response = connection.respond(HTTPStatus.FORBIDDEN, body + "\n")
+        del response.headers["Content-Type"]
+        response.headers["Content-Type"] = "application/json"
+        return response
+
+    return process_request
+
+
+async def _close_quietly(websocket: ServerConnection, code: int, reason: str) -> None:
+    with contextlib.suppress(Exception):
+        await websocket.close(code, _truncate_reason(reason))
 
 
 def _truncate_reason(reason: str) -> str:
