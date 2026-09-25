@@ -324,7 +324,8 @@ def test_smoke_run_measures_the_framework_overhead(smoke: RunResults) -> None:
     assert [s["sessions"] for s in steps] == [1, 2]
     for step in steps:  # concurrent sessions work: none failed, every turn was answered
         assert step["missed"] == 0 and step["errors"] == 0 and step["passed"], step
-        assert step["turns_measured"] == step["sessions"] and step["cpu_pct"] > 0
+        # (no CPU lower bound: Windows counts process CPU time in 15.6 ms ticks)
+        assert step["turns_measured"] == step["sessions"] and step["cpu_pct"] >= 0
     assert capacity["sessions_per_core"] == 2 and capacity["limit_found"] is False
     assert set(m) >= {"micro.energy_vad_us", "micro.event_emit_us"}
     assert extra["sections"] == ["micro", "e2e", "flush", "capacity"]
