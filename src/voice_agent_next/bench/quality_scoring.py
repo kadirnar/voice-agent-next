@@ -391,8 +391,13 @@ _VERDICT = re.compile(r"\b(incorrect|correct|yes|no)\b", re.I)
 _SCORE = re.compile(r"\[\[\s*([1-5](?:\.\d+)?)\s*\]\]|\b([1-5](?:\.\d+)?)\b")
 
 
+_THINK = re.compile(r"<think>.*?(?:</think>|$)", re.S | re.I)
+
+
 def parse_judge_output(kind: str, text: str) -> tuple[bool | None, float | None]:
-    """``(verdict, score)`` from the judge's reply; ``(None, None)`` when unreadable."""
+    """``(verdict, score)`` from the judge's reply (reasoning in ``<think>`` tags is
+    ignored); ``(None, None)`` when unreadable."""
+    text = _THINK.sub(" ", text)
     if kind == "open":
         m = _SCORE.search(text)
         if not m:
@@ -429,7 +434,7 @@ class Judge:
         *,
         spec: Any = None,
         temperature: float = 0.0,
-        max_tokens: int = 16,
+        max_tokens: int = 1024,
     ) -> None:
         self.llm = llm
         self.spec = spec

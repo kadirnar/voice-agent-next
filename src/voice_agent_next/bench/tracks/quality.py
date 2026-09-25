@@ -114,6 +114,8 @@ class QualityOptions:
     """Write ``artifacts/session-NNN/`` (stereo recording, labels, timeline) per question."""
     warmup_engine: bool = True
     judge_temperature: float = 0.0
+    judge_max_tokens: int = 1024
+    """Room for the judge's reply (reasoning models think before answering)."""
     transcribe_questions: bool = True
     """Give the judge an ASR transcript of the question when the dataset has no text."""
     seed: int = 0
@@ -155,6 +157,8 @@ class QualityRecord(BaseModel):
     refusal: bool = False
     empty: bool = False
     missed: bool = False
+    premature: bool = False
+    """The agent started speaking before the question ended."""
     answer_latency_ms: float | None = None
     answer_speech_ms: float | None = None
     fidelity_wer: float | None = None
@@ -290,6 +294,7 @@ def summarize_quality(
         "refusal_rate": share([r.refusal for r in records]),
         "empty_rate": share([r.empty for r in records]),
         "missed_rate": share([r.missed for r in records]),
+        "premature_rate": share([r.premature for r in records]),
         "fidelity_wer": corpus_rate(fidelity) if fidelity else None,
     }
     counts = {
@@ -329,6 +334,7 @@ _RATE_LABELS = {
     "refusal_rate": "refusals",
     "empty_rate": "empty answers",
     "missed_rate": "missed (no agent speech)",
+    "premature_rate": "premature (the agent spoke before the question ended)",
     "fidelity_wer": "speech fidelity WER (corpus)",
 }
 _ITEM_COLUMNS = (
@@ -500,7 +506,10 @@ async def _make_judge(
     except Exception as exc:
         notes.append(f"Judge {judge!r} unavailable, skipped: {exc}")
         return None, {"used": False, "spec": spec, "skipped": f"cannot create: {exc}"}
-    j = Judge(llm, spec=spec, temperature=options.judge_temperature)
+    j = Judge(
+        llm, spec=spec, temperature=options.judge_temperature,
+        max_tokens=options.judge_max_tokens,
+    )  # fmt: skip
     try:
         await j.check()
     except Exception as exc:
@@ -570,6 +579,7 @@ async def _run_quality(
                     record.answer_speech_ms = turn.agent_speech_ms
                     record.engine_text = turn.agent_transcript
                     record.missed = turn.missed
+                    record.premature = turn.premature
                     record.errors += turn.errors
                 runs.append(run)
                 analyses.append(analysis)

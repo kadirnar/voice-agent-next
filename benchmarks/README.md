@@ -522,6 +522,7 @@ question in `artifacts/session-NNN/` (`--no-audio` to skip).
 | `answer_speech_ms` | how long the agent spoke |
 | `refusal_rate` | answers that decline ("I'm sorry, but I can't help with that", "As an AI...") |
 | `empty_rate`, `missed_rate` | no audible answer or an empty transcript; no agent speech within `--reply-timeout` |
+| `premature_rate` | the agent started speaking before the question ended (long spoken questions have pauses an endpointer can mistake for the end of the turn) |
 | `text_accuracy` | the same rules applied to the engine's own text, when it exposes one (cascades, most realtime APIs) |
 | `fidelity_wer` | *speech fidelity*: WER of the transcribed audio against the engine's own text (0 = it said what it wrote; TTS errors, truncation and ASR errors raise it) |
 

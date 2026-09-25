@@ -175,6 +175,7 @@ def test_judge_output_parsing_and_pinning() -> None:
     assert parse_judge_output("open", "4") == (None, 4.0)
     assert parse_judge_output("open", "Rating: [[5]]") == (None, 5.0)
     assert parse_judge_output("open", "great") == (None, None)
+    assert parse_judge_output("closed", "<think>correct? no.</think>INCORRECT") == (False, None)
     info = Judge(MockLLM(), spec="mock").describe()
     assert info["temperature"] == 0.0 and info["version"]
     for kind, text in JUDGE_PROMPTS.items():
