@@ -123,6 +123,7 @@ def match_calls(
 
 _NUMBER = re.compile(r"\d+(?:,\d{3})*(?:\.\d+)?")
 _SENTENCE = re.compile(r"[^.!?]+[.!?]?")
+_STATUS_LEAD = r"(?:is|was|are|were|has|have|had|been|already|currently|now|it's)"
 _NEGATION = re.compile(
     r"\b(not|cannot|can't|unable|won't|couldn't|wasn't|isn't|haven't|hasn't|no longer|"
     r"didn't|don't|never|unfortunately)\b|n't\b"
@@ -177,7 +178,9 @@ def ungrounded_facts(agent_text: str, sources: Sequence[str]) -> list[str]:
         out.append(token)
     low = agent_text.lower()
     for word in STATUS_WORDS:
-        if re.search(rf"\b{word}\b", low) and word not in low_sources:
+        # a stated status ("it has shipped", "is currently in transit"), not a plan ("will be
+        # delivered on Friday")
+        if re.search(rf"\b{_STATUS_LEAD}\s+(?:\w+\s+)?{word}\b", low) and word not in low_sources:
             out.append(word)
     return out
 

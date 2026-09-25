@@ -191,7 +191,10 @@ def words_to_digits(text: str) -> str:
 def _canon_id(value: Any) -> str:
     text = words_to_digits(str(value)).lower()
     text = re.sub(r"\b(order|booking|reservation|number|no|id|confirmation)\b", " ", text)
-    return re.sub(r"[^a-z0-9]", "", text)
+    text = re.sub(r"[^a-z0-9]", "", text)
+    if re.fullmatch(r"[0-9o]*[0-9][0-9o]*", text):  # "four four one o": a spoken zero
+        text = text.replace("o", "0")
+    return text
 
 
 def _canon_int(value: Any) -> str:
