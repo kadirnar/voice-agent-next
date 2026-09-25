@@ -968,9 +968,10 @@ class WebSocketAgentServer:
             clients, telephony providers); others get HTTP 403. See
             :class:`~voice_agent_next.server.security.OriginPolicy`.
         forward_events: send transcripts, state changes, metrics and errors to clients.
-        input_sample_rate / output_sample_rate / frame_duration / hello_timeout /
-            max_send_buffer: per connection transport options (see
-            :class:`WebSocketServerTransport`).
+        input_sample_rate / output_sample_rate / frame_duration / hello_timeout: per
+            connection transport options (see :class:`WebSocketServerTransport`).
+        max_send_buffer: bytes queued for a client that does not read them before the
+            connection is closed with 1008.
         serve_options: extra ``websockets.asyncio.server.serve`` arguments, e.g. ``ssl``
             (TLS) or ``process_request`` (HTTP routes, authentication). ``origins`` (the
             ``websockets`` allow-list) replaces ``allowed_origins``.

@@ -376,27 +376,33 @@ async def test_never_reading_client_is_disconnected() -> None:
 
 # ----------------------------------------------------------- session limits
 async def test_websocket_server_closes_idle_and_expired_sessions() -> None:
-    async with agent_server(idle_timeout=0.3, max_session_duration=None) as server:
-        async with connect(server.url) as ws:
-            await ws.send(hello())
-            messages = await text_messages(ws)
-            errors = [m for m in messages if m["type"] == "error"]
-            assert errors[-1]["code"] == "session_idle" and errors[-1]["fatal"] is True
-            assert ws.protocol.close_code == 1000
-    async with agent_server(max_session_duration=0.3, idle_timeout=None) as server:
-        async with connect(server.url) as ws:
-            await ws.send(hello())
-            messages = await text_messages(ws)
-            assert [m for m in messages if m["type"] == "error"][-1]["code"] == "session_expired"
+    async with (
+        agent_server(idle_timeout=0.3, max_session_duration=None) as server,
+        connect(server.url) as ws,
+    ):
+        await ws.send(hello())
+        messages = await text_messages(ws)
+        errors = [m for m in messages if m["type"] == "error"]
+        assert errors[-1]["code"] == "session_idle" and errors[-1]["fatal"] is True
+        assert ws.protocol.close_code == 1000
+    async with (
+        agent_server(max_session_duration=0.3, idle_timeout=None) as server,
+        connect(server.url) as ws,
+    ):
+        await ws.send(hello())
+        messages = await text_messages(ws)
+        assert [m for m in messages if m["type"] == "error"][-1]["code"] == "session_expired"
 
 
 async def test_realtime_server_closes_idle_sessions() -> None:
-    async with RealtimeServer(MockEngine(), port=0, idle_timeout=0.3) as server:
-        async with connect(f"{server.url}/realtime") as ws:
-            events = await text_messages(ws)
-            errors = [e["error"] for e in events if e["type"] == "error"]
-            assert errors[-1]["code"] == "session_idle"
-            assert ws.protocol.close_code == 1000
+    async with (
+        RealtimeServer(MockEngine(), port=0, idle_timeout=0.3) as server,
+        connect(f"{server.url}/realtime") as ws,
+    ):
+        events = await text_messages(ws)
+        errors = [e["error"] for e in events if e["type"] == "error"]
+        assert errors[-1]["code"] == "session_idle"
+        assert ws.protocol.close_code == 1000
 
 
 async def test_refusals_from_factories_reach_the_client() -> None:
