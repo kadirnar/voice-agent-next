@@ -356,6 +356,7 @@ class DeepgramSTT(STT):
                 word_timestamps=True,
                 end_of_turn=flux,
                 language_detection=model == "flux-general-multi" if flux else language == "multi",
+                reconnect=True,  # each stream opens its own WebSocket
             ),
             sample_rate=sample_rate,
             language=language,

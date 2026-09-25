@@ -94,6 +94,10 @@ class STTCapabilities:
     word_timestamps: bool = False
     end_of_turn: bool = False
     language_detection: bool = False
+    reconnect: bool = False
+    """A new :meth:`STT.stream` works on its own after an earlier stream ended or dropped
+    (e.g. each stream opens its own WebSocket): the cascade then reopens a stream that
+    ends instead of failing (``CascadeOptions.stt_reconnect``)."""
 
 
 class _Flush:

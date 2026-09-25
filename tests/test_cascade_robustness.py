@@ -5,6 +5,7 @@ session closed in the middle of a connection rotation."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from collections.abc import AsyncIterator, Callable
 from typing import Any, TypeVar
@@ -16,6 +17,7 @@ from voice_agent_next.chat import ChatContext
 from voice_agent_next.engine import EngineConnection, EngineOptions
 from voice_agent_next.engines.cascade import CascadeConnection, CascadeEngine
 from voice_agent_next.engines.rotation import RotatingConnection, RotatingEngine, RotationPolicy
+from voice_agent_next.errors import AuthenticationError, ProviderConnectionError
 from voice_agent_next.events import (
     EngineErrorEvent,
     EngineStatus,
@@ -34,6 +36,7 @@ from voice_agent_next.providers.mock import (
     MockSTT,
     MockTTS,
     MockTurnDetector,
+    _MockSTTStream,
     synth_speech,
 )
 from voice_agent_next.stt import STT, STTCapabilities, STTStream
@@ -281,6 +284,163 @@ async def test_an_ended_stt_stream_is_a_fatal_error(closing: list[EngineConnecti
     await wait_for(lambda: rec.of(InputSpeechStarted))
     await conn.aclose()
     assert len(rec.of(EngineErrorEvent)) == 1  # closing is not another failure
+
+
+# ------------------------------------------------------ reopening an ended STT stream
+class _ReopenStream(_MockSTTStream):
+    """A mock stream that ends by itself after ``end_after`` frames (``None``: never),
+    or fails with ``fail`` at its first frame."""
+
+    end_after: int | None = None
+    fail: Exception | None = None
+    received = 0.0
+    """Seconds of audio pushed to this stream."""
+
+    def push_audio(self, frame: AudioFrame) -> None:
+        self.received += frame.duration
+        super().push_audio(frame)
+
+    async def _run(self) -> None:
+        if self.end_after is None and self.fail is None:
+            await super()._run()
+            return
+        n = 0
+        async for _ in self._input:
+            n += 1
+            if self.fail is not None:
+                raise self.fail
+            if self.end_after is not None and n >= self.end_after:
+                return  # the provider closed the stream
+
+
+class ReopenableSTT(MockSTT):
+    """A mock STT that declares ``reconnect``; stream ``i`` ends after ``ends[i]`` frames
+    (``None`` or past the list: a healthy stream)."""
+
+    provider = "reopen"
+
+    def __init__(
+        self,
+        ends: list[int | None],
+        *,
+        fail: Exception | None = None,
+        reconnect: bool = True,
+        **kw: Any,
+    ) -> None:
+        super().__init__(**kw)
+        self.capabilities = dataclasses.replace(self.capabilities, reconnect=reconnect)
+        self.ends = ends
+        self.fail = fail
+        self.streams: list[_ReopenStream] = []
+
+    def _create_stream(self, *, language: str | None) -> STTStream:
+        stream = _ReopenStream(self, language=language)
+        i = len(self.streams)
+        stream.end_after = self.ends[i] if i < len(self.ends) else None
+        stream.fail = self.fail
+        self.streams.append(stream)
+        return stream
+
+
+async def test_an_ended_stt_stream_is_reopened(closing: list[EngineConnection]) -> None:
+    """An STT that can reopen gets a new stream when its stream ends (#157): no fatal
+    error, the audio of the gap is replayed, and the next turn is transcribed."""
+    stt = ReopenableSTT([5], transcripts=["after the reconnect"])
+    _, conn, rec, _ = await open_cascade(stt=stt, stt_reconnect_backoff=0.2)
+    closing.append(conn)
+    await feed(conn, AudioFrame.silence(0.2, SR))  # the first stream ends after 0.1 s
+    await wait_for(lambda: any(isinstance(e, EngineStatus) for e in rec.events))
+    await feed(conn, AudioFrame.silence(0.1, SR))  # sent during the backoff: buffered
+    await wait_for(lambda: len(stt.streams) == 2)
+    statuses = [e.status for e in rec.of(EngineStatus)]
+    assert statuses == ["reconnecting", "reconnected"]
+    first, second = stt.streams
+    assert first._input.closed
+    # the new stream got what the old one missed (the gap), not less, not duplicated
+    assert 0.1 - 1e-6 <= second.received <= 0.2 + 1e-6
+    await utterance(conn)
+    await wait_for(lambda: rec.of(InputCommitted), 5)
+    assert rec.finals() == ["after the reconnect"]
+    assert not rec.of(EngineErrorEvent)
+
+
+async def test_audio_buffered_during_a_reconnect_is_bounded(
+    closing: list[EngineConnection],
+) -> None:
+    stt = ReopenableSTT([1])
+    _, conn, rec, _ = await open_cascade(
+        stt=stt, stt_reconnect_backoff=0.5, stt_reconnect_buffer=0.3
+    )
+    closing.append(conn)
+    await feed(conn, AudioFrame.silence(0.02, SR))
+    await wait_for(lambda: rec.of(EngineStatus))
+    await feed(conn, AudioFrame.silence(2.0, SR))  # far more than the buffer holds
+    await wait_for(lambda: len(stt.streams) == 2)
+    assert stt.streams[1].received == pytest.approx(0.3, abs=0.021)  # the newest 0.3 s
+
+
+async def test_stt_reconnect_gives_up_after_its_attempts(
+    closing: list[EngineConnection],
+) -> None:
+    stt = ReopenableSTT([1, 1, 1, 1, 1])  # every stream dies at once
+    _, conn, rec, _ = await open_cascade(
+        stt=stt, stt_reconnect_attempts=2, stt_reconnect_backoff=0.01
+    )
+    closing.append(conn)
+    for _ in range(40):  # keep audio flowing, as a microphone does
+        await feed(conn, AudioFrame.silence(0.02, SR))
+        await asyncio.sleep(0.01)
+        if rec.of(EngineErrorEvent):
+            break
+    await wait_for(lambda: rec.of(EngineErrorEvent))
+    [err] = rec.of(EngineErrorEvent)
+    assert not err.recoverable and "STT stream ended" in str(err.error)
+    assert len(stt.streams) == 3  # the first one and two reopened
+    await feed(conn, AudioFrame.silence(0.2, SR))  # deaf now, but no error
+    assert len(rec.of(EngineErrorEvent)) == 1 and len(stt.streams) == 3
+
+
+async def test_non_retryable_stt_errors_are_not_retried(
+    closing: list[EngineConnection],
+) -> None:
+    stt = ReopenableSTT([], fail=AuthenticationError("bad key", provider="reopen"))
+    _, conn, rec, _ = await open_cascade(stt=stt, stt_reconnect_backoff=0.01)
+    closing.append(conn)
+    await feed(conn, AudioFrame.silence(0.1, SR))
+    await wait_for(lambda: rec.of(EngineErrorEvent))
+    await asyncio.sleep(0.05)
+    [err] = rec.of(EngineErrorEvent)
+    assert isinstance(err.error, AuthenticationError) and not err.recoverable
+    assert len(stt.streams) == 1 and not rec.of(EngineStatus)
+
+
+async def test_retryable_stt_errors_reopen_the_stream(closing: list[EngineConnection]) -> None:
+    stt = ReopenableSTT([], fail=ProviderConnectionError("reset", provider="reopen"))
+    _, conn, rec, _ = await open_cascade(stt=stt, stt_reconnect_backoff=0.01)
+    closing.append(conn)
+    await feed(conn, AudioFrame.silence(0.02, SR))
+    await wait_for(lambda: len(stt.streams) >= 2)
+    assert rec.of(EngineStatus)[0].status == "reconnecting"
+
+
+async def test_stt_reconnect_can_be_disabled(closing: list[EngineConnection]) -> None:
+    stt = ReopenableSTT([5])
+    _, conn, rec, _ = await open_cascade(stt=stt, stt_reconnect=False)
+    closing.append(conn)
+    await feed(conn, AudioFrame.silence(0.2, SR))
+    await wait_for(lambda: rec.of(EngineErrorEvent))
+    assert len(stt.streams) == 1 and not rec.of(EngineStatus)
+
+
+@pytest.mark.parametrize(
+    "spec", ["deepgram", "assemblyai", "soniox", "speechmatics", "cartesia", "elevenlabs"]
+)
+def test_websocket_stts_declare_that_they_can_reopen(spec: str) -> None:
+    from voice_agent_next import create
+
+    stt = create("stt", spec, api_key="test-key")
+    assert stt.capabilities.streaming and stt.capabilities.reconnect
+    assert not MockSTT().capabilities.reconnect  # the default: an ended stream is fatal
 
 
 async def test_closing_the_cascade_is_not_an_stt_failure() -> None:

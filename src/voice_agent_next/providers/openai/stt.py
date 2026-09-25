@@ -376,6 +376,7 @@ class OpenAISTT(STT):
                 word_timestamps=word_timestamps and not use_realtime,
                 end_of_turn=semantic,
                 language_detection=resolved_model.startswith("gpt-transcribe"),
+                reconnect=use_realtime,  # each stream opens its own WebSocket
             ),
             sample_rate=rate,
             language=language,

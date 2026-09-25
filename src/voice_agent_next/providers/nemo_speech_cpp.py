@@ -636,6 +636,7 @@ class NeMoSpeechCppSTT(_ManagedServer, OpenAICompatibleSTT):
             interim_results=streaming,
             word_timestamps=word_timestamps,
             language_detection=language == "auto",
+            reconnect=streaming,  # each stream opens its own WebSocket
         )
         self.automatic_punctuation = automatic_punctuation
         self.verbatim = verbatim

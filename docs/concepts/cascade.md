@@ -78,6 +78,7 @@ AgentSession(llm="google/gemini-3.8-flash", tts="cartesia", vad="silero")
 | `endpointing`, `pause_deviations`, `pause_alpha`, `false_commit_window` | `"fixed"`, 2.0, 0.25, 1.0 s | `"dynamic"` adapts the delay to the turn detector's confidence and the user's learned pauses ([endpointing](endpointing.md#dynamic-endpointing)) |
 | `dictation`, `dictation_min_delay`, `dictation_max_delay`, `dictation_threshold` | off, 1 s, 5 s, `None` | Long pauses expected; switch at runtime with `session.update_endpointing(dictation=True)` ([dictation mode](endpointing.md#dictation-mode)) |
 | `final_transcript_timeout` | 1.0 s | Max wait for the STT's final transcript after flushing (falls back to the interim text) |
+| `stt_reconnect`, `stt_reconnect_attempts`, `stt_reconnect_backoff`, `stt_reconnect_buffer` | `None` (the STT's `capabilities.reconnect`), 3, 0.25 s, 10 s | [Reopen an STT stream](#stt-reconnects) that ends or drops |
 | `text_filter` | `tts_clean` | Applied to each sentence before TTS |
 | `first_sentence_min_chars` / `first_sentence_max_chars` | 4 / 40 | Shape the first spoken chunk for fast first audio |
 | `max_history_items` | `None` | Truncate the LLM context (the system prompt is always kept) |
@@ -86,6 +87,24 @@ AgentSession(llm="google/gemini-3.8-flash", tts="cartesia", vad="silero")
 
 Per-component options go to the component (`stt: {provider: deepgram, language: en}`);
 the provider pages list them.
+
+## STT reconnects
+
+Without its STT stream the cascade is deaf. When the stream ends (the provider closed it)
+or fails with a retryable error (a dropped connection, a 5xx), and the STT can open a new
+stream on its own (`STTCapabilities.reconnect`: the WebSocket STTs such as Deepgram,
+AssemblyAI, Soniox, Speechmatics, Cartesia, ElevenLabs, OpenAI realtime and
+NeMo-Speech.cpp), the cascade reopens it instead of failing:
+
+1. `EngineStatus("reconnecting")`; a turn waiting for its final transcript falls back to
+   the interim text.
+2. After a backoff (`stt_reconnect_backoff`, doubled per attempt, at most 5 s) a new
+   stream is opened. The user audio sent meanwhile is buffered (the newest
+   `stt_reconnect_buffer` seconds) and sent to it first, then `EngineStatus("reconnected")`.
+3. After `stt_reconnect_attempts` reopens in a row (a stream that lived 10 s starts a new
+   series) or a non-retryable error (bad credentials), the failure is fatal
+   (`EngineErrorEvent(recoverable=False)`), as without reconnects. `stt_reconnect=False`
+   turns reconnects off; `True` forces them for an STT that does not declare it.
 
 ## Failover
 
