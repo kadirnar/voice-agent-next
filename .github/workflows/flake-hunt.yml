@@ -1,0 +1,95 @@
+# Flake hunt: runs the whole unit-test suite several times on every OS and reports every
+# test that failed at least once. Manual-only (Actions -> flake-hunt -> Run workflow);
+# see CONTRIBUTING.md ("Hunting flaky tests").
+name: flake-hunt
+
+on:
+  workflow_dispatch:
+    inputs:
+      pytest-args:
+        description: "Extra pytest arguments (e.g. a test path or -k expression)"
+        required: false
+        default: ""
+  push:
+    branches: [fix/flake-hunt]
+
+concurrency:
+  group: flake-hunt-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PYTHONUTF8: "1"
+
+jobs:
+  run:
+    name: ${{ matrix.os }} run ${{ matrix.run }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        run: [1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - run: uv sync
+      - name: pytest
+        shell: bash
+        continue-on-error: true
+        run: >-
+          uv run pytest -q -p no:cacheprovider
+          --junitxml "junit-${{ runner.os }}-${{ matrix.run }}.xml"
+          ${{ github.event.inputs.pytest-args }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-${{ runner.os }}-${{ matrix.run }}
+          path: junit-*.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  summary:
+    needs: run
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: junit
+          merge-multiple: true
+      - name: Summarise failures
+        shell: python
+        run: |
+          import collections, glob, os, xml.etree.ElementTree as ET
+
+          failures = collections.defaultdict(list)
+          runs = sorted(glob.glob("junit/junit-*.xml"))
+          for path in runs:
+              run = os.path.basename(path)[len("junit-"):-len(".xml")]
+              for case in ET.parse(path).iter("testcase"):
+                  for tag in ("failure", "error"):
+                      bad = case.find(tag)
+                      if bad is not None:
+                          name = f"{case.get('classname')}::{case.get('name')}"
+                          message = (bad.get("message") or "").splitlines()[0][:160]
+                          failures[name].append((run, message))
+          lines = [f"## Flake hunt: {len(runs)} runs, {len(failures)} failing tests", ""]
+          if failures:
+              lines += ["| test | runs | first message |", "| --- | --- | --- |"]
+              for name, hits in sorted(failures.items(), key=lambda kv: -len(kv[1])):
+                  where = ", ".join(run for run, _ in hits)
+                  lines.append(f"| `{name}` | {where} | {hits[0][1].replace('|', '/')} |")
+          text = "\n".join(lines)
+          print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+              fh.write(text + "\n")
+          if failures or len(runs) < 15:
+              raise SystemExit(1)
