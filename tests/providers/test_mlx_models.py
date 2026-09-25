@@ -6,7 +6,7 @@ and Pocket TTS through mlx-audio (240 MB). Larger models are opt-in:
 * ``VAN_TEST_MLX_PARAKEET=parakeet-tdt_ctc-110m`` (459 MB; or any ``mlx/`` model) streams
   a clip through parakeet-mlx;
 * ``VAN_TEST_MLX_KOKORO=1`` synthesizes with Kokoro (355 MB, plus spaCy's English model);
-* ``VAN_TEST_MLX_LM_MODEL=mlx-community/Qwen3-0.6B-4bit`` starts ``mlx_lm.server`` with
+* ``VAN_TEST_MLX_LM_MODEL=mlx-community/Qwen3.5-0.8B-4bit`` starts ``mlx_lm.server`` with
   that model and measures time to first token and a tool call.
 
 Each test prints its latency numbers (run with ``-s`` to see them).
@@ -239,7 +239,7 @@ def mlx_lm_server(tmp_path: Path) -> Iterator[tuple[str, str]]:
     """``(model, base_url)`` of a running ``mlx_lm.server``."""
     model = os.environ.get("VAN_TEST_MLX_LM_MODEL")
     if not model:
-        pytest.skip("set VAN_TEST_MLX_LM_MODEL=<mlx-community model> (e.g. Qwen3-0.6B-4bit)")
+        pytest.skip("set VAN_TEST_MLX_LM_MODEL=<mlx-community model> (e.g. Qwen3.5-0.8B-4bit)")
     pytest.importorskip("mlx_lm")
     pytest.importorskip("openai")
     port = _free_port()
@@ -294,15 +294,15 @@ async def test_mlx_lm_server_streams_and_calls_tools(mlx_lm_server: tuple[str, s
         return f"sunny in {city}"
 
     ctx = ChatContext()
-    ctx.add_message("system", "Use the tools to answer.")
-    ctx.add_message("user", "What's the weather in Paris?")
-    call = await llm.chat(ctx, tools=[get_weather], max_tokens=100).collect()
+    ctx.add_message("system", "You are a voice assistant. Use the get_weather tool for weather.")
+    ctx.add_message("user", "What's the weather in Paris right now?")
+    call = await llm.chat(ctx, tools=[get_weather], max_tokens=200).collect()
     await llm.aclose()
     ttfts = [m.ttft for m in metrics[:3] if m.ttft is not None]
     print(
         f"\nmlx_lm.server {model}: TTFT {min(ttfts) * 1000:.0f} ms (best of 3), "
         f"{np.median(ttfts) * 1000:.0f} ms median; tool call: "
-        f"{[(c.name, c.arguments) for c in call.tool_calls]}"
+        f"{[(c.name, c.arguments) for c in call.tool_calls]} (text: {call.text!r})"
     )
     assert [c.name for c in call.tool_calls] == ["get_weather"]
     assert "paris" in call.tool_calls[0].arguments.lower()

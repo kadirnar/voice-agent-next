@@ -248,8 +248,10 @@ class ParakeetMLXSTT(STT):
         return pm.DecodingConfig(decoding=decoding)
 
     def _audio(self, samples: npt.NDArray[np.float32]) -> Any:
+        # float32 like parakeet-mlx's own load_audio(): get_logmel() views the STFT's complex
+        # output in the input dtype, so bfloat16 audio would double the frequency bins
         mx = _mlx.import_mlx(_PROVIDER)
-        return mx.array(samples).astype(getattr(mx, self.dtype))
+        return mx.array(np.ascontiguousarray(samples, dtype=np.float32))
 
     def _generate(self, model: Any, samples: npt.NDArray[np.float32]) -> Any:
         audio_mod = require("parakeet_mlx.audio", extra=_EXTRA, package="parakeet-mlx")
