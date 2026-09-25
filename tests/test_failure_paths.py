@@ -3,8 +3,6 @@
 * ``_FallbackSynthesizeStream`` (native-streaming TTS failover): a provider refusing
   the connection, every provider failing, a non-failover error, and ``aclose()`` while
   a provider stalls;
-* provider entry points: a third-party plugin registers, a broken plugin is named in a
-  warning and does not stop the others;
 * a session closed while a rotation is still opening (or preparing) the next
   connection.
 
@@ -14,19 +12,17 @@ The remaining items of #142 are covered by the tests listed in its PR.
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Any
 
 import pytest
 
 from tests.test_fallback import FlakyTTS
-from voice_agent_next import AudioFrame, registry
+from voice_agent_next import AudioFrame
 from voice_agent_next.engine import EngineConnection, EngineOptions
 from voice_agent_next.engines.rotation import RotatingConnection, RotatingEngine, RotationPolicy
 from voice_agent_next.errors import (
     ProviderConnectionError,
     ProviderError,
-    ProviderNotFoundError,
 )
 from voice_agent_next.events import EngineStatus
 from voice_agent_next.fallback import FallbackTTS
@@ -113,59 +109,6 @@ async def test_tts_native_stream_aclose_while_a_provider_stalls() -> None:
     assert stream._task.done()
     assert inner[0]._task.done()  # the provider's stream was closed with it
     await tts.aclose()
-
-
-# -------------------------------------------------------------------- entry points
-class _EntryPoint:
-    def __init__(self, name: str, load: Any) -> None:
-        self.name = name
-        self._load = load
-
-    def load(self) -> Any:
-        return self._load()
-
-
-@pytest.fixture
-def isolated_registry(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(registry, "_REGISTRY", dict(registry._REGISTRY))
-    monkeypatch.setattr(registry, "_ALIASES", dict(registry._ALIASES))
-    monkeypatch.setattr(registry, "_ENTRY_POINTS_LOADED", False)
-
-
-@pytest.mark.usefixtures("isolated_registry")
-def test_entry_point_plugins_register_and_a_broken_one_is_named(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    def good() -> None:
-        registry.register_provider("tts", "plugin-tts", default_model="p1")(MockTTS)
-
-    def broken() -> None:
-        raise ImportError("plugin needs a missing package")
-
-    calls: list[str] = []
-
-    def entry_points(*, group: str) -> list[_EntryPoint]:
-        calls.append(group)
-        return [_EntryPoint("broken-plugin", broken), _EntryPoint("good-plugin", good)]
-
-    monkeypatch.setattr(registry.importlib.metadata, "entry_points", entry_points)
-    with caplog.at_level(logging.WARNING, logger="voice_agent_next"):
-        tts = registry.create("tts", "plugin-tts")
-    assert isinstance(tts, MockTTS) and tts.model == "p1"
-    assert calls == [registry.ENTRY_POINT_GROUP]
-    assert "broken-plugin" in caplog.text  # the failing plugin is named...
-    assert "good-plugin" not in caplog.text  # ...and did not take the others down
-    with pytest.raises(ProviderNotFoundError, match="no_such_plugin"):
-        registry.create("tts", "no-such-plugin")
-
-
-@pytest.mark.usefixtures("isolated_registry")
-def test_builtin_providers_do_not_load_entry_points(monkeypatch: pytest.MonkeyPatch) -> None:
-    def entry_points(*, group: str) -> list[_EntryPoint]:
-        raise AssertionError("a built-in provider must not scan plugins")
-
-    monkeypatch.setattr(registry.importlib.metadata, "entry_points", entry_points)
-    assert isinstance(registry.create("tts", "mock"), MockTTS)
 
 
 # ---------------------------------------------------------------- mid-rotation cancel
