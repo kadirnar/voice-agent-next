@@ -578,7 +578,7 @@ async def test_synthesize_uses_the_bytes_endpoint() -> None:
     [
         (401, AuthenticationError, False),
         (429, RateLimitError, True),
-        (500, ProviderError, True),
+        (500, ProviderConnectionError, True),
         (400, ProviderError, False),
     ],
 )
