@@ -109,6 +109,12 @@ What runs, in order of precedence (later wins):
 3. component flags (`--engine`, `--stt`, `--llm`, `--tts`, `--vad`, `--turn`),
    `--instructions`, `--greeting`, `--transport`.
 
+The layers are read raw, merged, and validated once at the end, so the config file may hold
+only tweaks that make sense on top of the preset (`van run --preset local-cpu -c
+tweaks.yaml` with `stt: {language: en}` in `tweaks.yaml`). `van bench` (`--preset` and
+`--config`) and `van serve` (`--preset` and `--config`) layer them the same way; in Python,
+`config.layer_config(preset=..., file=..., overrides=...)` returns the merged mapping.
+
 The readiness check runs on the final config with the preset's platform and accelerator,
 so an override that is not ready fails too (e.g. `--llm ollama/qwen3.5:27b` before
 `ollama pull`). Config files and flags without a preset are not checked, as before.
@@ -148,13 +154,15 @@ Rules (`config.merge_config`):
   component drops the preset's `engine:`.
 * An options-only mapping cannot be applied to a failover list. Give the whole list.
 
-`extends:` takes a preset name; `AppConfig.extends` records it.
+`extends:` takes a preset name; `AppConfig.extends` records it. `${ENV_VAR}` strings are
+expanded before `extends:` is read, so `extends: ${VAN_PRESET:-local-cpu}` picks the preset
+from the environment.
 
 ## Python
 
 ```python
-from voice_agent_next.app import build_agent, build_session
-from voice_agent_next.presets import check_preset, load_preset, session_from_preset
+from voice_agent_next import build_agent, build_session, load_preset, session_from_preset
+from voice_agent_next.presets import check_preset
 
 cfg = load_preset("cloud-fast", agent={"instructions": "You are a travel agent."})
 session, agent = build_session(cfg), build_agent(cfg)
