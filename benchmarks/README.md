@@ -237,7 +237,8 @@ and waits for the final transcript. A batch-only recognizer can be streamed thro
 | `wer_pct`, `cer_pct` | per-utterance distributions (%) |
 | `rtfx` | Σ audio / Σ processing time (batch: `transcribe()` duration; streaming: first chunk → final). Only meaningful in batch mode or with `--realtime-factor 0` |
 | `ttfs_ms` | **final latency**: end of audio → final transcript. Streaming: the `end_input()`/`flush()` call → the last `FINAL_TRANSCRIPT` (Pipecat's TTFS, with the end of the file as the VAD stop); batch: the `transcribe()` duration. The STT's share of a voice agent's response time |
-| `first_partial_ms` | streaming: capture start of the first chunk → first non-empty interim transcript |
+| `first_partial_ms` | streaming: **speech onset** → first non-empty interim transcript. The onset is found in the utterance by the reference VAD of the latency tracks (first 10 ms frame ≥ −40 dBFS starting ≥ 100 ms of speech, `speech_onset_ms`) and placed at its capture time (unpaced: the delivery of its chunk), so leading silence does not count |
+| `first_partial_from_audio_ms` | streaming: capture start of the first chunk → first non-empty interim (the definition `first_partial_ms` had before; kept for comparisons with older runs) |
 | `interim_revision_rate` | streaming: share of interim updates that rewrite already-shown words instead of appending (the last word may still grow). 0 = interims only grow |
 | `processing_ms`, `rtf` | per-utterance processing time and processing / audio |
 
@@ -604,6 +605,7 @@ van bench tools                                    # scripted reference engine, 
 van bench tools --preset local-cpu                 # local cascade; the caller speaks via Kokoro
 van bench tools --preset local-cpu --llm ollama/qwen3.5:4b --trials 3
 van bench tools -c agent.yaml -s my-tools.yaml --only cancel-order --caller-tts kokoro
+van bench tools --preset local-cpu --caller llm:ollama/qwen3.5:4b   # an LLM plays the caller
 ```
 
 Scripted customer-service calls against **deterministic mock tools**, on the T1 harness
@@ -625,6 +627,21 @@ an escalation to a human and a question that needs no tool. Numbers are spoken t
 callers say them ("order one oh four two"). The caller is **scripted**: it says its next
 line once the agent has answered and been quiet for `gap_after_reply`, whatever the agent
 said, so scripts give information in a natural order.
+
+**LLM-driven caller** (`--caller llm:<llm spec>`, optional; `scripted` stays the
+default). An LLM plays the caller, τ-bench style, and *reacts* to the agent: it reads what
+the agent said (its transcript) and decides what to say next, or hangs up by answering
+`<END>`. Its prompt has a **persona** (`persona:` of the scenario, else a polite customer
+of the suite's business), a **goal** (`goal:`, else the scenario's `description`) and the
+scripted lines as the details it knows, to be said in its own words and only when the
+conversation gets there, so the expected calls and final state still apply. It runs at
+temperature 0 with a fixed seed (sent to OpenAI-compatible servers), at most the script's
+turns + 3 lines (`--caller-max-turns`). Each line is voiced like a scripted one (the
+caller TTS, or synthetic speech for the reference engine) while the microphone keeps
+streaming silence, so the time the caller model takes is a user pause, not agent
+latency. Scoring is unchanged; every exchange is in the item's `caller_lines` and the
+manifest's `caller_policy` names the caller model. Use it as a robustness check next to
+the scripted run: the conversations are no longer identical across systems.
 
 Without a system, `van bench tools` runs the **reference engine**: a scripted mock that
 hears the script and makes exactly the expected calls, so every rate is 100 %. It checks
@@ -783,7 +800,10 @@ own OS. Without an entry, the job reports and does not gate.
 | Rule | Metrics (statistic) | A metric fails when it got worse by |
 | --- | --- | --- |
 | `overhead` | `e2e.overhead_ms`, `e2e.<condition>.overhead_ms` (p50; values below 0 read as 0) | more than **50 %** and more than an absolute floor of **5 ms** (**20 ms** on Windows, an entry override), with non-overlapping 95 % CIs |
-| `latency` | `e2e.<condition>.v2v_ms`, `e2e.frame_jitter_ms`, `flush.flush_ms` (p50); `e2e.loop_lag_ms` (p99) | more than **10 %** and more than **30 ms**, with non-overlapping 95 % CIs |
+| `latency` | `e2e.<condition>.v2v_ms` (p50) | more than **10 %** and more than **30 ms**, with non-overlapping 95 % CIs |
+| `loop_lag` | `e2e.loop_lag_ms` (p99) | more than **50 %** and more than **5 ms** (**10 ms** on Windows, an entry override), with non-overlapping 95 % CIs |
+| `flush` | `flush.flush_ms` (p50; values below 0 read as 0) | more than **50 %** and more than **5 ms**, with non-overlapping 95 % CIs |
+| `gap` | `e2e.frame_gap_max_ms` (p90: the largest playout gap of a reply) | more than **20 ms** (0 on a healthy run: fails when one reply in ten stutters) |
 | `micro` | `micro.*_us` (median) | more than **200 %** (3×) and more than **5 µs**: runner hardware varies |
 
 Everything else (CPU, memory, capacity, spans) is reported but not gated. A gated metric
@@ -799,6 +819,16 @@ regression through (2.7 → 32 ms). Against 45 CI runs per OS, the `overhead` ru
 none of them (every run judged against every other as the baseline), and caught a
 +30 ms regression of every condition on Linux (a +8 ms one on four of five) and on
 Windows in 96–100 % of the pairs.
+
+The event-loop lag p99 (1.2–1.6 ms on Linux, 12.7–15.1 ms on Windows, where it is one
+~15.6 ms timer tick) and the flush (0 ms on Linux, 0.02–0.12 ms on Windows) had the same
+blind spot, so they got their own floors, calibrated the same way on the last 50 CI
+runs per OS (2,450 pairs each): no false failure, and a +30 ms regression caught in every
+pair (+8 ms on Linux and for the flush, +15 ms for the Windows loop lag). The frame-jitter
+p50 was 0 on every run (the loopback transport never starved), so it could not move; the
+gate now watches the p90 of the largest playout gap per reply (`e2e.frame_gap_max_ms`)
+instead, which also stays at 0 until replies start to stutter. `frame_jitter_ms` is still
+reported.
 
 **Reading the result.** The job summary shows the verdict and a table (baseline, this
 run, change, threshold, status: `regressed`, `missing`, `improved`, `new` or `ok`),

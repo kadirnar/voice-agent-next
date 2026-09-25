@@ -14,6 +14,7 @@ from voice_agent_next.bench.gate import (
     Baseline,
     BaselineEntry,
     GatedMetric,
+    GateRule,
     compare_metric,
     compare_to_baseline,
     gate_spec_for,
@@ -85,10 +86,12 @@ def test_gate_spec_selects_the_gated_metrics() -> None:
     assert gate_spec_for("e2e.overhead_ms") == ("p50", "overhead")
     assert gate_spec_for("e2e.cascade-delay.overhead_ms") == ("p50", "overhead")
     assert gate_spec_for("e2e.engine.v2v_ms") == ("p50", "latency")
-    assert gate_spec_for("e2e.loop_lag_ms") == ("p99", "latency")
-    assert gate_spec_for("flush.flush_ms") == ("p50", "latency")
+    assert gate_spec_for("e2e.loop_lag_ms") == ("p99", "loop_lag")
+    assert gate_spec_for("flush.flush_ms") == ("p50", "flush")
+    assert gate_spec_for("e2e.frame_gap_max_ms") == ("p90", "gap")
     assert gate_spec_for("micro.energy_vad_us") == ("p50", "micro")
     for reported_only in ("e2e.engine.cpu_pct", "e2e.delivery_lag_ms", "flush.engine.flush_ms",
+                          "e2e.frame_jitter_ms", "e2e.engine.frame_jitter_ms",
                           "e2e.engine.residual_ms", "capacity.sessions_per_core"):  # fmt: skip
         assert gate_spec_for(reported_only) is None
 
@@ -170,7 +173,7 @@ def test_compare_to_baseline_judges_only_sections_that_ran() -> None:
         {
             "e2e.overhead_ms": [2.1, 2.2, 2.3],
             "e2e.engine.v2v_ms": [480.0, 481.0, 482.0],  # +81 ms, +20 %: regressed
-            "e2e.frame_jitter_ms": [0.1, 0.2],  # not in the baseline: new
+            "e2e.frame_gap_max_ms": [0.1, 0.2],  # not in the baseline: new
             # flush ran but produced nothing -> missing; micro did not run -> skipped
         },
         sections=("e2e", "flush"),
@@ -181,7 +184,7 @@ def test_compare_to_baseline_judges_only_sections_that_ran() -> None:
         "e2e.overhead_ms": "ok",
         "e2e.engine.v2v_ms": "regressed",
         "flush.flush_ms": "missing",
-        "e2e.frame_jitter_ms": "new",
+        "e2e.frame_gap_max_ms": "new",
     }
     assert report.platform == "linux" and report.gated and not report.passed
     assert report.failing_sections() == ["e2e", "flush"]
@@ -375,7 +378,8 @@ def test_baseline_update_adds_the_new_rules_and_keeps_entry_overrides(tmp_path: 
     baseline, key = update_baseline(path, run)
     assert key == "windows" and baseline.rules["overhead"] == OVERHEAD
     entry = load_baseline(path).entries["windows"]
-    assert entry.rules == {"overhead": WINDOWS_OVERHEAD}
+    assert entry.rules == DEFAULT_ENTRY_RULES["windows"]
+    assert entry.rules["overhead"] == WINDOWS_OVERHEAD
     assert entry.metrics["e2e.overhead_ms"].value == 0.0
     assert entry.metrics["e2e.overhead_ms"].rule == "overhead"
 
@@ -391,3 +395,83 @@ def test_baseline_update_adds_the_new_rules_and_keeps_entry_overrides(tmp_path: 
     ).passed
     linux_update, _ = update_baseline(path, run_with({"e2e.overhead_ms": [1.0]}))
     assert linux_update.entries["linux"].rules == {}  # Linux uses the file's 5 ms floor
+
+
+# ------------------------------------------------ loop-lag, flush and playout-gap floors
+
+LOOP_LAG = DEFAULT_RULES["loop_lag"]
+WINDOWS_LOOP_LAG = DEFAULT_ENTRY_RULES["windows"]["loop_lag"]
+FLUSH = DEFAULT_RULES["flush"]
+GAP = DEFAULT_RULES["gap"]
+
+
+@pytest.mark.parametrize(
+    ("rule", "base", "current", "status"),
+    [
+        # Linux loop lag p99: 1.20-1.59 ms over 50 CI runs
+        (LOOP_LAG, 1.2, 1.59, "ok"),
+        (LOOP_LAG, 1.4, 6.3, "ok"),  # +4.9 ms: below the 5 ms floor
+        (LOOP_LAG, 1.4, 9.4, "regressed"),  # +8 ms
+        (LOOP_LAG, 1.4, 31.4, "regressed"),  # +30 ms (the latency rule alone let it pass)
+        # Windows loop lag p99: one ~15.6 ms timer tick, 12.7-15.1 ms over 50 CI runs
+        (WINDOWS_LOOP_LAG, 12.7, 15.1, "ok"),
+        (WINDOWS_LOOP_LAG, 14.5, 24.0, "ok"),  # +9.5 ms: below the 10 ms Windows floor
+        (WINDOWS_LOOP_LAG, 14.5, 29.5, "regressed"),  # +15 ms
+        (WINDOWS_LOOP_LAG, 14.5, 44.5, "regressed"),  # +30 ms
+        # flush p50: 0 ms on Linux, 0.02-0.12 ms on Windows
+        (FLUSH, 0.0, 0.118, "ok"),
+        (FLUSH, 0.07, 4.9, "ok"),
+        (FLUSH, 0.07, 8.07, "regressed"),
+        (FLUSH, 0.0, 30.0, "regressed"),
+        # playout gaps: 0 in every CI run so far
+        (GAP, 0.0, 15.6, "ok"),  # one Windows timer tick
+        (GAP, 0.0, 30.0, "regressed"),
+    ],
+)
+def test_small_baseline_metrics_have_absolute_floors(
+    rule: GateRule, base: float, current: float, status: str
+) -> None:
+    def ci(v: float) -> tuple[float, float]:
+        return (v * 0.99, v * 1.01)
+
+    assert compare_metric(
+        "m", metric(base, ci(base)), metric(current, ci(current)), rule
+    ).status == (status)
+
+
+def test_the_latency_rule_alone_misses_a_30ms_loop_lag_regression() -> None:
+    assert compare_metric("m", metric(1.4), metric(31.4), LATENCY).status == "ok"
+    assert compare_metric("m", metric(0.0), metric(29.0), LATENCY).status == "ok"
+
+
+def test_loop_lag_and_flush_floors_still_require_separated_cis() -> None:
+    base = metric(1.4, (1.39, 1.41))
+    spike = metric(9.0, (1.2, 20.0))  # one blocked callback: the CIs overlap
+    assert compare_metric("m", base, spike, LOOP_LAG).status == "ok"
+    assert compare_metric("m", metric(0.0, (0.0, 0.0)), metric(8.0, (0.0, 12.0)), FLUSH).status == (
+        "ok"
+    )
+
+
+@pytest.mark.parametrize("os_name", ["Linux", "Windows"])
+def test_committed_baseline_gates_loop_lag_flush_and_gaps(os_name: str) -> None:
+    path = Path(__file__).parents[2] / "benchmarks" / "baselines" / "overhead-ci.json"
+    baseline = load_baseline(path)
+    entry = baseline.entries[os_name.lower()]
+    assert entry.metrics["e2e.loop_lag_ms"].rule == "loop_lag"
+    assert entry.metrics["flush.flush_ms"].rule == "flush"
+    assert entry.metrics["e2e.frame_gap_max_ms"].rule == "gap"
+    assert "e2e.frame_jitter_ms" not in entry.metrics  # 0 on every run: gated nothing
+    keys = ("e2e.loop_lag_ms", "flush.flush_ms", "e2e.frame_gap_max_ms")
+    values = {k: entry.metrics[k].value for k in keys}
+    spread = 0.1 if os_name == "Linux" else 0.5
+
+    def failures(shift: Mapping[str, float]) -> set[str]:
+        run = run_around(
+            {k: v + shift.get(k, 0.0) for k, v in values.items()},
+            spread, system=os_name, sections=("e2e", "flush"),
+        )  # fmt: skip
+        return {c.key for c in compare_to_baseline(baseline, run).failures if c.key in keys}
+
+    assert failures({}) == set()
+    assert failures(dict.fromkeys(keys, 30.0)) == set(keys)

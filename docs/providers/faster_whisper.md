@@ -235,7 +235,9 @@ time in 20 ms chunks, `language="en"`, 2026-09-25:
 CPU: AMD Ryzen 5 5600 shared with other jobs (load average 3-50 during the runs), so the
 CPU rows are noisy. GPU: RTX 5070 Ti.
 
-*First partial* is measured from the start of the audio, which begins with 0.3-0.5 s of
+*First partial* here is measured from the start of the audio (the definition these runs
+used; `van bench asr` now reports it as `first_partial_from_audio_ms` and measures
+`first_partial_ms` from the speech onset). The audio begins with 0.3-0.5 s of
 silence in LibriSpeech; the VAD also needs `min_speech_duration` (0.1 s) before it reports
 speech. The first interim decode starts after half an interval of speech. *TTFS* is the
 time from the end of the audio (`end_input()`) to the final transcript. In this benchmark

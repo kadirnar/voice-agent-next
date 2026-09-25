@@ -25,8 +25,15 @@ Metrics (per utterance in ``items.jsonl``, aggregated in ``summary.json``):
   harness as the VAD: the VAD stop is the end of the file); batch: the ``transcribe()``
   duration (a batch recognizer starts when the audio ends). This is the STT's share of a
   voice agent's response time.
-* ``first_partial_ms`` — streaming: audio start (first chunk's capture start) -> first
-  non-empty interim transcript.
+* ``first_partial_ms`` — streaming: **speech onset** -> first non-empty interim
+  transcript. The onset is found in the utterance audio by the reference VAD of the
+  latency tracks (:class:`~voice_agent_next.bench.onset.OnsetDetector`: the first 10 ms
+  frame >= -40 dBFS that starts >= 100 ms of speech) and placed on the wall clock when the
+  recognizer got it: its capture time under pacing, the delivery of the chunk holding it
+  when unpaced. Leading silence (0.3-0.5 s in LibriSpeech) therefore no longer counts.
+  ``first_partial_from_audio_ms`` keeps the earlier definition (first chunk's capture
+  start -> first interim) for continuity; ``speech_onset_ms`` is the onset in the audio.
+  A negative ``first_partial_ms`` is an interim before the detected onset.
 * ``interim_revision_rate`` — streaming stability: share of interim updates that rewrite
   already-shown words (the previous interim is not a prefix of the next, after
   normalization) instead of only appending. ``0`` = interims only grow.
@@ -53,6 +60,7 @@ from ...stt import STT, StreamAdapter, STTEventType
 from ...utils.clock import now
 from ..asr_datasets import AsrDataset, AsrUtterance, load_audio
 from ..environment import collect_environment
+from ..onset import OnsetDetector
 from ..report import ReportSpec, fmt, markdown_table, render_report
 from ..results import (
     Distribution,
@@ -150,6 +158,11 @@ class AsrItem(BaseModel):
     """``processing_ms / duration``."""
     ttfs_ms: float | None = None
     first_partial_ms: float | None = None
+    """Streaming: speech onset -> first non-empty interim."""
+    first_partial_from_audio_ms: float | None = None
+    """Streaming: first chunk's capture start -> first non-empty interim."""
+    speech_onset_ms: float | None = None
+    """Streaming: speech onset in the utterance audio (reference VAD)."""
     interims: int = 0
     interim_updates: int = 0
     interim_revisions: int = 0
@@ -167,6 +180,11 @@ class _Recognition:
     processing_s: float | None = None
     ttfs_s: float | None = None
     first_partial_s: float | None = None
+    """From the first chunk's capture start (wall clock)."""
+    speech_onset_s: float | None = None
+    """Speech onset in the audio (reference VAD)."""
+    onset_s: float | None = None
+    """When the speech onset reached the recognizer, from the same start (wall clock)."""
     interims: list[str] = field(default_factory=list)
     interim_segments: list[str | None] = field(default_factory=list)
     finals: int = 0
@@ -192,13 +210,21 @@ def _chunks(audio: AudioFrame, sample_rate: int, chunk_ms: float) -> list[AudioF
 
 
 async def _recognize_streaming(
-    stt: STT, audio: AudioFrame, language: str | None, options: AsrOptions
+    stt: STT,
+    audio: AudioFrame,
+    language: str | None,
+    options: AsrOptions,
+    speech_onset: float | None = None,
 ) -> _Recognition:
+    """``speech_onset``: the speech onset in ``audio`` (s), placed on the wall clock as
+    :attr:`_Recognition.onset_s`."""
     chunks = _chunks(audio, stt.sample_rate, options.chunk_ms)
     stream = stt.stream(language=language)
     finals: list[tuple[float, str]] = []
-    rec = _Recognition()
+    rec = _Recognition(speech_onset_s=speech_onset)
     t_start = now()
+    if speech_onset is not None and options.realtime_factor > 0:
+        rec.onset_s = speech_onset / options.realtime_factor  # its capture time
 
     async def consume() -> None:
         async for ev in stream:
@@ -221,6 +247,8 @@ async def _recognize_streaming(
                 await asyncio.sleep(max(0.0, delay))
             else:
                 await asyncio.sleep(0)
+                if speech_onset is not None and rec.onset_s is None and t > speech_onset:
+                    rec.onset_s = now() - t_start  # unpaced: the delivery of its chunk
             stream.push_audio(chunk)
         t_flush = now()
         stream.end_input()
@@ -300,7 +328,10 @@ def _score(
     if rec.processing_s is not None and duration > 0:
         item.rtf = round(rec.processing_s / duration, 6)
     item.ttfs_ms = ms(rec.ttfs_s)
-    item.first_partial_ms = ms(rec.first_partial_s)
+    item.first_partial_from_audio_ms = ms(rec.first_partial_s)
+    item.speech_onset_ms = ms(rec.speech_onset_s)
+    if rec.first_partial_s is not None and rec.onset_s is not None:
+        item.first_partial_ms = ms(rec.first_partial_s - rec.onset_s)
     item.interims = len(rec.interims)
     item.interim_updates = _updates(rec.interim_segments)
     item.interim_revisions = _revisions(rec.interims, rec.interim_segments, norm)
@@ -335,6 +366,7 @@ def _group_stats(items: Sequence[AsrItem]) -> dict[str, Any]:
     updates = sum(it.interim_updates for it in scored)
     ttfs = Distribution.of(it.ttfs_ms for it in scored)
     partial = Distribution.of(it.first_partial_ms for it in scored)
+    from_audio = Distribution.of(it.first_partial_from_audio_ms for it in scored)
     return {
         "n": len(items),
         "scored": len(scored),
@@ -362,6 +394,7 @@ def _group_stats(items: Sequence[AsrItem]) -> dict[str, Any]:
         "ttfs_p50_ms": ttfs.p50,
         "ttfs_p90_ms": ttfs.p90,
         "first_partial_p50_ms": partial.p50,
+        "first_partial_from_audio_p50_ms": from_audio.p50,
         "interim_revision_rate": round(sum(it.interim_revisions for it in scored) / updates, 6)
         if updates
         else None,
@@ -383,7 +416,8 @@ def summarize_asr(
         "wer_pct": dist(_pct(it.wer) for it in scored),
         "cer_pct": dist(_pct(it.cer) for it in scored),
     }
-    for key in ("ttfs_ms", "first_partial_ms", "processing_ms", "rtf"):
+    for key in ("ttfs_ms", "first_partial_ms", "first_partial_from_audio_ms", "processing_ms",
+                "rtf"):  # fmt: skip
         d = dist(getattr(it, key) for it in scored)
         if d.n:
             metrics[key] = d
@@ -428,7 +462,8 @@ _METRIC_LABELS = {
     "wer_pct": "WER per utterance (%)",
     "cer_pct": "CER per utterance (%)",
     "ttfs_ms": "**final latency** `ttfs_ms` (end of audio → final)",
-    "first_partial_ms": "first partial (audio start → first interim)",
+    "first_partial_ms": "first partial (speech onset → first interim)",
+    "first_partial_from_audio_ms": "first partial from the audio start (earlier definition)",
     "processing_ms": "processing time per utterance",
     "rtf": "RTF per utterance (processing / audio)",
 }
@@ -496,8 +531,10 @@ _STREAM_TEXT = (
     "`STT.stream()`; audio pushed in {chunk_ms:g} ms chunks, each delivered when its "
     "interval has elapsed{pace}. At the end of the audio the harness calls `end_input()` "
     "(= `flush()` + end of input) — what a cascade does when its VAD ends the turn — and "
-    "TTFS runs from that call to the last final transcript. First partial = first chunk's "
-    "capture start → first non-empty interim. Interim revision rate = share of interim "
+    "TTFS runs from that call to the last final transcript. First partial = speech onset "
+    "(reference VAD, -40 dBFS) → first non-empty interim; `first_partial_from_audio_ms` "
+    "keeps the earlier definition (first chunk's capture start). Interim revision rate = "
+    "share of interim "
     "updates that rewrite earlier words instead of only appending."
 )
 
@@ -682,8 +719,18 @@ async def _recognize(
     stt: STT, audio: AudioFrame, language: str | None, options: AsrOptions
 ) -> _Recognition:
     if options.mode == "streaming":
-        return await _recognize_streaming(stt, audio, language, options)
+        onset = await asyncio.to_thread(speech_onset, audio)
+        return await _recognize_streaming(stt, audio, language, options, onset)
     return await _recognize_batch(stt, audio, language)
+
+
+_ONSET = OnsetDetector()
+
+
+def speech_onset(audio: AudioFrame) -> float | None:
+    """First speech onset in ``audio`` (s) by the reference VAD, ``None`` without speech."""
+    onsets = _ONSET.onsets(audio)
+    return onsets[0] if onsets else None
 
 
 async def _run_asr(

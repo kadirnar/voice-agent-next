@@ -59,7 +59,7 @@ from ...metrics import (
 from ...session import AgentSession, AgentState
 from ...transports.loopback import LoopbackTransport
 from ...utils.clock import now
-from ..caller import CallerEmulator, CallResult, TurnTiming
+from ..caller import CallerEmulator, CallResult, NextStimulus, TurnTiming
 from ..environment import collect_environment
 from ..onset import OnsetDetector, first_onset_between
 from ..recording import Label, write_labels
@@ -284,7 +284,7 @@ async def _run_session(
     index: int,
     engine: Any,
     system: BenchSystem,
-    stimuli: Sequence[Stimulus],
+    stimuli: Sequence[Stimulus] | NextStimulus,
     scenario: Scenario,
     options: LatencyOptions,
     on_turn: Callable[[TurnTiming], None] | None,

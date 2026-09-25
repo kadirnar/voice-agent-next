@@ -101,9 +101,11 @@ jobs:
 
   # T7 framework-overhead smoke tier (~2 min, offline, mocks) compared with the committed
   # baseline, which has one entry per runner OS (benchmarks/baselines/overhead-ci.json).
-  # It fails only on overhead regressions > 50 % and > 5 ms (20 ms on Windows), latency
-  # regressions > 10 % and > 30 ms (both with non-overlapping CIs), or hot paths more than
-  # 3x slower, and only if a re-run of the failing section confirms it. The job summary shows the comparison. Refresh the baseline from the
+  # It fails only on overhead regressions > 50 % and > 5 ms (20 ms on Windows), loop-lag
+  # and flush regressions > 50 % and > 5 ms (loop lag: 10 ms on Windows), latency
+  # regressions > 10 % and > 30 ms (all with non-overlapping CIs), playout gaps > 20 ms or
+  # hot paths more than 3x slower, and only if a re-run of the failing section confirms
+  # it. The job summary shows the comparison. Refresh the baseline from the
   # `bench-overhead-<OS>` artifact (see benchmarks/README.md).
   bench-overhead:
     name: bench overhead gate (${{ matrix.os }})

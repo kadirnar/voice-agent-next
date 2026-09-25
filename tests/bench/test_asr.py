@@ -412,6 +412,60 @@ async def test_streaming_track_measures_latency_and_partials(tmp_path: Path) -> 
     assert results.manifest.options["mode"] == "streaming"
 
 
+def _silence_then_speech(tmp_path: Path, lead: float, speech: float) -> AsrDataset:
+    audio = tmp_path / "audio"
+    audio.mkdir()
+    write_wav(audio / "u0.wav", concat(silence(lead, 16_000), tone(speech, 16_000)))
+    line = json.dumps({"audio": "audio/u0.wav", "text": "hello world", "id": "u0"})
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(line + "\n", encoding="utf-8")
+    return load_manifest(manifest, language="en")
+
+
+async def test_first_partial_is_measured_from_the_speech_onset(tmp_path: Path) -> None:
+    # 1 s of leading silence, then speech; MockSTT's first interim comes after 0.5 s of it
+    stt = MockSTT(transcripts="hello world", speech_threshold=0.001, interim_results=True)
+    results = await run_asr_benchmark(
+        stt, _silence_then_speech(tmp_path, 1.0, 1.1),
+        AsrOptions(mode="streaming", chunk_ms=20, realtime_factor=4.0, warmup=False),
+    )  # fmt: skip
+    item = AsrItem.model_validate(results.items[0])
+    assert item.speech_onset_ms == pytest.approx(1000.0, abs=2.0)
+    assert item.first_partial_ms is not None and item.first_partial_from_audio_ms is not None
+    # the old definition also counts the leading silence: 1 s of audio at 4x = 250 ms
+    gap = item.first_partial_from_audio_ms - item.first_partial_ms
+    assert gap == pytest.approx(250.0, abs=1.0)
+    assert 100 <= item.first_partial_ms <= 1000  # ~0.5 s of speech at 4x (+ scheduling)
+    s = results.summary
+    assert s.metrics["first_partial_ms"].n == 1 and s.metrics["first_partial_from_audio_ms"].n == 1
+    ds = s.extra["datasets"]["manifest"]
+    assert ds["first_partial_p50_ms"] == pytest.approx(item.first_partial_ms)
+    assert ds["first_partial_from_audio_p50_ms"] == pytest.approx(item.first_partial_from_audio_ms)
+    assert "speech onset → first interim" in (results.report or "")
+
+
+async def test_unpaced_first_partial_counts_from_the_chunk_holding_the_onset(
+    tmp_path: Path,
+) -> None:
+    stt = MockSTT(transcripts="hello world", speech_threshold=0.001, interim_results=True)
+    results = await run_asr_benchmark(
+        stt, _silence_then_speech(tmp_path, 1.0, 1.1),
+        AsrOptions(mode="streaming", chunk_ms=20, realtime_factor=0, warmup=False),
+    )  # fmt: skip
+    item = AsrItem.model_validate(results.items[0])
+    assert item.first_partial_ms is not None and item.first_partial_from_audio_ms is not None
+    assert 0 <= item.first_partial_ms <= item.first_partial_from_audio_ms
+
+
+def test_speech_onset_uses_the_reference_vad() -> None:
+    from voice_agent_next.bench.tracks.asr import speech_onset
+
+    assert speech_onset(silence(0.5, 16_000)) is None
+    assert speech_onset(concat(silence(0.3, 16_000), tone(0.5, 16_000))) == pytest.approx(
+        0.3, abs=0.002
+    )
+
+
 async def test_streaming_needs_a_vad_for_batch_only_recognizers(tmp_path: Path) -> None:
     ds = _dataset(tmp_path)
     batch_only = _stt_by_duration(list(_TEXTS), streaming=False)

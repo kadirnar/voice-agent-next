@@ -5,6 +5,27 @@ Voice-to-voice latency is measured **on the call recording** (end of the caller'
 first 10 ms frame that starts ≥ 100 ms of agent speech), not by summing component timings.
 Every run writes a manifest (git SHA, lockfile hash, package versions, CPU/GPU, OS, scenario hash).
 
+## Summary: T1–T7 at a glance
+
+The best measured result of every track so far (desktop: Ryzen 5 5600 CPU, RTX 5070 Ti;
+T7: GitHub-hosted CI runners). Each row links to the section with the full table,
+conditions and caveats. Machines were shared with other jobs for some runs; compare rows
+within a section, not across tracks.
+
+| Track | Headline metric | Best measured | System / conditions | Details |
+| --- | --- | ---: | --- | --- |
+| **T1** latency, CPU cascade | voice-to-voice p50 / p90 | **880 ms** / 991 ms | sherpa-onnx Kroko + Ollama LFM2.5-1.2B + Pocket TTS, all on the CPU | [T1 streaming STT and GPU](#t1-streaming-stt-and-gpu-on-the-same-desktop-2026-09-24) |
+| **T1** latency, GPU cascade | voice-to-voice p50 | **715 ms** | faster-whisper (CUDA) + Ollama + Qwen3-TTS 0.6B (CUDA) | [T1 streaming STT and GPU](#t1-streaming-stt-and-gpu-on-the-same-desktop-2026-09-24) |
+| **T1** latency, native S2S | voice-to-voice p50 / p90 | **276 ms** / 444 ms | Moshi (q8, GPU); 33 % premature replies | [T1 Moshi](#t1-native-full-duplex-speech-to-speech-moshi-on-the-rtx-5070-ti-2026-09-24-13) |
+| **T2** ASR | WER · final latency (TTFS) p50 | **1.67 %** (batch) · **41 ms** (streaming) | NeMo-Speech.cpp Nemotron EN (GPU); CPU: sherpa-onnx NeMo 2.29 % · 63 ms | [T2 on CPU](#t2-asr-on-cpu-2026-09-24-van-bench-asr), [T2 on GPU](#t2-asr-on-the-rtx-5070-ti-nemo-speechcpp-2026-09-25-78) |
+| **T3** TTS | time to first audio p50 · round-trip WER · DNSMOS ovrl | **225 ms** (Pocket TTS, batch) · **3.8 %** · **3.38** (Kokoro, streaming) | CPU; streaming mode gets the text at 15 words/s | [T3](#t3-tts-on-cpu-2026-09-24-102) |
+| **T4** VAD | frame F1, clean / pink noise @ 5 dB SNR | **97.3 %** / **96.6 %** | Silero v6.2 (onnxruntime); energy VAD 93.5 % / 25.5 % | [T4](#t4-turn-taking-quality-on-the-local-cpu-cascade-2026-09-25-109-122) |
+| **T4** end of turn | false cut-offs @ 300 ms (eot-bench en) | **8.8 %** | `fused` (Smart Turn + SmolLM2-135M); Smart Turn alone 35.2 %, VAD only 55.6 % | [T4](#t4-turn-taking-quality-on-the-local-cpu-cascade-2026-09-25-109-122) |
+| **T4** turn taking | false barge-ins on backchannels · dead air · premature replies in pauses | **0 %** · **0 %** · 75 % (≈ 50 % fused) | local CPU cascade (sherpa-onnx + Smart Turn + LFM2.5-1.2B + Pocket TTS) | [T4](#t4-turn-taking-quality-on-the-local-cpu-cascade-2026-09-25-109-122) |
+| **T5** S2S quality | accuracy · speech-fidelity WER · answer latency p50 | 19.4 % · **2.1 %** · 3.3 s | local CPU cascade with LFM2.5-1.2B, 128 spoken questions | [T5](#t5-speech-to-speech-quality-on-the-local-cpu-cascade-2026-09-25-126) |
+| **T6** tool use | pass@1 · tool F1 · tool round p50 | **6/11 (55 %)** · **86 %** · 3.6 s | `local-cpu` preset with Ollama LFM2.5 2.6B (scripted caller) | [T6](#t6-tool-use-on-the-local-cpu-preset-2026-09-25-121) |
+| **T7** framework overhead | overhead p50 · event-loop lag p99 · flush p50 | **~2 ms** · 1.4 ms · 0 ms | mock components, Linux CI runner (regression-gated on every PR) | [T7](#t7-framework-overhead-mock-components) |
+
 ## T1 · Fully local cascade on a desktop CPU (2026-09-24)
 
 * **Hardware:** AMD Ryzen 5 5600 (6 cores / 12 threads, `powersave` governor), 32 GB RAM, Linux 7.2 (CachyOS). The RTX 5070 Ti was **not** used (CPU-only run).
@@ -152,9 +173,73 @@ LibriSpeech test-clean smoke subset (50 utterances). TTFS = final transcript aft
 
 T1 with only the STT changed (same cascade): v2v p50 1,163 ms (Nemotron) vs 1,255 ms (sherpa-onnx) vs 1,222 ms (faster-whisper). Server-side endpointing in NeMo-Speech.cpp v0.1.0 drops words at its utterance splits (WER 2.6 → 4.1 %), so it is off by default.
 
+## T3 · TTS on CPU (2026-09-24, #102)
+
+`van bench tts` on the Ryzen 5 5600. TTFA = time until the first speech onset *plays*
+(leading silence counts); round-trip WER/CER = the audio transcribed by
+`faster-whisper/small.en`; "hard text" = numbers, dates and entities read correctly;
+MOS predicted by DNSMOS P.835. Streaming mode feeds the text word by word at 15 words/s,
+like an LLM.
+
+| TTS | mode | TTFA p50 / p95 | RTF p50 | rt WER | hard text | DNSMOS sig / bak / ovrl |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Kokoro v1.0 (kokoro-onnx) | batch | 793 / 3,110 ms | 0.18 | 4.2 % | 94.4 % | 3.60 / 4.18 / 3.37 |
+| | streaming | 1,697 / 4,377 ms | 0.43 | 3.8 % | 94.4 % | 3.61 / 4.17 / 3.38 |
+| Pocket TTS (alba) | batch | **225** / 500 ms | 0.28 | 7.1 % | 72.2 % | 3.53 / 4.11 / 3.28 |
+| | streaming | **675** / 2,333 ms | 0.51 | 8.8 % | 61.1 % | 3.57 / 4.10 / 3.32 |
+| sherpa-onnx Piper `en_US-libritts_r-medium` | batch | 572 / 2,674 ms | 0.16 | 4.2 % | 83.3 % | 3.50 / 3.94 / 3.16 |
+| | streaming | 1,260 / 3,855 ms | 0.42 | 3.8 % | 94.4 % | 3.42 / 3.87 / 3.06 |
+
+Pocket TTS streams audio within a sentence, so its audio starts first; it read raw digits
+badly in this run (hence the hard-text score), which text normalization in front of it
+addresses.
+
+## T5 · Speech-to-speech quality on the local CPU cascade (2026-09-25, #126)
+
+`van bench quality`, all five smoke subsets (128 spoken questions): sherpa-onnx NeMo
+FastConformer + Silero + Smart Turn + Ollama LFM2.5-1.2B (temperature 0, default
+instructions) + Kokoro. The agent's audio is transcribed by `faster-whisper/small.en` and
+scored; judge: LFM2.5-2.6B.
+
+| metric | value |
+| --- | ---: |
+| accuracy (all subsets) | 19.4 % |
+| text accuracy (the engine's own text) | 21.3 % |
+| speech-fidelity WER (audio vs the engine's text) | 2.1 % |
+| missed / empty answers | 0 % |
+| answer latency p50 / p90 | 3.3 / 5.2 s |
+
+The low accuracy is the 1.2B model with voice-assistant instructions: it mostly asks a
+clarifying question or discusses the options instead of answering. Per-subset numbers
+are in #126.
+
+## T6 · Tool use on the `local-cpu` preset (2026-09-25, #121)
+
+`van bench tools --preset local-cpu`, smoke suite (11 scripted calls), one trial:
+sherpa-onnx Kroko STT and Kokoro TTS on the CPU, the LLM on the GPU through Ollama, the
+caller voiced by Kokoro.
+
+| LLM | pass@1 | tool P / R / F1 | arg acc | say-do | halluc. turns | tool round p50 / p90 | v2v (no tool) p50 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| LFM2.5 1.2B instruct (preset) | 4/11 (36 %) | 55 / 83 / 66 % | 68 % | 0 % | 7 % | 1,839 / 3,666 ms | 1,240 ms |
+| LFM2.5 2.6B (BF16) | **6/11 (55 %)** | 100 / 75 / **86 %** | 80 % | 0 % | 2 % | 3,643 / 4,633 ms | 2,735 ms |
+
+Harness check of the LLM-driven caller (#158, `--caller llm:<spec>`): with the scripted
+reference agent and Ollama `qwen3.5:4b` (reasoning off) playing the caller, 10 of 11
+calls pass and every call ends with the caller hanging up on its own; the one failure is
+the caller confirming a cancellation before the (turn-indexed) reference agent asked, so
+the conversation took a path the script did not.
+
 ## T7 · Framework overhead (mock components)
 
 `van bench latency --engine mock` (energy VAD 0.4 s silence, no model latency): v2v p50 ≈ 402 ms
 = 400 ms endpointing + ~2 ms; with `response_delay 0.3`: ≈ 702 ms; cascade of mocks ≈ 602 ms
 (0.6 s VAD-only endpointing). Recording-vs-session residual ≈ 0.1 ms — the runtime adds
 essentially nothing on top of its components.
+
+The CI regression gate (`van bench overhead --tier smoke`, every PR, #82/#146/#158) sees,
+over its last 50 runs per runner: overhead p50 ≈ 2 ms on Linux (Windows timers are
+~16 ms coarse), event-loop lag p99 1.2–1.6 ms on Linux and 12.7–15.1 ms on Windows (one
+timer tick), flush p50 0 ms on Linux and 0.02–0.12 ms on Windows, and no playout gap in
+any reply. See [benchmarks/README.md](../../benchmarks/README.md#t7-framework-overhead-van-bench-overhead)
+for the thresholds.

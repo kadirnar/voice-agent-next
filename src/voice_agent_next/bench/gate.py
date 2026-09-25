@@ -17,7 +17,16 @@ A metric **regresses** only when it got worse by more than *both* thresholds of 
 * ``latency`` (milliseconds): more than 10 % **and** more than 30 ms, and the 95 % CIs of
   baseline and run do not overlap (research note 06, §8.5);
 * ``micro`` (microseconds per operation): more than 200 % (3x) **and** more than 5 µs —
-  runner hardware varies, so only large regressions of a hot path fail.
+  runner hardware varies, so only large regressions of a hot path fail;
+* ``loop_lag`` (``e2e.loop_lag_ms`` p99) and ``flush`` (``flush.flush_ms`` p50): more
+  than 50 % **and** more than 5 ms (loop lag on Windows: 10 ms, one ~15.6 ms timer tick
+  is its baseline), CIs apart. Both are ~1 ms or less on the runners, so the ``latency``
+  rule's 30 ms floor let a +30 ms regression through (calibrated on 50 CI runs per OS:
+  no false failure, +30 ms always caught);
+* ``gap`` (``e2e.frame_gap_max_ms`` p90, the largest playout gap of a reply): more than
+  20 ms. It is 0 on healthy runs (the transport never starved); it fails when at least
+  one reply in ten stutters. It replaces the frame-jitter p50, which was 0 on every run
+  and could not move.
 
 Rules live in the baseline file and can be tuned there, per runner in an entry's
 ``rules`` (overrides of the file's rules, which override :data:`DEFAULT_RULES`). A gated
@@ -108,6 +117,11 @@ DEFAULT_RULES: dict[str, GateRule] = {
     ),
     "latency": GateRule(max_increase_pct=10.0, max_increase_abs=30.0, require_ci_separation=True),
     "micro": GateRule(max_increase_pct=200.0, max_increase_abs=5.0),
+    "loop_lag": GateRule(max_increase_pct=50.0, max_increase_abs=5.0, require_ci_separation=True),
+    "flush": GateRule(
+        max_increase_pct=50.0, max_increase_abs=5.0, require_ci_separation=True, min_value=0.0
+    ),
+    "gap": GateRule(max_increase_pct=50.0, max_increase_abs=20.0, min_value=0.0),
 }
 
 GATE_SPEC: tuple[tuple[str, str, str], ...] = (
@@ -115,9 +129,9 @@ GATE_SPEC: tuple[tuple[str, str, str], ...] = (
     ("e2e.overhead_ms", "p50", "overhead"),
     ("e2e.*.overhead_ms", "p50", "overhead"),
     ("e2e.*.v2v_ms", "p50", "latency"),
-    ("e2e.frame_jitter_ms", "p50", "latency"),
-    ("e2e.loop_lag_ms", "p99", "latency"),
-    ("flush.flush_ms", "p50", "latency"),
+    ("e2e.frame_gap_max_ms", "p90", "gap"),
+    ("e2e.loop_lag_ms", "p99", "loop_lag"),
+    ("flush.flush_ms", "p50", "flush"),
     ("micro.*", "p50", "micro"),
 )
 """Which summary metrics are gated. Everything else is reported only."""
@@ -131,6 +145,10 @@ DEFAULT_ENTRY_RULES: dict[str, dict[str, GateRule]] = {
             max_increase_abs=20.0,
             require_ci_separation=True,
             min_value=0.0,
+        ),
+        # the p99 loop lag is one ~15.6 ms timer tick there (12.7-15.1 ms on the runners)
+        "loop_lag": GateRule(
+            max_increase_pct=50.0, max_increase_abs=10.0, require_ci_separation=True
         ),
     },
 }

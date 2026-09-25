@@ -34,7 +34,15 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializationInfo,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from ..chat import ChatContext, FunctionCall, FunctionCallOutput
 from ..errors import ConfigurationError, ToolError
@@ -627,6 +635,22 @@ class ToolScenario(BaseModel):
     expected_state: dict[str, Any] | None = None
     """Explicit expected final database (default: replay the expected write calls)."""
     tool_delays: dict[str, float] = Field(default_factory=dict)
+    persona: str | None = None
+    """LLM-driven caller only: who the caller is (default: a polite customer)."""
+    goal: str | None = None
+    """LLM-driven caller only: what the caller wants (default: ``description``; the
+    scripted turns are always given as the details the caller knows)."""
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_caller(
+        self, handler: SerializerFunctionWrapHandler, info: SerializationInfo
+    ) -> dict[str, Any]:
+        # unset caller fields are left out, so suites keep the hashes they had before
+        data: dict[str, Any] = handler(self)
+        for key in ("persona", "goal"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
     @property
     def expected_calls(self) -> list[ExpectedCall]:
