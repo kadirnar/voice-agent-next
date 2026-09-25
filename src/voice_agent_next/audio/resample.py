@@ -11,7 +11,7 @@ instance to avoid clicks at chunk boundaries.
 from __future__ import annotations
 
 import math
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -63,8 +63,8 @@ class _PolyphaseResampler:
     def process(self, x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         buf = np.concatenate([self._buf, x], axis=0) if x.size else self._buf
         self._pending = self._pending or bool(x.size)
-        avail_end = self._base + len(buf)
-        k_end = (avail_end * self.L - 1) // self.M + 1 if avail_end > 0 else 0
+        # ceil(avail_end * L / M); avail_end may be <= 0 right after a start or drain
+        k_end = ((self._base + len(buf)) * self.L - 1) // self.M + 1
         return self._emit(buf, k_end)
 
     def drain(self) -> npt.NDArray[np.float64]:
@@ -78,8 +78,8 @@ class _PolyphaseResampler:
         if not self._pending:
             return np.zeros((0, self.channels))
         self._pending = False
-        # indices are rebased relative to _k, so avail_end may be 0 here (never < 0)
-        avail_end = max(0, self._base + len(self._buf))
+        # indices are rebased relative to _k, so avail_end may even be negative here
+        avail_end = self._base + len(self._buf)
         k_end = (avail_end * self.L - 1) // self.M + 1 + math.ceil(self.group_delay_out)
         return self._emit(self._buf, k_end)
 
@@ -170,7 +170,7 @@ class Resampler:
             else:
                 self._poly = _PolyphaseResampler(input_rate, output_rate, channels, quality)
 
-    def _new_soxr(self):  # type: ignore[no-untyped-def]
+    def _new_soxr(self) -> Any:  # soxr.ResampleStream (optional dependency)
         import soxr
 
         return soxr.ResampleStream(
@@ -248,7 +248,7 @@ class Resampler:
         if owed <= 0 and not reset:
             return np.zeros((0, self.channels), dtype=np.int16)
         y = self._soxr_chunk(np.zeros((0, self.channels), dtype=np.int16), last=True)
-        self._soxr.clear()
+        self._soxr = self._new_soxr()  # a fresh stream: bit-identical to a new Resampler
         self._discard = 0
         # re-segmenting rounds each segment separately; keep the global count exact
         if len(y) > owed:
@@ -312,7 +312,7 @@ class StreamResampler:
         return AudioFrame(tail + out.data, self.output_rate, self.output_channels, frame.timestamp)
 
     def drain(self) -> AudioFrame:
-        """Mid-stream: emit the pending filter tail but keep the history (see :meth:`Resampler.drain`)."""
+        """Mid-stream: emit the pending tail, keep the history (see :meth:`Resampler.drain`)."""
         if self._rs is None:
             return AudioFrame.empty(self.output_rate, self.output_channels)
         return self._rs.drain()
