@@ -106,6 +106,22 @@ Audio-streaming TTS removes the clause-rendering wait. It is the largest single 
 
 On CPU the omni model is slower than the best CPU cascade (≈ 0.9 s with Pocket TTS). The runner has no GPU backend yet; a GPU build is the obvious follow-up.
 
+## T4 · Turn-taking quality on the local CPU cascade (2026-09-25, #109, #122)
+
+`van bench turn-taking`: sherpa-onnx streaming STT + Smart Turn + Ollama LFM2.5-1.2B + Pocket TTS. 3 sessions × 12 turns.
+
+| metric | before #122 | after #122 |
+|---|---:|---:|
+| false barge-ins on backchannels ("uh-huh") | 100 % | **0 %** (resumed every time) |
+| dead air | 25 % | **0 %** |
+| missed turns | 7 % | **0 %** |
+| premature replies in mid-turn pauses | 92 % | 75 % |
+| v2v p50 | 696 ms | **582 ms** |
+
+- **Backchannels:** the small streaming STTs can't transcribe "uh-huh" ("but high", "m"). #122 treats a short utterance without an interruption word as a backchannel.
+- **Premature replies:** Smart Turn scores the first sentence of a two-sentence question as complete (0.57–0.99). A fixed 1.0 s minimum delay removes the premature replies at about +450 ms v2v. The real fix is a semantic end-of-turn detector (#124).
+- **eot-bench (English):** Smart Turn v3.2 has 35.2 % false cut-offs @ 300 ms vs 55.6 % for VAD only, matching the published numbers.
+
 ## T2 · ASR on CPU (2026-09-24, `van bench asr`)
 
 LibriSpeech test-clean smoke subset (50 utterances, 10 speakers), Ryzen 5 5600 CPU, Whisper-style normalization. `TTFS` is the time from the end of the audio to the final transcript: in streaming mode it is measured from `flush()`, in batch mode it is the whole transcription time.

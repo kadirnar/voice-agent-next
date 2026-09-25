@@ -47,6 +47,12 @@ AgentSession(
 Audio detectors run in parallel with the STT flush (they don't need the transcript), so
 they add little to the turn's latency.
 
+An audio detector judges how the utterance *sounds*: a complete sentence followed by a
+pause ("Where is my order? · I placed it last week.") is "done" to it (Smart Turn: 0.97),
+and short answers ("Yes.") often sound unfinished. The T4 battery (`van bench
+turn-taking`) measures what that does to a whole system; the local presets' settings and
+the remaining trade-off are in [endpointing](endpointing.md#the-local-presets-issue-113).
+
 ## STT-driven turns
 
 STTs that detect turns themselves set `STTCapabilities.end_of_turn` and emit:

@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AUTO_ORDER",
+    "LOCAL_TURN_TAKING",
     "PRESETS",
     "Environment",
     "Preset",
@@ -148,6 +149,42 @@ _TURN_TAKING = (
     "Silero VAD and Smart Turn v3.2 end the user's turn (Smart Turn runs concurrently with the "
     "STT flush"
 )
+LOCAL_TURN_TAKING: Mapping[str, Mapping[str, Any]] = {
+    "cascade": {
+        "min_endpointing_delay": 0.5,
+        "max_endpointing_delay": 1.5,
+        "preemptive_generation": True,
+        "preemptive_tts": True,
+    },
+    "session": {"max_backchannel_duration": 1.0},
+}
+"""Turn-taking settings of the local cascade presets (issue #113, measured with
+``van bench turns`` on eot-bench and ``van bench turn-taking`` / ``latency``):
+
+* ``max_endpointing_delay`` 1.5 s: Smart Turn says "not done" at 25 % of real turn ends
+  (eot-bench English); waiting 2.5 s there was the battery's dead air. 1.5 s keeps every
+  such reply under 2 s.
+* ``min_endpointing_delay`` 0.5 s: with the lower ceiling, the same false-cutoff rate on
+  eot-bench as the old 0.4 / 2.5 s (10.8 %) at 181 ms less mean latency.
+* preemptive generation + TTS: the reply is synthesized during the endpointing silence, so
+  the extra 0.1 s costs no voice-to-voice latency (T1 p50 637 -> 600 ms on CPU).
+* ``max_backchannel_duration`` 1.0 s: small streaming ASR models turn "uh-huh" into words
+  ("but high"); short utterances without an interruption word are backchannels.
+"""
+_TURN_TAKING_NOTE = (
+    "Turn-taking defaults from the T4 battery (#113): 0.5-1.5 s endpointing with the reply "
+    "prepared during the silence, and short utterances over the agent treated as "
+    "backchannels unless they contain an interruption word."
+)
+
+
+def _local_turn_taking(*, preemptive: bool = True) -> dict[str, Any]:
+    cascade = dict(LOCAL_TURN_TAKING["cascade"])
+    if not preemptive:  # speculative calls to a paid LLM cost money when discarded
+        cascade = {k: v for k, v in cascade.items() if not k.startswith("preemptive")}
+    return {"cascade": cascade, "session": dict(LOCAL_TURN_TAKING["session"])}
+
+
 _PRESETS: tuple[Preset, ...] = (
     Preset(
         name="local-cpu",
@@ -158,6 +195,7 @@ _PRESETS: tuple[Preset, ...] = (
             "tts": "kokoro/v1.0-fp16",
             "vad": "silero",
             "turn_detector": "smart_turn",
+            **_local_turn_taking(),
         },
         rationale=(
             "Measured on a Ryzen 5 5600 without GPU (docs/providers/sherpa-onnx.md): the "
@@ -169,7 +207,7 @@ _PRESETS: tuple[Preset, ...] = (
             "so the CPU is left to STT and TTS, the contention research note 03 warns about; "
             "for better tool calling use `--llm ollama/qwen3.5:4b` (note 03 §7.5). Kokoro-82M "
             "is the best open TTS that runs in real time on a CPU (first clause ~400 ms). "
-            f"{_TURN_TAKING}, off the critical path)."
+            f"{_TURN_TAKING}, off the critical path). {_TURN_TAKING_NOTE}"
         ),
         where="local",
     ),
@@ -182,6 +220,7 @@ _PRESETS: tuple[Preset, ...] = (
             "tts": "kokoro/v1.0-fp16",
             "vad": "silero",
             "turn_detector": "smart_turn",
+            **_local_turn_taking(),
         },
         rationale=(
             "On an RTX 5070 Ti faster-whisper's final transcription drops from 391 to 51 ms "
@@ -191,7 +230,7 @@ _PRESETS: tuple[Preset, ...] = (
             "profile). Qwen3.5-9B is note 03's LLM for a 16 GB GPU (tool calling: vendor "
             "BFCL-V4 66.1, TAU2 79.1); Ollama puts it on the GPU. Kokoro stays the TTS (it "
             "runs on CUDA too with onnxruntime-gpu, see docs/hardware.md). "
-            f"{_TURN_TAKING})."
+            f"{_TURN_TAKING}). {_TURN_TAKING_NOTE}"
         ),
         where="local",
         platforms=("linux", "win32"),
@@ -206,6 +245,7 @@ _PRESETS: tuple[Preset, ...] = (
             "tts": "mlx_audio/kokoro",
             "vad": "silero",
             "turn_detector": "smart_turn",
+            **_local_turn_taking(),
         },
         rationale=(
             "Note 03 §9.2's Apple silicon stack, all on the GPU through MLX: parakeet-mlx "
@@ -218,7 +258,7 @@ _PRESETS: tuple[Preset, ...] = (
             "as the failover when no mlx-lm server runs; Kokoro-82M through mlx-audio "
             "(`--tts mlx_audio/pocket-tts` streams audio: 140 ms to first audio against "
             "Kokoro's 542 ms per segment; docs/providers/mlx.md). "
-            f"{_TURN_TAKING})."
+            f"{_TURN_TAKING}). {_TURN_TAKING_NOTE}"
         ),
         where="local",
         platforms=("darwin",),
@@ -237,6 +277,7 @@ _PRESETS: tuple[Preset, ...] = (
             "tts": "kokoro/v1.0-fp16",
             "vad": "silero",
             "turn_detector": "smart_turn",
+            **_local_turn_taking(preemptive=False),
         },
         rationale=(
             "The audio stays on the machine (local-cpu's measured STT/TTS) and only text "

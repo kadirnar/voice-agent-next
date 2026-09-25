@@ -15,6 +15,13 @@ positives for VAD-only barge-in. :class:`~voice_agent_next.session.AgentSession`
     without saying anything meaningful, or the final transcript of what they said is only
     backchannels: resume the paused speech where it stopped.
 
+Small streaming ASR models are trained on transcripts without fillers: they often turn a
+backchannel into a wrong word ("uh-huh" -> "but high", "mm-hmm" -> "m"), which no list can
+match. With ``max_backchannel_duration`` set, a *short* utterance over the agent (less
+speech than that, at most two words) is therefore a backchannel unless one of its words
+is an **interruption word** ("stop", "wait", "no", question words...): it never confirms
+a barge-in by duration alone, and its transcript is dropped instead of answered.
+
 If the user keeps making sound without words (noise, a TV) the agent is held at most
 ``false_interruption_timeout`` seconds (``UNPAUSE``) while the overlap keeps watching.
 After a confirmed interruption it keeps watching as well: if the user then stays quiet
@@ -43,11 +50,13 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BACKCHANNEL_WORDS",
+    "INTERRUPTION_WORDS",
     "BackchannelFilter",
     "InterruptionPolicy",
     "Overlap",
     "Verdict",
     "backchannel_words_for",
+    "interruption_words_for",
     "split_words",
 ]
 
@@ -116,6 +125,62 @@ def backchannel_words_for(language: str | None) -> tuple[str, ...]:
     return BACKCHANNEL_WORDS.get(primary, ()) + _EN_CORE
 
 
+# Words that make even a very short utterance a real interruption (commands, refusals,
+# repair requests and question words). Used by the short-utterance rule only.
+_EN_INTERRUPT = (
+    "stop", "wait", "no", "nope", "not", "don't", "hold on", "hang on", "one moment",
+    "one second", "sorry", "excuse me", "pardon", "cancel", "enough", "quiet", "shut up",
+    "pause", "hey", "hello", "listen", "actually", "repeat", "again", "what", "why", "how",
+    "who", "where", "when", "which",
+)  # fmt: skip
+INTERRUPTION_WORDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "en": _EN_INTERRUPT,
+        "de": (
+            "stopp", "halt", "warte", "warten", "nein", "moment", "entschuldigung", "sorry",
+            "was", "wie", "warum", "wer", "wo", "wann", "welche", "nochmal",
+        ),
+        "es": (
+            "para", "espera", "no", "perdón", "perdona", "disculpa", "momento", "qué",
+            "que", "cómo", "como", "por qué", "quién", "dónde", "cuándo", "cuál",
+        ),
+        "fr": (
+            "stop", "arrête", "attends", "non", "pardon", "excusez-moi", "moment", "quoi",
+            "comment", "pourquoi", "qui", "où", "quand", "quel", "quelle",
+        ),
+        "it": (
+            "stop", "basta", "aspetta", "no", "scusa", "scusi", "momento", "cosa", "come",
+            "perché", "chi", "dove", "quando", "quale",
+        ),
+        "pt": (
+            "para", "pare", "espera", "espere", "não", "desculpa", "momento", "o quê", "que",
+            "como", "por que", "quem", "onde", "quando", "qual",
+        ),
+        "tr": (
+            "dur", "bekle", "hayır", "yok", "pardon", "affedersin", "ne", "nasıl", "neden",
+            "niye", "kim", "nerede", "ne zaman", "hangi", "bir dakika",
+        ),
+        "ja": ("待って", "ちょっと", "いいえ", "違う", "すみません", "何", "なに", "どう", "なぜ"),
+        "zh": ("等", "停", "不", "不是", "对不起", "什么", "为什么", "怎么", "哪"),
+    }
+)  # fmt: skip
+"""Built-in interruption words per language (primary subtag): words that make even a very
+short utterance over the agent a real barge-in (see ``max_backchannel_duration``)."""
+_EN_INTERRUPT_CORE = ("stop", "wait", "no", "sorry", "hey", "hello", "what")
+_MAX_SHORT_WORDS = 2
+"""A short utterance with more words than this is a real turn."""
+
+
+def interruption_words_for(language: str | None) -> tuple[str, ...]:
+    """The built-in interruption words for ``language`` (``"de"``, ``"pt-BR"``, ``None``...):
+    English for English or no/unknown language; other languages get their own list plus a
+    few English words heard everywhere ("stop", "sorry")."""
+    primary = (language or "en").replace("_", "-").split("-")[0].casefold()
+    if primary == "en":
+        return _EN_INTERRUPT
+    return INTERRUPTION_WORDS.get(primary, ()) + _EN_INTERRUPT_CORE
+
+
 # kana + CJK ideographs: languages written without spaces count characters as words
 _CJK = "぀-ヿ㐀-䶿一-鿿豈-﫿"
 _CJK_SPLIT = re.compile(rf"[{_CJK}]|[^{_CJK}]+")
@@ -165,6 +230,14 @@ class BackchannelFilter:
         """True if ``text`` has words and all of them are backchannels."""
         return bool(split_words(text)) and not self.meaningful_words(text)
 
+    def contains(self, words: list[str]) -> bool:
+        """True if a phrase of the list occurs in the normalized ``words``."""
+        for i in range(len(words)):
+            for n in range(min(self._longest, len(words) - i), 0, -1):
+                if tuple(words[i : i + n]) in self._phrases:
+                    return True
+        return False
+
 
 @functools.lru_cache(maxsize=32)
 def _shared_filter(phrases: tuple[str, ...]) -> BackchannelFilter:
@@ -184,6 +257,11 @@ class InterruptionPolicy:
         resume: pause (instead of keep playing) while the verdict is pending and resume
             after a false interruption.
         backchannels: words that never count as an interruption.
+        max_backchannel_duration: the short-utterance rule (``None`` = off): user speech
+            over the agent shorter than this, with at most two words and no interruption
+            word, is a backchannel whatever the STT made of it. Include the VAD's
+            end-of-speech hangover: speech counts until the VAD reports its end.
+        interruptions: words that make even a short utterance a real barge-in.
     """
 
     min_duration: float = 0.5
@@ -193,6 +271,10 @@ class InterruptionPolicy:
     backchannels: BackchannelFilter = field(
         default_factory=lambda: _shared_filter(backchannel_words_for(None))
     )
+    max_backchannel_duration: float | None = None
+    interruptions: BackchannelFilter = field(
+        default_factory=lambda: _shared_filter(interruption_words_for(None))
+    )
 
     def __post_init__(self) -> None:
         if self.min_duration < 0:
@@ -201,6 +283,8 @@ class InterruptionPolicy:
             raise ValueError("min_words must be >= 0")
         if self.false_interruption_timeout is not None and self.false_interruption_timeout < 0:
             raise ValueError("false_interruption_timeout must be >= 0 or None")
+        if self.max_backchannel_duration is not None and self.max_backchannel_duration < 0:
+            raise ValueError("max_backchannel_duration must be >= 0 or None")
 
     @classmethod
     def from_options(
@@ -208,12 +292,16 @@ class InterruptionPolicy:
     ) -> InterruptionPolicy:
         words = options.backchannel_words
         phrases = tuple(words) if words is not None else backchannel_words_for(language)
+        stops = options.interruption_words
+        interruptions = tuple(stops) if stops is not None else interruption_words_for(language)
         return cls(
             min_duration=options.min_interruption_duration,
             min_words=options.min_interruption_words,
             false_interruption_timeout=options.false_interruption_timeout,
             resume=options.resume_false_interruption,
             backchannels=_shared_filter(phrases),
+            max_backchannel_duration=options.max_backchannel_duration,
+            interruptions=_shared_filter(interruptions),
         )
 
     @property
@@ -334,22 +422,56 @@ class Overlap:
         ongoing = 0.0 if self.speaking_since is None else max(0.0, t - self.speaking_since)
         return max(self.longest, ongoing)
 
+    def urgent(self) -> bool:
+        """An interruption word ("stop", "wait", "what"...) was transcribed."""
+        return self.policy.interruptions.contains(self.meaningful_words())
+
+    def short_backchannel(self, t: float) -> bool:
+        """The short-utterance rule (``max_backchannel_duration``): so far less speech than
+        that, at most two meaningful words and no interruption word — a backchannel,
+        however the STT transcribed it."""
+        limit = self.policy.max_backchannel_duration
+        return (
+            limit is not None
+            and self.speech_duration(t) < limit - _EPS
+            and len(self.meaningful_words()) <= _MAX_SHORT_WORDS
+            and not self.urgent()
+        )
+
     def not_a_turn(self) -> bool:
         """The user went quiet and the final transcript of what they said is not a turn
-        (only backchannels, or fewer words than needed): the engine should drop it."""
+        (only backchannels, fewer words than needed, or a short utterance without an
+        interruption word): the engine should drop it."""
         return (
             not self.confirmed
             and self.speaking_since is None
             and self.final_after_quiet
             and bool(self.transcript)
-            and len(self.meaningful_words()) < self.policy.words_needed
+            and (
+                len(self.meaningful_words()) < self.policy.words_needed
+                or self.short_backchannel(self.quiet_since or self.started_at)
+            )
+        )
+
+    def is_turn(self) -> bool:
+        """The user went quiet after saying enough meaningful words, and not a short
+        backchannel: whatever the verdict, the engine may commit (and answer) it."""
+        return (
+            not self.confirmed
+            and self.speaking_since is None
+            and len(self.meaningful_words()) >= self.policy.words_needed
+            and not self.short_backchannel(self.quiet_since or self.started_at)
         )
 
     def reason(self) -> FalseInterruptionReason:
         """Why the overlap was not an interruption."""
         if not self.transcript:
             return "noise"
-        return "too_few_words" if self.meaningful_words() else "backchannel"
+        if not self.meaningful_words():
+            return "backchannel"
+        if self.speaking_since is None and self.short_backchannel(self.started_at):
+            return "backchannel"  # a short reaction the STT turned into words
+        return "too_few_words"
 
     def _quiet_for(self, t: float) -> float | None:
         if self.speaking_since is not None or self.quiet_since is None:
@@ -367,12 +489,19 @@ class Overlap:
             if timed_out:
                 return Verdict.SETTLED if words else Verdict.FALSE_INTERRUPTION
             return None
-        if self.segment_duration(t) >= p.min_duration - _EPS and words >= p.min_words:
+        short = self.short_backchannel(t)
+        long_enough = self.segment_duration(t) >= p.min_duration - _EPS
+        if long_enough and words >= p.min_words and not short:
             return Verdict.INTERRUPT
-        if quiet_for is not None and self.final_after_quiet and self.transcript and not words:
+        if (
+            quiet_for is not None
+            and self.final_after_quiet
+            and self.transcript
+            and (not words or short)
+        ):
             return Verdict.RESUME  # only backchannels: no reason to keep the agent waiting
         if timed_out:
-            return Verdict.INTERRUPT if words >= p.words_needed else Verdict.RESUME
+            return Verdict.INTERRUPT if words >= p.words_needed and not short else Verdict.RESUME
         if (
             self.held
             and self.speaking_since is not None
@@ -388,8 +517,17 @@ class Overlap:
         timeout = p.false_interruption_timeout
         times: list[float] = []
         if not self.confirmed and self.speaking_since is not None:
-            if len(self.meaningful_words()) >= p.min_words and self.longest < p.min_duration:
-                times.append(self.speaking_since + p.min_duration)
+            if len(self.meaningful_words()) >= p.min_words:
+                # the duration rule: the segment and, for a possible backchannel, the speech
+                # of the whole overlap must be long enough
+                due = []
+                if self.longest < p.min_duration:
+                    due.append(self.speaking_since + p.min_duration)
+                limit = p.max_backchannel_duration
+                if limit is not None and self.short_backchannel(self.speaking_since):
+                    due.append(self.speaking_since + limit - self.speech)
+                if due:
+                    times.append(max(due))
             if self.held and timeout is not None:
                 times.append(self.started_at + timeout)
         if timeout is not None and self.quiet_since is not None and self.speaking_since is None:
