@@ -26,4 +26,10 @@ Guides: [methodology](../benchmarks/methodology.md), [results](../benchmarks/res
 
 ::: voice_agent_next.bench.tracks.overhead
 
+::: voice_agent_next.bench.tracks.quality
+
+::: voice_agent_next.bench.quality_datasets
+
+::: voice_agent_next.bench.quality_scoring
+
 ::: voice_agent_next.bench.wer

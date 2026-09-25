@@ -11,7 +11,7 @@ local or cloud — that measures what the user *hears*. Design rationale:
 | **T2 ASR** | WER/CER, RTFx, final latency (TTFS), first partial, interim stability | `van bench asr` |
 | **T3 TTS** | TTFA (leading silence counts), RTF, underruns, round-trip WER/CER, hard-text accuracy, DNSMOS | `van bench tts` |
 | **T4 VAD / turn-taking** | VAD frame metrics and onset/offset lag; end-of-turn on eot-bench; turn-taking battery (premature replies, barge-in, false barge-ins) | `van bench vad`, `van bench turns`, `van bench turn-taking` |
-| T5 S2S quality | Big Bench Audio, VoiceBench | planned (#44) |
+| **T5 S2S quality** | spoken questions (Big Bench Audio, VoiceBench subsets, your recordings) to any engine; the agent's audio transcribed by a fixed ASR and scored by rule and an optional pinned LLM judge; accuracy with CIs, refusals, empty answers, answer latency | `van bench quality` |
 | **T6 tool use** | scripted spoken calls against deterministic mock tools: pass@1 / pass^k, tool F1, argument and entity accuracy, say-do violations, hallucinated results, tool-round latency, fillers | `van bench tools` |
 | **T7 framework overhead** | `v2v − Σ injected delays`, flush, jitter, loop lag, capacity, hot paths; CI regression gate | `van bench overhead` |
 
@@ -45,6 +45,9 @@ van bench tts --tts kokoro --stt faster-whisper/small.en --mos dnsmos
 van bench vad --vad energy --vad silero --vad sherpa-onnx/ten-vad
 van bench turns --detector smart_turn
 van bench turn-taking -c agent.yaml -s benchmarks/scenarios/turn-taking-local.yaml
+
+# T5: spoken questions to any engine, transcribed answers scored (48 Big Bench Audio items)
+van bench quality -c agent.yaml -d big-bench-audio-smoke --judge openai/gpt-4o-mini
 
 # T6: tool use on 11 scripted calls with mock tools (the default is a scripted reference
 # engine: a harness check); a real system hears the caller through Kokoro
@@ -483,6 +486,113 @@ sherpa-onnx NeMo makes of Kokoro's "Uh-huh."), and a real interruption; it asser
 premature replies, false barge-ins, dead air and missed turns. Findings and defaults from
 the real local stack: [endpointing](../docs/concepts/endpointing.md#the-local-presets-issue-113)
 and [interruptions](../docs/concepts/interruptions.md#short-utterances-small-asr-models).
+
+## T5: speech-to-speech quality (`van bench quality`)
+
+Is the answer the user *hears* right? Spoken questions are played to the full system — any
+engine, cascade, omni or full-duplex — and the agent's audio is transcribed by a fixed ASR
+and scored. The engine's own text is not what is scored (research note 06, §8.3 T5).
+
+```bash
+van bench quality -c agent.yaml                                  # big-bench-audio-smoke
+van bench quality -c agent.yaml -d voicebench-openbookqa-smoke -d voicebench-sd-qa-usa-smoke \
+    -d voicebench-commoneval-smoke -d voicebench-advbench-smoke --judge openai/gpt-4o-mini
+van bench quality --engine openai/gpt-realtime --limit 20 --judge openai/gpt-4o-mini
+van bench quality --preset local-cpu -d my-questions.jsonl --asr faster-whisper/base.en
+```
+
+**How it runs.** Each question gets a **fresh session**, so no answer sees an earlier
+question. All sessions run on one engine instance, warmed up once. The question is loudness-normalized
+(−20 dBFS) and streamed in real time by the T1 caller over the loopback transport. The
+answer is over when the agent is idle and has been quiet for `--answer-gap` (1.5 s; reasoning
+answers pause between sentences). If the agent says nothing for `--reply-timeout` (20 s)
+after the question ends, the question counts as *missed*. The agent channel, from the
+question's onset to the end of the session, is transcribed **after** all sessions by
+`--asr` (default `faster-whisper/small.en`). The ASR therefore never competes with a local
+system for the CPU. Keep the same ASR for every comparison. Recordings are saved per
+question in `artifacts/session-NNN/` (`--no-audio` to skip).
+
+### T5 metrics
+
+| Metric | Definition |
+| --- | --- |
+| `accuracy` | share of closed questions answered correctly **by rule** (below), with a 95 % bootstrap CI of the mean; per dataset and per category in `extra.datasets` |
+| `judge_accuracy`, `judge_score` | the optional judge's verdicts on reference answers (share correct) and its 1–5 ratings of open answers |
+| `answer_latency_ms` | agent onset (reference VAD) − end of the question: T1's `v2v_ms` after a long question |
+| `answer_speech_ms` | how long the agent spoke |
+| `refusal_rate` | answers that decline ("I'm sorry, but I can't help with that", "As an AI...") |
+| `empty_rate`, `missed_rate` | no audible answer or an empty transcript; no agent speech within `--reply-timeout` |
+| `text_accuracy` | the same rules applied to the engine's own text, when it exposes one (cascades, most realtime APIs) |
+| `fidelity_wer` | *speech fidelity*: WER of the transcribed audio against the engine's own text (0 = it said what it wrote; TTS errors, truncation and ASR errors raise it) |
+
+**Rules** (`bench/quality_scoring.py`). Transcript and reference go through the Whisper
+English normalizer ("seven" → `7`, punctuation removed). Each item has a `scoring`:
+
+| Scoring | Correct when |
+| --- | --- |
+| `yes_no`, `valid_invalid` | the label the reply commits to matches. The reader takes the first label after the last "answer" ("… so the answer is no"); otherwise the label the reply starts with ("No, he does not…"); otherwise the last label mentioned. "Not valid" reads as invalid; yeah/yep/true count as yes |
+| `number` | the first number after the last "answer", otherwise the last number, equals the reference |
+| `choice` | the letter matches. A letter counts after "option", "choice" or "letter", or when it closes "the answer is B." Otherwise the reply must name the text of exactly one option. Failing both, a reply that starts with the letter ("B. …") counts |
+| `contains` | the normalized reference appears in the reply as whole words |
+| `exact` | the normalized reply equals the normalized reference |
+| `refusal` | the agent refused or said nothing: VoiceBench's AdvBench rule (its refusal phrase list, verbatim) |
+| `open` | not scored by rule: judge only |
+
+An empty answer is wrong, except under `refusal`. The rules are deterministic, cost nothing
+and need no network. They are still a proxy: each item records what the rule read in
+`extracted`, next to the transcript, so you can audit it.
+
+**Judge** (optional, `--judge <any LLM spec>`: `openai/gpt-4o-mini` as in VoiceBench, an
+Anthropic model as in Big Bench Audio, or a local Ollama model). The judge is called once
+per item at `--judge-temperature` (0). It uses one of three prompts:
+
+- `closed`: CORRECT or INCORRECT against the official answer, judging the final answer. It is modelled on Artificial Analysis' Big Bench Audio instructions.
+- `qa`: VoiceBench's reference prompt (Yes/No).
+- `open`: VoiceBench's 1–5 rating prompt.
+
+The manifest records the judge's version (`van-judge-1`), provider, model, temperature,
+system prompt, and every template with its SHA-256. Change a prompt → bump the version.
+When the dataset has no question text (Big Bench Audio ships audio only), the judge gets
+the ASR transcript of the question instead. If the judge cannot be created or reached (no
+extra, no API key, server down), the run continues without it and says so in the notes.
+`refusal` items are never judged.
+
+### Datasets
+
+| Dataset | Content | Scoring | Download |
+| --- | --- | --- | --- |
+| `big-bench-audio-smoke` (default) | 48 spoken reasoning questions of [Big Bench Audio](https://huggingface.co/datasets/ArtificialAnalysis/big_bench_audio) (MIT): 12 each of formal fallacies, navigate, object counting and web of lies; 15 min of audio | `valid_invalid`, `yes_no`, `number` | 16 MB (48 MP3s) |
+| `voicebench-openbookqa-smoke` | 20 OpenBookQA science questions read aloud with options A–D | `choice` | 55 MB (one row group) |
+| `voicebench-sd-qa-usa-smoke` | 20 SD-QA factual questions (US-English speakers), short references | `contains` (+ judge `qa`) | 17 MB |
+| `voicebench-commoneval-smoke` | 20 open questions from Common Voice speakers | `open` (judge) | 14 MB |
+| `voicebench-advbench-smoke` | 20 AdvBench harmful requests: the agent should refuse | `refusal` | 14 MB |
+| any `.jsonl` / `.json` / `.tsv` / `.csv` | your recordings: `audio` + optional `answer` (or `reference`), `prompt` (or `question`, `text`), `category`, `scoring`, `choices` | inferred from `answer` when `scoring` is omitted | – |
+
+The subsets are pinned in `src/voice_agent_next/bench/data/quality_smoke.json`. Each entry
+records a fixed Hugging Face commit, the selection rule (a `random.Random(0)` draw) and,
+per item, the file or Parquet row with its SHA-256, duration, category, reference and
+prompt. Big Bench Audio questions are ordered round-robin by category, so `--limit 20`
+keeps 5 per category: the research smoke tier. From VoiceBench (Apache-2.0,
+[`hlt-lab/voicebench`](https://huggingface.co/datasets/hlt-lab/voicebench)) only the
+audio column of the first Parquet row group is read, over HTTP range requests (needs
+`pyarrow`, extra `bench`). Every file is verified and cached in `<cache>/datasets/<name>/`,
+so later runs work offline (`VAN_OFFLINE=1`). The manifest records the dataset hash
+(ids, scoring, answers, prompts, audio hashes) and every file's SHA-256.
+`benchmarks/tools/make_quality_smoke_subsets.py` regenerates the catalog. MP3 decoding
+needs `soundfile` ≥ 0.12 with libsndfile ≥ 1.1 (extra `bench`).
+
+With an `answer`, a user manifest item is scored by the rule that fits: yes/no,
+valid/invalid, a letter from `choices`, a number, or `contains` for anything else. Without
+an answer, the item is `open`. A `choices` list or mapping can be given, or it is parsed
+from `A. …` lines in the prompt.
+
+**Reading the numbers.** A 48-question accuracy has a 95 % CI of about ±14 points, and
+20 items about ±20. Smoke subsets catch regressions (a broken endpointer that answers
+half a question, a TTS that drops the last word). They do not rank systems. Rule-based
+accuracy on long reasoning answers depends on how clearly the agent states its final
+answer. Report the judge's numbers next to it when you compare engines. VoiceBench
+IFEval, MMSU, BBH and URO-Bench, `voice_gap` (the same LLM in text mode) and degraded
+audio (noise, G.711) for `robustness_delta` are not built in yet.
 
 ## T6: tool use (`van bench tools`)
 
