@@ -9,7 +9,11 @@ van serve -p openai-realtime -e agent.yaml --host 0.0.0.0 --api-key "$KEY" --pre
 van serve -p websocket --preset local-cpu --max-sessions 8 --workers 4
 van serve -p twilio --config agent.yaml --host 0.0.0.0 --port 8765 --prewarm 1
 van serve -p webrtc --engine openai/gpt-realtime --max-sessions 20
+van serve -p websocket --preset local-cpu --allowed-origin https://app.example.com
 ```
+
+The defaults are secure: loopback only, browser pages from other websites refused, and
+limits on sessions, their duration and idle time. See [Secure defaults](#secure-defaults).
 
 ## Protocols
 
@@ -31,6 +35,101 @@ greeting and metrics. You build that agent from one of these sources:
 
 `--instructions`, `--voice` and `--language` override the agent's values. With no source,
 `van serve` serves the offline mock engine.
+
+## Secure defaults
+
+`van serve` and the server classes behind it are safe to start without extra flags. On a
+laptop they are reachable only from the machine itself, and the limits below always apply.
+
+### Who may connect: the Origin allow-list
+
+Browsers send an `Origin` header with every WebSocket upgrade. Without a check, any website
+a user visits could open a session from their browser to an agent on their machine or LAN
+and spend its engine (cross-site WebSocket hijacking). The WebSocket servers
+(`openai-realtime`, `websocket` and the telephony protocols) therefore accept:
+
+* clients that send **no `Origin`**: native clients, SDKs, backends and telephony providers;
+* pages served **from this machine**: `http(s)://localhost:*`, `127.0.0.0/8`, `[::1]` and
+  `*.localhost`, on any port;
+* the origins you list with `--allowed-origin` (repeatable, or `VAN_ALLOWED_ORIGINS`
+  separated by spaces).
+
+Any other page gets HTTP 403 with the code `origin_not_allowed`, and the server logs the
+refused origin.
+
+```bash
+van serve -p websocket --allowed-origin https://app.example.com
+van serve -p websocket --allowed-origin 'https://*.example.com'   # every subdomain
+van serve -p websocket --allowed-origin http://intranet:8080      # a non-default port
+```
+
+`null` (sandboxed iframes and `file://` pages) must be listed explicitly. `*` allows every
+origin; use it only when an authenticating proxy protects the server. For `webrtc`,
+`--allowed-origin` sets the CORS origins of the signalling endpoints.
+
+### Listening beyond this machine
+
+The default `--host` is `127.0.0.1`. To accept remote clients, bind `0.0.0.0` (or an
+interface address):
+
+* **`openai-realtime` refuses to start without `--api-key`** (or `VAN_SERVER_API_KEY`). The
+  protocol has bearer-token authentication, so an open endpoint is almost always a mistake
+  that lets anyone use (and pay for) the engines.
+* The **other protocols print a warning**. They have no built-in authentication:
+  telephony providers and WebRTC peers cannot send a key. Authenticate in front of them
+  (a reverse proxy, a `process_request` hook, or a session factory that raises
+  `SessionRefused`), and restrict the network.
+* `--insecure` allows the unauthenticated bind and silences the warning, for servers that
+  a firewall, a private network or an authenticating proxy already protects.
+
+Containers bind `0.0.0.0` inside the container: publish the port on `127.0.0.1` or behind
+your proxy, and pass `--api-key` for `openai-realtime` ([Docker](docker.md#running)).
+
+### Session limits
+
+| Flag | Default | What happens |
+| --- | --- | --- |
+| `--max-sessions N` | 64 per process | New sessions get HTTP 503 (`Retry-After: 1`) |
+| `--max-session-duration S` | 3600 s | The session gets an `error` with `session_expired` and is closed (1000) |
+| `--idle-timeout S` | 300 s | A session that received no client message for `S` seconds gets `session_idle` and is closed (1000) |
+
+`0` disables a limit. Clients that stream microphone audio are never idle. Telephony calls
+stream audio continuously, too. The duration and idle limits apply to `openai-realtime`,
+`websocket` and the telephony protocols. For `webrtc`, `--max-sessions` applies.
+
+In Python, the same options are `max_sessions`, `max_session_duration`, `idle_timeout` and
+`allowed_origins` of `RealtimeServer` and `WebSocketAgentServer` (`None` disables a
+limit).
+
+### Bounded queues
+
+Neither direction of a WebSocket connection can grow the server's memory without bound:
+
+* **A client that sends faster than the session consumes** (a flood of audio): above
+  4 MiB of queued input, the server stops reading the socket until the session is back
+  under 1 MiB. TCP backpressure then slows the client down, and no audio is dropped.
+* **A client that does not read** what it is sent: above `max_send_buffer` (32 MiB) of
+  queued output, the connection is closed with 1008 and the queue is freed. The Realtime
+  server also stops taking engine output above 2 MiB, so a slow reader only pauses the
+  engine.
+* **Typed messages** (`text`) waiting for a reply are capped at 8 per `websocket`
+  connection. Beyond that, the client gets `rate_limited`.
+
+### Error messages
+
+Clients never see exception text, which can contain file paths, hosts, credentials in
+URLs or provider responses. They get a generic message with a correlation id:
+
+```json
+{"type": "error", "code": "internal_error", "fatal": true, "error_id": "err_3f9a1c0b7d2e",
+ "message": "The session failed (error id err_3f9a1c0b7d2e)."}
+```
+
+The server logs the full error (with the traceback for unexpected failures) under the same
+id. Search the logs for the id a user reports. With `--log-format json`, the log record also
+has an `error_id` field. A session factory that raises
+`voice_agent_next.errors.SessionRefused("...")` refuses the client with exactly that
+message, for example after failed authentication.
 
 ## Prewarm: no model load or connection setup in the call path
 
@@ -96,7 +195,7 @@ In production, `van_engine_connect_seconds{prewarmed="true"|"false"}` shows the 
 
 ## Concurrency limits and admission
 
-`--max-sessions N` caps live sessions **per process**. Beyond the cap, a new session is
+`--max-sessions N` caps live sessions **per process** (default 64, `0`: no limit). Beyond the cap, a new session is
 refused before the WebSocket upgrade (or before the WebRTC offer is answered) with HTTP
 503 and `Retry-After: 1`. A load balancer or client can then retry on another instance.
 Refusals are counted in `van_sessions_rejected_total{reason="busy"}`.
@@ -202,9 +301,12 @@ in your own application.
 
 * `--api-key` applies to `openai-realtime` only. Put the other protocols behind an
   authenticating reverse proxy, and use TLS (`wss://`) in production.
+* `webrtc` has no session duration or idle limit yet: `--max-session-duration` and
+  `--idle-timeout` do not apply to it.
 * The telephony protocols serve the media-stream WebSocket only. Your webhook answers the
-  call with markup (TwiML and similar) that points at it. See
-  `voice_agent_next.transports.telephony.markup`.
+  call with markup (TwiML and similar) that points at it and carries the call's stream
+  token. Set `VAN_TELEPHONY_SECRET` to the secret shared with the webhook; the server
+  does not start without it. See [telephony security](../transports/telephony.md#security).
 * A prewarmed connection is used for one call only. Engines that hold GPU memory per
   connection keep N of those allocated while idle.
 * With a shared engine, engine-level usage metrics (`session.usage`) are not attributed to

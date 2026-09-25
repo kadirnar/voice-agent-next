@@ -11,6 +11,11 @@ A serializer translates one provider's WebSocket dialect to and from a small com
   the stream's codec, "drop queued audio", "tell me when playback reaches this point");
 * :meth:`~TelephonySerializer.hangup_request` builds the REST call that ends the call.
 
+Everything in a start message comes from the network. Call identifiers are checked against
+the provider's documented format (:attr:`TelephonySerializer.call_id_pattern`) before the
+stream is accepted, and they are percent-encoded again in :meth:`hangup_request`. Account
+identifiers used in REST URLs come from the configuration only, never from the wire.
+
 Serializers are stateful (one instance per call): the stream identifiers and the audio
 format are only known once the provider's start message has been parsed.
 
@@ -34,6 +39,7 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal
+from urllib.parse import quote
 
 import httpx
 import numpy as np
@@ -201,6 +207,9 @@ class TelephonySerializer(ABC):
     json_audio: ClassVar[bool] = True
     """Audio travels base64-encoded inside JSON text messages (else: binary frames)."""
     default_api_base: ClassVar[str] = ""
+    call_id_pattern: ClassVar[re.Pattern[str] | None] = None
+    """The provider's call identifier format: start messages with another call ID are
+    rejected (the ID ends up in the REST hang-up URL)."""
 
     def __init__(self, *, api_base: str | None = None) -> None:
         self.api_base = (api_base or self.default_api_base).rstrip("/")
@@ -218,6 +227,14 @@ class TelephonySerializer(ABC):
 
         Raises :class:`TelephonyProtocolError` for malformed or unsupported messages.
         """
+
+    @classmethod
+    def valid_call_id(cls, call_id: str | None) -> bool:
+        """``call_id`` has the provider's documented format (any non-empty ID when the
+        provider has no REST API here)."""
+        if not call_id:
+            return False
+        return cls.call_id_pattern is None or cls.call_id_pattern.fullmatch(call_id) is not None
 
     @abstractmethod
     def encode_audio(self, pcm: bytes) -> str | bytes:
@@ -237,6 +254,8 @@ class TelephonySerializer(ABC):
 
     # ------------------------------------------------------------------ helpers
     def _start(self, call: CallInfo, input_codec: AudioCodec, output_codec: AudioCodec) -> None:
+        if call.call_id is not None and not self.valid_call_id(call.call_id):
+            raise TelephonyProtocolError(f"invalid {self.provider} call ID {call.call_id[:80]!r}")
         self.call = call
         self.input_codec = input_codec
         self.output_codec = output_codec
@@ -304,6 +323,18 @@ def _credential(value: str | None, env: str) -> str | None:
     return value or os.environ.get(env) or None
 
 
+def _segment(value: str, safe: str = "") -> str:
+    """One URL path segment: ``/``, ``?``, ``#`` and ``%`` cannot escape it."""
+    return quote(value, safe=safe)
+
+
+# Documented identifier formats (see the protocol references above and the docs page).
+_TWILIO_CALL_SID = re.compile(r"CA[0-9a-f]{32}")
+_TWILIO_ACCOUNT_SID = re.compile(r"AC[0-9a-f]{32}")
+_TELNYX_CALL_CONTROL_ID = re.compile(r"v[0-9]{1,2}:[A-Za-z0-9_-]{1,256}")
+_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
 _CODEC_ALIASES: dict[str, CodecName] = {
     "audio/x-mulaw": "mulaw",
     "audio/mulaw": "mulaw",
@@ -339,12 +370,14 @@ class TwilioSerializer(TelephonySerializer):
 
     Args:
         account_sid / auth_token: REST credentials for :meth:`hangup_request` (default:
-            ``TWILIO_ACCOUNT_SID`` / ``TWILIO_AUTH_TOKEN``; the account SID also comes
-            with the ``start`` message).
+            ``TWILIO_ACCOUNT_SID`` / ``TWILIO_AUTH_TOKEN``). The account SID is never taken
+            from the ``start`` message; a stream whose ``accountSid`` is not the configured
+            one is rejected.
     """
 
     provider = "twilio"
     default_api_base = "https://api.twilio.com"
+    call_id_pattern = _TWILIO_CALL_SID
 
     def __init__(
         self,
@@ -382,11 +415,16 @@ class TwilioSerializer(TelephonySerializer):
         fmt = _dict(start.get("mediaFormat"))
         encoding = str(fmt.get("encoding") or "audio/x-mulaw")
         codec = AudioCodec(_codec_name(encoding), _rate(fmt.get("sampleRate"), 8_000))
+        account = _str(start.get("accountSid"))
+        if self.account_sid and account is not None and account != self.account_sid:
+            raise TelephonyProtocolError(
+                f"stream of account {account[:40]!r}, not the configured TWILIO_ACCOUNT_SID"
+            )
         call = CallInfo(
             provider=self.provider,
             call_id=_str(start.get("callSid")),
             stream_id=_str(start.get("streamSid") or data.get("streamSid")),
-            account_id=_str(start.get("accountSid")),
+            account_id=account,
             custom_parameters=dict(_dict(start.get("customParameters"))),
             encoding=encoding,
             sample_rate=codec.sample_rate,
@@ -412,13 +450,16 @@ class TwilioSerializer(TelephonySerializer):
 
     def hangup_request(self) -> httpx.Request | None:
         call = self.call
-        account = self.account_sid or (call.account_id if call else None)
-        if call is None or not call.call_id or not account or not self.auth_token:
+        account = self.account_sid  # configuration only: never the wire's accountSid
+        if call is None or not account or not self.auth_token:
             return None
-        url = f"{self.api_base}/2010-04-01/Accounts/{account}/Calls/{call.call_id}.json"
+        if not self.valid_call_id(call.call_id) or not _TWILIO_ACCOUNT_SID.fullmatch(account):
+            return None
+        assert call.call_id is not None
+        path = f"/2010-04-01/Accounts/{_segment(account)}/Calls/{_segment(call.call_id)}.json"
         return httpx.Request(
             "POST",
-            url,
+            self.api_base + path,
             data={"Status": "completed"},
             headers={"Authorization": _basic_auth(account, self.auth_token)},
         )
@@ -447,6 +488,7 @@ class TelnyxSerializer(TelephonySerializer):
 
     provider = "telnyx"
     default_api_base = "https://api.telnyx.com"
+    call_id_pattern = _TELNYX_CALL_CONTROL_ID
 
     def __init__(
         self,
@@ -537,11 +579,13 @@ class TelnyxSerializer(TelephonySerializer):
 
     def hangup_request(self) -> httpx.Request | None:
         call = self.call
-        if call is None or not call.call_id or not self.api_key:
+        if call is None or not self.api_key or not self.valid_call_id(call.call_id):
             return None
+        assert call.call_id is not None
         return httpx.Request(
             "POST",
-            f"{self.api_base}/v2/calls/{call.call_id}/actions/hangup",
+            # ":" is a valid path character (RFC 3986) and appears verbatim in Telnyx's docs
+            f"{self.api_base}/v2/calls/{_segment(call.call_id, safe=':')}/actions/hangup",
             json={},
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
@@ -633,12 +677,14 @@ class PlivoSerializer(TelephonySerializer):
 
     Args:
         auth_id / auth_token: REST credentials for :meth:`hangup_request` (default:
-            ``PLIVO_AUTH_ID`` / ``PLIVO_AUTH_TOKEN``).
+            ``PLIVO_AUTH_ID`` / ``PLIVO_AUTH_TOKEN``). A stream whose ``accountId`` is not
+            the configured Auth ID is rejected.
         l16_byteorder: byte order of ``audio/x-l16`` samples (default little-endian).
     """
 
     provider = "plivo"
     default_api_base = "https://api.plivo.com"
+    call_id_pattern = _UUID
 
     def __init__(
         self,
@@ -688,12 +734,17 @@ class PlivoSerializer(TelephonySerializer):
             rate = _rate(match.group(1) if match else None, 8_000)
         name = _codec_name(encoding)
         codec = AudioCodec(name, rate, self.l16_byteorder)
+        account = _str(start.get("accountId"))
+        if self.auth_id and account is not None and account != self.auth_id:
+            raise TelephonyProtocolError(
+                f"stream of account {account[:40]!r}, not the configured PLIVO_AUTH_ID"
+            )
         self._content_type = "audio/x-l16" if name == "l16" else f"audio/x-{name}"
         call = CallInfo(
             provider=self.provider,
             call_id=_str(start.get("callId")),
             stream_id=_str(start.get("streamId") or data.get("streamId")),
-            account_id=_str(start.get("accountId")),
+            account_id=account,
             custom_parameters=_parse_extra_headers(
                 data.get("extra_headers", start.get("extra_headers"))
             ),
@@ -724,23 +775,27 @@ class PlivoSerializer(TelephonySerializer):
 
     def hangup_request(self) -> httpx.Request | None:
         call = self.call
-        if call is None or not call.call_id or not self.auth_id or not self.auth_token:
+        if call is None or not self.auth_id or not self.auth_token:
             return None
+        if not self.valid_call_id(call.call_id):
+            return None
+        assert call.call_id is not None
         return httpx.Request(
             "DELETE",
-            f"{self.api_base}/v1/Account/{self.auth_id}/Call/{call.call_id}/",
+            f"{self.api_base}/v1/Account/{_segment(self.auth_id)}/Call/{_segment(call.call_id)}/",
             headers={"Authorization": _basic_auth(self.auth_id, self.auth_token)},
         )
 
 
 def _parse_extra_headers(value: Any) -> dict[str, Any]:
-    """Plivo ``extraHeaders``: ``"key1=value1;key2=value2"`` (or already a dict)."""
+    """Plivo ``extraHeaders``: ``"key1=value1;key2=value2"`` (the start message) or
+    ``"key1=value1,key2=value2"`` (the XML attribute), or already a dict."""
     if isinstance(value, dict):
         return dict(value)
     if not isinstance(value, str) or not value.strip():
         return {}
     out: dict[str, Any] = {}
-    for part in value.split(";"):
+    for part in re.split(r"[;,]", value):
         key, sep, val = part.partition("=")
         if key.strip():
             out[key.strip()] = val.strip() if sep else ""

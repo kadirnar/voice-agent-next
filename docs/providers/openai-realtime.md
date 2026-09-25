@@ -50,7 +50,7 @@ agent: {instructions: You are a friendly assistant., greeting: Hello!}
 
 | Profile | Credentials / endpoint |
 | --- | --- |
-| `openai` | `OPENAI_API_KEY` (or `api_key=`); `base_url=` for a proxy |
+| `openai` | `OPENAI_API_KEY` (or `api_key=`); `base_url=` for a proxy (`OPENAI_API_KEY` is only sent to `api.openai.com`: pass `api_key=` for another host) |
 | `azure_openai` | `AZURE_OPENAI_ENDPOINT` (`https://<resource>.openai.azure.com`), `AZURE_OPENAI_API_KEY` (sent as `api-key`) **or** an Entra ID token (`azure_ad_token=` / `AZURE_OPENAI_AD_TOKEN`, sent as `Authorization: Bearer`); the model is the *deployment name* (`AZURE_OPENAI_DEPLOYMENT_NAME`, default `gpt-realtime-2.1`) |
 | `xai` | `XAI_API_KEY` |
 | `qwen_omni` | `DASHSCOPE_API_KEY`, `DASHSCOPE_WORKSPACE_ID`, optional `DASHSCOPE_REGION` (`ap-southeast-1` default, or `cn-beijing`); or `base_url=wss://{WorkspaceId}.{region}.maas.aliyuncs.com/api-ws/v1` |

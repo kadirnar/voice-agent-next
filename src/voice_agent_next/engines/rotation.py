@@ -778,8 +778,14 @@ class RotatingConnection(EngineConnection):
         try:
             if standby is None or standby.version != self.recorder.version:
                 if standby is not None:
-                    await self._close_link(standby)
+                    stale, standby = standby, None
+                    await self._close_link(stale)
                 standby = await self._open_seeded()
+        except asyncio.CancelledError:  # closing: the connection taken over is closed too
+            if standby is not None:
+                await self._close_link(standby)
+            self._end_switch()
+            raise
         except Exception as exc:
             logger.warning("planned rotation failed (%s); keeping the connection", exc)
             await self._flush(old)
@@ -790,12 +796,14 @@ class RotatingConnection(EngineConnection):
             return
         self._link = standby  # from now on the old connection's events are ignored
         self._pending = self._deadline = None
-        failed = self._fail_inflight("session rotated") if forced else 0
-        replayed = await self._deliver(standby)
-        self._finish_switch(reason, planned=True, started=started, attempts=1,
-                            replayed=replayed, link=standby, failed=failed)  # fmt: skip
-        self._end_switch()
-        await self._close_link(old)
+        try:
+            failed = self._fail_inflight("session rotated") if forced else 0
+            replayed = await self._deliver(standby)
+            self._finish_switch(reason, planned=True, started=started, attempts=1,
+                                replayed=replayed, link=standby, failed=failed)  # fmt: skip
+        finally:  # even when the session closes mid-switch: aclose() only knows the new link
+            self._end_switch()
+            await self._close_link(old)
 
     def _begin_switch(self) -> None:
         self._switching = True

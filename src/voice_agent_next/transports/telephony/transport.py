@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
+from http import HTTPStatus
 from typing import Any, ClassVar
 
 import httpx
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosed
+from websockets.http11 import Request
 
 from ...audio.frame import AudioFormat, AudioFrame
 from ...audio.resample import StreamResampler
-from ...errors import TransportError
+from ...errors import ConfigurationError, TransportError
 from ...utils.clock import now
 from ...utils.ids import new_id
 from ...utils.log import logger
@@ -28,6 +32,14 @@ from ..websocket import (
     _dumps,
     _Outgoing,
     _truncate_reason,
+)
+from .auth import (
+    SECRET_ENV,
+    TELNYX_TOKEN_HEADER,
+    TOKEN_PARAMETER,
+    stream_secret_from_env,
+    validate_twilio_signature,
+    verify_stream_token,
 )
 from .serializers import (
     AudioCleared,
@@ -53,6 +65,22 @@ __all__ = [
     "VonageTransport",
     "serve_telephony",
 ]
+
+CLOSE_POLICY_VIOLATION = 1008
+
+
+def _resolve_secret(authenticate: bool, stream_secret: str | None) -> str | None:
+    if not authenticate:
+        return None
+    secret = stream_secret or stream_secret_from_env()
+    if not secret:
+        raise ConfigurationError(
+            "telephony media streams are authenticated: pass stream_secret=... (or set "
+            f"{SECRET_ENV}) and put the stream token in the provider markup (see "
+            "docs/transports/telephony.md), or pass authenticate=False to accept "
+            "unauthenticated streams (local development only)"
+        )
+    return secret
 
 
 @dataclass(slots=True)
@@ -93,6 +121,11 @@ class TelephonyTransport(WebSocketServerTransport):
     * closing the transport closes the stream and, with ``hangup_on_close`` and REST
       credentials (Twilio, Telnyx, Plivo), hangs up the call.
 
+    **Authentication.** The start message must carry the stream token of its call
+    (:func:`~.auth.stream_token`, in the ``vanToken`` custom parameter; the markup helpers
+    add it), else the stream is closed (1008) before the call starts. Call IDs are checked
+    against the provider's format and account IDs never come from the wire.
+
     Args:
         websocket: an accepted provider connection (per-connection mode) or ``None``.
         provider: ``"twilio"``, ``"telnyx"``, ``"vonage"``, ``"plivo"`` or a
@@ -105,6 +138,11 @@ class TelephonyTransport(WebSocketServerTransport):
         start_timeout: seconds to wait for the provider's start message.
         hangup_on_close: hang up the call via the provider's REST API when the transport
             closes before the caller hung up (needs credentials; see the serializers).
+            Default: only for authenticated streams.
+        stream_secret: the secret stream tokens are derived from (default:
+            ``VAN_TELEPHONY_SECRET``). Required unless ``authenticate=False``.
+        authenticate: require a valid stream token (default). ``False`` accepts any
+            client that speaks the provider's protocol: local development only.
         http_client: client for the REST hang-up (default: a short-lived one).
         **serializer_options: credentials and codec options of the provider's serializer.
     """
@@ -124,9 +162,11 @@ class TelephonyTransport(WebSocketServerTransport):
         mark_grace: float = 1.0,
         start_timeout: float = 10.0,
         flush_timeout: float = 1.0,
-        hangup_on_close: bool = True,
+        hangup_on_close: bool | None = None,
         http_client: httpx.AsyncClient | None = None,
         serve_options: dict[str, Any] | None = None,
+        stream_secret: str | None = None,
+        authenticate: bool = True,
         **serializer_options: Any,
     ) -> None:
         provider = provider if provider is not None else self.default_provider
@@ -155,6 +195,10 @@ class TelephonyTransport(WebSocketServerTransport):
         self.mark_interval = mark_interval
         self.mark_grace = mark_grace
         self.hangup_on_close = hangup_on_close
+        self.authenticate = authenticate
+        self._secret = _resolve_secret(authenticate, stream_secret)
+        self.authenticated = False
+        """The stream presented a valid stream token."""
         self.http_client = http_client
         self.session_id = new_id("call_")
         self.framing = "json" if serializer.json_audio else "binary"
@@ -207,7 +251,10 @@ class TelephonyTransport(WebSocketServerTransport):
         if self._closed:
             return
         self._cancel_tail_flush()
-        if self.hangup_on_close and self.connected and not self.stopped:
+        hangup = self.hangup_on_close
+        if hangup is None:
+            hangup = self.authenticated  # never act on an unauthenticated carrier's word
+        if hangup and self.connected and not self.stopped:
             # (a provider that closed the socket itself ended the stream/call already)
             with contextlib.suppress(Exception):
                 await self.hangup()
@@ -236,8 +283,17 @@ class TelephonyTransport(WebSocketServerTransport):
                 f"{self.provider} disconnected before the stream started"
             ) from None
         except TelephonyProtocolError as exc:
+            self.serializer.call = None
             await _close(websocket, CLOSE_PROTOCOL_ERROR, str(exc))
             raise TransportError(f"{self.provider}: {exc}") from None
+        if self.authenticate and not self._check_token(websocket):
+            call_id = self.call.call_id if self.call else None
+            self.serializer.call = None
+            await _close(websocket, CLOSE_POLICY_VIOLATION, "unauthorized")
+            raise TransportError(
+                f"{self.provider}: stream of call {str(call_id)[:80]!r} has no valid stream "
+                "token (check stream_secret and the markup)"
+            )
         self.websocket = websocket
         codec_in, codec_out = self.serializer.input_codec, self.serializer.output_codec
         self.input_format = AudioFormat(codec_in.sample_rate, 1)
@@ -248,6 +304,18 @@ class TelephonyTransport(WebSocketServerTransport):
         self.emit("call_started", self.call)
         for ev in early:
             self._handle(ev)
+
+    def _check_token(self, websocket: ServerConnection) -> bool:
+        call = self.call
+        if call is None or self._secret is None:
+            return False
+        token = call.custom_parameters.pop(TOKEN_PARAMETER, None)
+        if token is None and self.provider == "telnyx":  # a Telnyx stream_auth_token
+            request = getattr(websocket, "request", None)
+            headers = getattr(request, "headers", None)
+            token = headers.get(TELNYX_TOKEN_HEADER) if headers is not None else None
+        self.authenticated = verify_stream_token(self._secret, call.call_id, token)
+        return self.authenticated
 
     # ------------------------------------------------------------------ audio API
     async def write_audio(self, frame: AudioFrame) -> None:
@@ -467,6 +535,11 @@ class TelephonyServer(WebSocketAgentServer):
         transport_options: other :class:`TelephonyTransport` options (``mark_interval``,
             ``hangup_on_close``, ``http_client``...).
         max_sessions: refuse calls beyond this many live sessions.
+        stream_secret / authenticate: stream token check of every call (see
+            :class:`TelephonyTransport`); required unless ``authenticate=False``.
+        public_url: Twilio only: the ``wss://`` base URL Twilio connects to (as written in
+            the TwiML, without the path). The ``X-Twilio-Signature`` of every WebSocket
+            upgrade is then checked with the Twilio auth token (HTTP 403 otherwise).
         serve_options: ``ssl``, ``process_request``...
     """
 
@@ -483,8 +556,17 @@ class TelephonyServer(WebSocketAgentServer):
         max_sessions: int | None = None,
         serializer_options: dict[str, Any] | None = None,
         transport_options: dict[str, Any] | None = None,
+        stream_secret: str | None = None,
+        authenticate: bool = True,
+        public_url: str | None = None,
         **serve_options: Any,
     ) -> None:
+        serializer = create_serializer(provider, **(serializer_options or {}))  # validate early
+        _resolve_secret(authenticate, stream_secret)  # fail fast
+        if public_url is not None:
+            serve_options["process_request"] = _twilio_signature_check(
+                serializer, public_url, serve_options.get("process_request")
+            )
         super().__init__(
             session_factory,
             agent_factory,
@@ -496,12 +578,13 @@ class TelephonyServer(WebSocketAgentServer):
             forward_events=False,  # no data channel on a phone call
             **serve_options,
         )
-        create_serializer(provider, **(serializer_options or {}))  # validate early
         self.provider = provider
         self.protocol = f"{provider} media streams"
         self._telephony_options: dict[str, Any] = {
             "frame_duration": frame_duration,
             "start_timeout": start_timeout,
+            "stream_secret": stream_secret,
+            "authenticate": authenticate,
             **(transport_options or {}),
             **(serializer_options or {}),
         }
@@ -524,6 +607,37 @@ async def serve_telephony(
     )
     await server.start()
     return server
+
+
+def _twilio_signature_check(
+    serializer: TelephonySerializer, public_url: str, user: Callable[..., Any] | None
+) -> Callable[..., Any]:
+    """``process_request`` that refuses WebSocket upgrades without a valid Twilio signature."""
+    auth_token = getattr(serializer, "auth_token", None)
+    if serializer.provider != "twilio" or not auth_token:
+        raise ConfigurationError(
+            "public_url checks X-Twilio-Signature: it needs provider='twilio' and the Twilio "
+            "auth_token (serializer_options or TWILIO_AUTH_TOKEN)"
+        )
+    if not public_url.startswith("wss://"):
+        raise ConfigurationError(f"public_url must be the wss:// URL Twilio uses: {public_url!r}")
+    base = public_url.rstrip("/")
+
+    async def process_request(connection: ServerConnection, request: Request) -> Any:
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            signature = request.headers.get("X-Twilio-Signature")
+            path = request.path
+            # Twilio's docs: a WebSocket handshake may be signed with a trailing "/"
+            urls = {base + path, base + path.rstrip("/"), base + path.rstrip("/") + "/"}
+            if not any(validate_twilio_signature(auth_token, u, None, signature) for u in urls):
+                logger.warning("refused a media stream without a valid X-Twilio-Signature")
+                return connection.respond(HTTPStatus.FORBIDDEN, "Forbidden\n")
+        if user is None:
+            return None
+        result = user(connection, request)
+        return await result if inspect.isawaitable(result) else result
+
+    return process_request
 
 
 async def _close(websocket: ServerConnection, code: int, reason: str) -> None:
