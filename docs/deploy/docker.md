@@ -98,6 +98,7 @@ The first start downloads about 6.6 GB for the LLM and 1.8 GB of models.
 | --- | --- | --- |
 | Tags | `latest`, `main`, `X.Y.Z`, `X.Y`, `sha-…` | the same with `-cuda` (`latest-cuda`, ...) |
 | Platforms | `linux/amd64`, `linux/arm64` | `linux/amd64` |
+| Size (uncompressed, amd64) | 515 MB; 789 MB with `BAKE_MODELS=preset:local-cpu` | 3.9 GB (cuBLAS, cuDNN, CUDA runtime wheels) |
 | Extras | `sherpa-onnx openai kokoro silero smart-turn webrtc resample`: the `local-cpu` preset and WebRTC | `faster-whisper openai kokoro silero smart-turn webrtc resample cuda`: the `local-gpu` preset, cuBLAS 12 |
 | ONNX Runtime | `onnxruntime` (CPU) | `onnxruntime-gpu[cuda,cudnn]` 1.26 (CUDA 12, cuDNN 9) |
 
