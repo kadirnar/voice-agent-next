@@ -11,7 +11,7 @@ multilingual recognizer of voice-agent-next.
 | Class | `voice_agent_next.providers.faster_whisper.FasterWhisperSTT` |
 | Extra | `pip install 'voice-agent-next[faster-whisper]'` (or `uv sync --extra faster-whisper`) |
 | Credentials | none (models are public on the Hugging Face Hub) |
-| Capabilities | batch only: no interim results; word timestamps (opt-in); language detection (multilingual models) |
+| Capabilities | batch recognizer; behind a VAD: interim results (opt-in), hallucination guard; word timestamps (opt-in); language detection (multilingual models) |
 | Platforms | Linux, Windows (CPU, CUDA); macOS (CPU) |
 
 ## Usage
@@ -81,6 +81,9 @@ converted model (`model="/models/whisper-ct2"`). Downloads go to the Hugging Fac
 | `download_root` | `None` | model cache directory (default: the Hugging Face cache) |
 | `local_files_only` | `False` | never download; `VAN_OFFLINE=1` (and `HF_HUB_OFFLINE=1`) imply it |
 | `transcribe_options` | `{}` | extra `WhisperModel.transcribe()` arguments (`temperature`, `no_speech_threshold`, `task`...), applied last |
+| `interim_results` | `False` | behind a VAD, re-decode the utterance while the user speaks and emit interim transcripts (see [Partial transcripts](#partial-transcripts)) |
+| `interim_interval` | `None` | seconds of new speech between interim decodes; `None` = 0.25 s on CUDA, 0.5 s on the CPU |
+| `hallucination_guard` | `True` | drop segments that are probably not speech (see [Hallucination guard](#hallucination-guard)); `False`, or a mapping / `HallucinationGuard` to configure it |
 
 `Transcript.confidence` is `exp(mean token log-probability)` over the utterance, and
 `start_time` / `end_time` are relative to the start of the utterance audio.
@@ -179,6 +182,168 @@ await stt.transcribe(clip)
 rtf = (time.perf_counter() - t0) / clip.duration
 ```
 
+## Partial transcripts
+
+Whisper has no streaming decoder, but it is fast enough on short audio to re-decode the
+utterance so far a few times per second. With `interim_results=True`, the
+`StreamAdapter` that the cascade puts in front of the model (or `van bench asr --vad ...`)
+emits `INTERIM_TRANSCRIPT` events while the user speaks, each one the transcript of the
+whole utterance so far:
+
+```python
+stt = create("stt", "faster_whisper/small", language="en", interim_results=True)
+engine = CascadeEngine(stt=stt, vad="silero", llm=..., tts=...)
+```
+
+```yaml
+stt: {provider: faster_whisper/small, language: en, interim_results: true}
+vad: silero
+```
+
+How the interim decodes are scheduled:
+
+* **Interval.** A decode starts when `interim_interval` seconds of new audio have
+  arrived since the last one started: 0.25 s on CUDA, 0.5 s on the CPU by default. The
+  first decode of an utterance starts after half an interval of speech.
+* **Back-off.** When a decode takes longer than half the interval, the next one waits
+  for twice the last decode's duration of new audio instead, so the model is busy at most
+  about half the time, whatever the device, model and utterance length.
+* **Speech only.** Decodes start only while the VAD's latest window is voiced (at or
+  above its activation threshold). Nothing is decoded during pauses and the trailing
+  silence, and a decode that starts on the last voiced window has the VAD's
+  `min_silence_duration` (0.25 s by default) to finish before the utterance ends.
+* **The final transcript comes first.** Only one interim decode runs at a time. When the
+  utterance ends, a decode still running is awaited and its result dropped (a CTranslate2
+  call cannot be interrupted), then the final transcript is decoded as in batch mode.
+  With `num_workers=2` the final runs on the second model replica right away.
+  Interim decodes are cheaper than the final: greedy, no timestamps, no temperature
+  fallback, no word alignment.
+
+Measured on LibriSpeech test-clean (50 utterances of the `librispeech-test-clean-smoke`
+subset, 1.4-24 s), `van bench asr --mode streaming --vad silero`, audio pushed in real
+time in 20 ms chunks, `language="en"`, 2026-09-25:
+
+| Model, device | Interims | WER | TTFS p50 / p90 | First partial p50 / p90 | Interim revision rate | Interims per utterance |
+|---|---|---|---|---|---|---|
+| `base`, CPU int8 | off | 5.11 % | 337 / 508 ms | – | – | – |
+| `base`, CPU int8 | on | 5.02 % | 353 / 590 ms | 1,132 / 1,330 ms | 0.145 | 8.7 |
+| `base`, CPU int8, `num_workers=2` | on | 4.93 % | 357 / 557 ms | 1,139 / 1,320 ms | 0.154 | 8.4 |
+| `small`, CUDA float16 | off | 3.96 % | 69 / 243 ms | – | – | – |
+| `small`, CUDA float16 | on | 3.96 % | 8 / 82 ms | 766 / 875 ms | 0.127 | 22.8 |
+| `small`, CUDA float16, `num_workers=2` | on | 3.96 % | 21 / 94 ms | 767 / 875 ms | 0.127 | 22.8 |
+
+CPU: AMD Ryzen 5 5600 shared with other jobs (load average 3-50 during the runs), so the
+CPU rows are noisy. GPU: RTX 5070 Ti.
+
+*First partial* is measured from the start of the audio, which begins with 0.3-0.5 s of
+silence in LibriSpeech; the VAD also needs `min_speech_duration` (0.1 s) before it reports
+speech. The first interim decode starts after half an interval of speech. *TTFS* is the
+time from the end of the audio (`end_input()`) to the final transcript. In this benchmark
+the input ends right after the last word, often before the VAD has seen 0.25 s of
+silence, so an interim decode can still be running at the flush: on the CPU that adds
+16 ms at the median and about 80 ms at p90 (a second model replica does not help on a
+CPU: the two decodes share the cores). In a cascade the final is requested after the VAD's
+end of speech, when no interim decode is running. On the GPU, TTFS went *down* with
+interims: the utterance tail is already decoded when the input ends often enough, and a
+GPU that decodes every 0.25 s stays at its high clocks (an idle GPU needs time to ramp
+up); treat that as a side effect, not a guarantee. The transcripts are the same: interim
+decodes do not change the final transcript.
+
+*TTFS* is the time from the end of the audio (`end_input()`) to the final transcript. The
+interim revision rate is the share of interim updates that rewrite words already shown
+rather than only adding words (the tail of a growing utterance is often a partial word
+that the next decode corrects).
+
+Costs: interim decodes take CPU/GPU time from the rest of a local pipeline (LLM, TTS).
+On a CPU prefer `base`/`base.en` or `tiny.en` for interims, and set `interim_interval`
+higher when the machine is shared. `num_workers=2` lets the final transcript run next to
+an interim decode instead of after it, at the cost of a second copy of the model; it
+helps on a GPU, not on a CPU.
+
+## Hallucination guard
+
+Whisper was trained on subtitles, and when a VAD lets noise, breathing or silence through
+it tends to produce text anyway: "Thank you.", "Thanks for watching!", "you", or a phrase
+repeated until the window ends. `hallucination_guard` (on by default) drops such
+segments. A segment is dropped when:
+
+1. it has no words (`"..."`, `"♪"`);
+2. it is a known subtitle artifact (`ARTIFACT_PHRASES`: "Thanks for watching!",
+   "Please subscribe", "Subtitles by the Amara.org community" and their usual
+   non-English forms);
+3. it is a stock phrase that is also a real answer (`SUSPECT_PHRASES`: "Thank you.",
+   "you", "Bye.", "So"...) **and** there is other evidence of non-speech:
+   `no_speech_prob >= 0.2`, `avg_logprob < -0.8`, or a weak VAD;
+4. `no_speech_prob >= 0.6` and (`avg_logprob < -1.0` or a weak VAD): Whisper's own
+   no-speech rule, which also accepts the VAD's doubt instead of a low log-probability;
+5. its gzip compression ratio is above 2.4 (a repetition loop that Whisper's temperature
+   fallback did not fix).
+
+Repetition loops inside a kept segment (an n-gram of up to 4 words repeated more than 4
+times in a row) are cut back to one occurrence.
+
+"Weak VAD" applies behind a `StreamAdapter`: the mean speech probability of the
+utterance's speech windows is below 0.5 (`vad_threshold`), i.e. the VAD itself was
+unsure. Energy-based VADs report lower probabilities than neural ones on real speech in
+noise; with 0.5 no real utterance of the benchmark below was dropped for a weak VAD. A
+user who says "Thank you." clearly keeps their transcript; the same words decoded from a
+keyboard click that barely crossed the VAD threshold are dropped. When the whole utterance is dropped,
+the adapter still reports the VAD's `START_OF_SPEECH` / `END_OF_SPEECH` but no final
+transcript, like any utterance without words.
+
+Every threshold is configurable, and `None` disables a rule:
+
+```python
+from voice_agent_next.providers.faster_whisper import FasterWhisperSTT, HallucinationGuard
+
+stt = FasterWhisperSTT(
+    model="small",
+    hallucination_guard=HallucinationGuard(vad_threshold=0.8, suspects=("you", "thank you")),
+)
+```
+
+```yaml
+stt:
+  provider: faster_whisper/small
+  hallucination_guard: {no_speech_threshold: 0.5, compression_ratio_threshold: null}
+```
+
+`hallucination_guard=False` returns Whisper's output unchanged. Dropped segments are
+logged at DEBUG level (`voice_agent_next` logger) with the rule that dropped them.
+
+Measured on the T4 VAD corpus (`van bench vad`'s deterministic corpus: 50 LibriSpeech
+utterances laid out with 0.8-2.5 s noise-only gaps, a 2 s lead and a 20 s noise-only tail,
+in six noise conditions). Every clip is cut into utterances by the VAD, as the
+`StreamAdapter` does, and each utterance is decoded once; an utterance with less than
+50 ms of labelled speech is noise-only, and a hallucination is a noise-only utterance
+with a non-empty transcript. WER is over the whole clip.
+
+1. **VAD-cut utterances.** Neither Silero nor the energy VAD fired on noise alone in this
+   corpus (0 noise-only utterances in 675 / 912 utterances), so there was nothing to
+   hallucinate on. The guard dropped no real speech (0 utterances with `small`; 2
+   one-word "you" transcripts of utterances holding 0.12-0.25 s of speech with `base` and
+   the energy VAD), and WER is unchanged in every condition.
+2. **Simulated VAD false alarms.** Every noise-only region of every clip (0.3 s away from
+   speech) cut into 1 s windows, 88 per condition, each decoded as if the VAD had reported
+   it as an utterance (the VAD's own probabilities over the window feed the guard):
+
+| Condition | `small` without guard | `small` with guard | `base` without / with guard |
+|---|---|---|---|
+| clean | 24 / 88 | 0 | 0 / 0 |
+| pink noise, 20 dB SNR | 21 / 88 | 0 | 0 / 0 |
+| pink noise, 10 dB SNR | 74 / 88 | 0 | 0 / 0 |
+| pink noise, 5 dB SNR | 88 / 88 | 0 | 0 / 0 |
+| white noise, 10 dB SNR | 87 / 88 | 0 | 0 / 0 |
+| transient clicks | 62 / 88 | 0 | 0 / 0 |
+| **all** | **356 / 528 (67 %)** | **0** | **0 / 0** |
+
+`small` (CUDA float16, `language="en"`) produced "Thank you." on quiet noise and "you" on
+loud noise; Whisper rated all of them as likely no-speech (`no_speech_prob` 0.79-0.90) but
+with an `avg_logprob` between -0.84 and -0.99, just above the -1.0 that faster-whisper's
+own filter requires, so they got through. The guard drops them as suspect phrases on weak
+evidence. `base` produced nothing on the same windows. Measured 2026-09-25,
+faster-whisper 1.2.1, 50 utterances, 3 min of noise per condition.
+
 ## Errors
 
 | Situation | Exception |
@@ -194,10 +359,14 @@ A failed load is retried on the next call.
 
 ## Limitations
 
-* No partial transcripts: the final transcript arrives only after the VAD reports the end of
-  speech.
-* Whisper can hallucinate short phrases ("Thank you.") on noise that the VAD let through.
-  Use a neural VAD such as `silero`, and tune `transcribe_options` (`no_speech_threshold`,
-  `log_prob_threshold`) or enable `vad_filter` if it happens.
+* Partial transcripts are re-decodes of the whole utterance: each one costs a full Whisper
+  pass (30 s window), and the tail of an interim is often a cut-off word that the next
+  one corrects. Long utterances make every decode slower, and the back-off spaces them out.
+* The hallucination guard works on whole segments: a hallucinated phrase glued to real
+  speech inside one segment is kept. Its phrase lists are English-centric (plus the most
+  common non-English subtitle credits); extend `artifacts` / `suspects` for other
+  languages.
+* `word_timestamps` still list the words of a repetition loop that the guard cut from the
+  text.
 * A transcription that is already running finishes in its worker thread even when the
   turn is cancelled (its result is discarded).
