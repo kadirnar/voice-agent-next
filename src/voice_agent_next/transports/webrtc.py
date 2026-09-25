@@ -43,6 +43,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlsplit
 
 import numpy as np
 
@@ -1084,7 +1085,9 @@ class _SignalingServer:
         api_keys: ApiKeys | None = None,
     ) -> None:
         self.on_offer = on_offer
-        self.origin_policy = origin_policy if origin_policy is not None else OriginPolicy()
+        self.origin_policy = (
+            origin_policy if origin_policy is not None else OriginPolicy(tuple(cors_origins))
+        )
         self.api_keys = api_keys if api_keys is not None else ApiKeys()
         self.host = host
         self.port = port
@@ -1241,13 +1244,17 @@ def _same_origin(origin: str | None, host: str | None) -> bool:
     what the Origin check protects against."""
     if not origin or not host:
         return False
-    scheme, sep, rest = origin.strip().partition("://")
-    if not sep or scheme.lower() not in ("http", "https"):
+    try:
+        page = urlsplit(origin.strip())
+        served = urlsplit("//" + host.strip())
+        page_port, served_port = page.port, served.port
+    except ValueError:
         return False
-    netloc = rest.rstrip("/").lower()
-    default = ":443" if scheme.lower() == "https" else ":80"
-    host = host.strip().lower()
-    return netloc == host or netloc + default == host or netloc == host.removesuffix(default)
+    scheme = page.scheme.lower()
+    if scheme not in ("http", "https") or not page.hostname or not served.hostname:
+        return False
+    default = 443 if scheme == "https" else 80
+    return page.hostname == served.hostname and (page_port or default) == (served_port or default)
 
 
 async def _read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, str], bytes]:

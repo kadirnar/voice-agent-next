@@ -22,7 +22,7 @@ limits on sessions, their duration and idle time. See [Secure defaults](#secure-
 | `openai-realtime` (default) | `RealtimeServer` ([details](realtime-server.md)) | `ws://HOST:8000/v1/realtime` | HTTP 503 + `Retry-After: 1`, OpenAI-style `error` body (`session_limit_reached`, `server_draining`) |
 | `websocket` | `WebSocketAgentServer` ([van-ws/1](../transports/websocket.md)) | `ws://HOST:8765/` | HTTP 503 + `Retry-After: 1`, body `{"type": "error", "code": "server_busy" \| "server_draining"}` |
 | `webrtc` | `WebRTCAgentServer` ([WebRTC](../transports/webrtc.md)) | `POST http://HOST:8080/offer` | HTTP 503 `{"error": ...}` to the offer |
-| `twilio`, `telnyx`, `vonage`, `plivo` | `TelephonyServer` ([telephony](../transports/telephony.md)) | `ws(s)://HOST:8765/` media stream | HTTP 503 on the media-stream upgrade, so the provider fails the stream |
+| `twilio`, `telnyx`, `vonage`, `plivo` | `TelephonyServer` ([telephony](../transports/telephony.md)) | `ws(s)://HOST:8765/` media stream; the carrier webhook `GET /answer` returns the markup | HTTP 503 on the media-stream upgrade, so the provider fails the stream |
 
 `openai-realtime` serves engines: clients bring their own instructions and tools. The other
 protocols run a full `AgentSession` per connection, with barge-in, tools, the agent's
@@ -33,8 +33,20 @@ greeting and metrics. You build that agent from one of these sources:
 * `--engine SPEC`: a native engine, for example `openai/gpt-realtime` or `mock`.
 * cascade flags: `--stt`, `--llm`, `--tts`, `--vad` and `--turn`.
 
+They layer like `van run`: `--preset` < `--config` < `--engine` or the cascade flags, and
+the result is validated once. A flag replaces that part of the preset or file, and a
+mapping without `provider:` only changes its options:
+
+```bash
+van serve -p websocket --preset local-cpu --llm ollama/qwen3.5:4b   # the preset, another LLM
+van serve -p websocket --config agent.yaml --engine openai/gpt-realtime   # the file's agent, a native engine
+van serve -p twilio --preset local-cpu --config tweaks.yaml --tts '{voice: af_bella}'
+```
+
 `--instructions`, `--voice` and `--language` override the agent's values. With no source,
-`van serve` serves the offline mock engine.
+`van serve` serves the offline mock engine. For `openai-realtime`, `--preset` and
+`--config` layered with the cascade flags make one model (named after the preset or the
+file, or `--name`), and every `--engine` serves one more model.
 
 ## Secure defaults
 
@@ -64,26 +76,44 @@ van serve -p websocket --allowed-origin http://intranet:8080      # a non-defaul
 ```
 
 `null` (sandboxed iframes and `file://` pages) must be listed explicitly. `*` allows every
-origin; use it only when an authenticating proxy protects the server. For `webrtc`,
-`--allowed-origin` sets the CORS origins of the signalling endpoints.
+origin; use it only when an authenticating proxy protects the server. `webrtc` checks the
+`Origin` of `POST /offer` the same way (its own page, `Origin` equal to `Host`, is allowed
+too), and `--allowed-origin` also sets the CORS origins of its signalling endpoints.
+
+### API keys
+
+`--api-key KEY` (repeatable, or `VAN_SERVER_API_KEY`) makes every protocol require a key:
+
+| Protocol | Clients send the key as |
+| --- | --- |
+| `openai-realtime` | `Authorization: Bearer <key>`, `api-key`, or the `openai-insecure-api-key.<key>` subprotocol ([details](realtime-server.md)) |
+| `websocket` | `Authorization: Bearer <key>`, `api-key`, or the `van-key.<key>` subprotocol from browsers ([details](../transports/websocket.md#api-keys)) |
+| `webrtc` | `Authorization: Bearer <key>` on `POST /offer` and `GET /config` ([details](../transports/webrtc.md#security-and-deployment)) |
+| telephony | carriers cannot send one on the media stream, which the per-call stream token authenticates: the key protects the served answer webhook, `https://host/answer?key=<key>` ([details](../transports/telephony.md#van-serve-the-answer-webhook-included)) |
+
+Missing or wrong keys get HTTP 401 (403 for the answer webhook). `/health`, `/ready` and
+`/metrics` never need a key: keep them off the public network (see [Docker](docker.md)).
 
 ### Listening beyond this machine
 
 The default `--host` is `127.0.0.1`. To accept remote clients, bind `0.0.0.0` (or an
-interface address):
+interface address). Authentication is then on by default:
 
 * **`openai-realtime` refuses to start without `--api-key`** (or `VAN_SERVER_API_KEY`). The
   protocol has bearer-token authentication, so an open endpoint is almost always a mistake
   that lets anyone use (and pay for) the engines.
-* The **other protocols print a warning**. They have no built-in authentication:
-  telephony providers and WebRTC peers cannot send a key. Authenticate in front of them
-  (a reverse proxy, a `process_request` hook, or a session factory that raises
-  `SessionRefused`), and restrict the network.
-* `--insecure` allows the unauthenticated bind and silences the warning, for servers that
-  a firewall, a private network or an authenticating proxy already protects.
+* **`websocket` and `webrtc` generate an API key** when none is given, print it once and
+  require it. Pass `--api-key` (or `VAN_SERVER_API_KEY`) to choose it, which you need for
+  more than one run, instance or client deployment.
+* **Telephony** media streams are authenticated by their stream token, and the answer
+  webhook by the carrier's signature or an API key (generated when needed), also on
+  loopback: a tunnel may forward it from the internet.
+* `--insecure` turns API keys off for `websocket` and `webrtc` (and allows
+  `openai-realtime` without one), for servers that a firewall, a private network or an
+  authenticating proxy already protects.
 
 Containers bind `0.0.0.0` inside the container: publish the port on `127.0.0.1` or behind
-your proxy, and pass `--api-key` for `openai-realtime` ([Docker](docker.md#running)).
+your proxy, and pass `--api-key` ([Docker](docker.md#running)).
 
 ### Session limits
 
@@ -94,12 +124,13 @@ your proxy, and pass `--api-key` for `openai-realtime` ([Docker](docker.md#runni
 | `--idle-timeout S` | 300 s | A session that received no client message for `S` seconds gets `session_idle` and is closed (1000) |
 
 `0` disables a limit. Clients that stream microphone audio are never idle. Telephony calls
-stream audio continuously, too. The duration and idle limits apply to `openai-realtime`,
-`websocket` and the telephony protocols. For `webrtc`, `--max-sessions` applies.
+and WebRTC microphone tracks stream audio continuously, too. The limits apply to every
+protocol; `webrtc` sends `session_expired` / `session_idle` on the data channel, then
+closes the peer connection.
 
-In Python, the same options are `max_sessions`, `max_session_duration`, `idle_timeout` and
-`allowed_origins` of `RealtimeServer` and `WebSocketAgentServer` (`None` disables a
-limit).
+In Python, the same options are `max_sessions`, `max_session_duration`, `idle_timeout`,
+`allowed_origins` and `api_keys` of `RealtimeServer`, `WebSocketAgentServer` and
+`WebRTCAgentServer` (`None` disables a limit).
 
 ### Bounded queues
 
@@ -299,14 +330,13 @@ in your own application.
 
 ## Limitations
 
-* `--api-key` applies to `openai-realtime` only. Put the other protocols behind an
-  authenticating reverse proxy, and use TLS (`wss://`) in production.
-* `webrtc` has no session duration or idle limit yet: `--max-session-duration` and
-  `--idle-timeout` do not apply to it.
-* The telephony protocols serve the media-stream WebSocket only. Your webhook answers the
-  call with markup (TwiML and similar) that points at it and carries the call's stream
-  token. Set `VAN_TELEPHONY_SECRET` to the secret shared with the webhook; the server
-  does not start without it. See [telephony security](../transports/telephony.md#security).
+* Use TLS (`wss://`, `https://`) in production: API keys and stream tokens travel in
+  the clear otherwise.
+* The served telephony answer webhook takes `GET` only (it shares the WebSocket's port):
+  set the carrier's webhook method to `GET`. To answer `POST` webhooks, serve the markup
+  from your own web app with the markup helpers and share `VAN_TELEPHONY_SECRET` with
+  `van serve`. Telnyx's Ed25519 webhook signatures are not checked: protect a Telnyx
+  webhook with an API key. See [telephony](../transports/telephony.md#van-serve-the-answer-webhook-included).
 * A prewarmed connection is used for one call only. Engines that hold GPU memory per
   connection keep N of those allocated while idle.
 * With a shared engine, engine-level usage metrics (`session.usage`) are not attributed to

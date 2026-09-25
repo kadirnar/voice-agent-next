@@ -588,3 +588,62 @@ async def test_write_audio_resamples_and_pause_keeps_the_queue() -> None:
 async def _wait_message(peer: Peer, kind: str) -> dict[str, Any]:
     await wait_for(lambda: peer.of(kind))
     return peer.of(kind)[0]
+
+
+# ---------------------------------------------------------- limits and auth (#156)
+async def test_sessions_expire_after_the_maximum_duration(peers: list[Peer]) -> None:
+    closed: list[str] = []
+
+    def session_factory() -> AgentSession:
+        session = AgentSession(MockEngine())
+        session.on("close", lambda ev: closed.append(ev.reason))
+        return session
+
+    server = WebRTCAgentServer(session_factory, lambda: Agent("hi"), port=0,
+                               max_session_duration=0.5, idle_timeout=None)  # fmt: skip
+    async with server:
+        peer = Peer()
+        peers.append(peer)
+        await peer.connect(server)
+        error = await _wait_message(peer, "error")
+        assert error["code"] == "session_expired" and error["fatal"] is True
+        await wait_for(lambda: not server.sessions and not server.transports)
+        assert closed == ["session_expired"]
+
+
+async def test_idle_peers_are_closed_and_audio_counts_as_activity(peers: list[Peer]) -> None:
+    server = mock_server(max_session_duration=None, idle_timeout=0.3)
+    async with server:
+        peer = Peer()
+        peers.append(peer)
+        await peer.connect(server)
+        await wait_for(lambda: server.sessions)
+        (transport,) = server.transports
+        await asyncio.sleep(0.8)  # the mic track streams (silent) audio: never idle
+        assert server.sessions and transport.idle_time() < 0.3
+        transport.idle_time = lambda: 60.0  # type: ignore[method-assign]  # the peer went quiet
+        error = await _wait_message(peer, "error")
+        assert error["code"] == "session_idle"
+        await wait_for(lambda: not server.sessions)
+
+
+async def test_offers_need_an_allowed_origin_and_the_api_key(peers: list[Peer]) -> None:
+    server = mock_server(api_keys=["rtc-key"], allowed_origins=["https://app.example.com"])
+    async with server, http(server) as client:
+        peer = Peer()
+        peers.append(peer)
+        offer = await peer.offer()
+        auth = {"Authorization": "Bearer rtc-key"}
+        evil = await client.post("/offer", json=offer, headers={**auth, "Origin": EVIL})
+        assert evil.status_code == 403
+        assert (await client.post("/offer", json=offer)).status_code == 401
+        assert (await client.get("/config")).status_code == 401  # may hold TURN credentials
+        assert (await client.get("/config", headers=auth)).status_code == 200
+        headers = {**auth, "Origin": "https://app.example.com"}
+        response = await client.post("/offer", json=offer, headers=headers)
+        assert response.status_code == 200, response.text
+        await peer.answer(response.json())
+        await wait_for(lambda: server.sessions)
+
+
+EVIL = "https://evil.example"

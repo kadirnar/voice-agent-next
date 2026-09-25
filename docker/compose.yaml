@@ -65,10 +65,13 @@ services:
     restart: "no"
 
   # van-ws/1 WebSocket agent (examples/web). Python clients: ws://127.0.0.1:8765/
+  # --insecure: the demo pages send no API key. The agents are reachable from this machine
+  # only (127.0.0.1 ports, the `web` origin allow-list). Beyond a demo, drop --insecure and
+  # set VAN_SERVER_API_KEY: clients must then send it (docs/deploy/serving.md#api-keys).
   agent-ws:
     <<: *agent
     command: ["--protocol", "websocket", "--port", "8765", "--config", "/config/agent.yaml",
-              "--max-sessions", "4"]
+              "--max-sessions", "4", "--insecure"]
     ports:
       - "127.0.0.1:8765:8765"
 
@@ -76,7 +79,7 @@ services:
   agent-webrtc:
     <<: *agent
     command: ["--protocol", "webrtc", "--port", "8080", "--config", "/config/agent.yaml",
-              "--max-sessions", "4"]
+              "--max-sessions", "4", "--insecure"]
 
   # The two browser demos on one origin: http://localhost:8080/websocket/ and /webrtc/
   web:
