@@ -28,6 +28,7 @@ from the [Conventional Commits](https://www.conventionalcommits.org/) history wi
 - **engine:** Gemini Live engine with session resumption ([#67](https://github.com/kadirnar/voice-agent-next/issues/67))
 - **engine:** Moshi / PersonaPlex full-duplex speech-to-speech engine ([#13](https://github.com/kadirnar/voice-agent-next/issues/13)) ([#100](https://github.com/kadirnar/voice-agent-next/issues/100))
 - **engine:** proactive session rotation and reconnect with context carry-over ([#17](https://github.com/kadirnar/voice-agent-next/issues/17)) ([#104](https://github.com/kadirnar/voice-agent-next/issues/104))
+- **engine:** omni audio-output LLMs in the cascade + LFM2.5-Audio provider ([#75](https://github.com/kadirnar/voice-agent-next/issues/75)) ([#106](https://github.com/kadirnar/voice-agent-next/issues/106))
 - **llm:** Anthropic Claude provider with streaming tools and prompt caching ([#57](https://github.com/kadirnar/voice-agent-next/issues/57))
 - **llm:** OpenAI and OpenAI-compatible LLM providers ([#59](https://github.com/kadirnar/voice-agent-next/issues/59))
 - **llm:** cache-write tokens in metrics, system-message policy for strict templates ([#73](https://github.com/kadirnar/voice-agent-next/issues/73))
@@ -39,6 +40,7 @@ from the [Conventional Commits](https://www.conventionalcommits.org/) history wi
 - **providers:** Kyutai Pocket TTS with audio streaming and voice cloning ([#76](https://github.com/kadirnar/voice-agent-next/issues/76)) ([#93](https://github.com/kadirnar/voice-agent-next/issues/93))
 - **providers:** Moonshine Streaming STT ([#77](https://github.com/kadirnar/voice-agent-next/issues/77)) ([#95](https://github.com/kadirnar/voice-agent-next/issues/95))
 - **providers:** Soniox and Speechmatics real-time STT ([#25](https://github.com/kadirnar/voice-agent-next/issues/25)) ([#117](https://github.com/kadirnar/voice-agent-next/issues/117))
+- **providers:** local GPU TTS — Chatterbox and Qwen3-TTS ([#79](https://github.com/kadirnar/voice-agent-next/issues/79)) ([#111](https://github.com/kadirnar/voice-agent-next/issues/111))
 - **server:** serve any engine over the OpenAI Realtime protocol ([#36](https://github.com/kadirnar/voice-agent-next/issues/36)) ([#83](https://github.com/kadirnar/voice-agent-next/issues/83))
 - **session:** interruption policy with false-interruption recovery ([#68](https://github.com/kadirnar/voice-agent-next/issues/68))
 - **session:** pre-warm the engine at start, keep the user turn before the reply ([#69](https://github.com/kadirnar/voice-agent-next/issues/69))
@@ -80,6 +82,8 @@ from the [Conventional Commits](https://www.conventionalcommits.org/) history wi
 - **bench:** Pocket TTS vs Kokoro latency
 - **bench:** T2 ASR smoke results
 - **bench:** Moshi full-duplex results
+- **bench:** local GPU TTS results (Qwen3-TTS 715 ms v2v)
+- **bench:** LFM2.5-Audio omni results on CPU
 - **examples:** example gallery with offline-testable scripts ([#47](https://github.com/kadirnar/voice-agent-next/issues/47)) ([#101](https://github.com/kadirnar/voice-agent-next/issues/101))
 - mkdocs-material documentation site with API reference ([#46](https://github.com/kadirnar/voice-agent-next/issues/46)) ([#103](https://github.com/kadirnar/voice-agent-next/issues/103))
 - add deploy/serving.md to the nav (strict build)
