@@ -155,6 +155,7 @@ _LINK = re.compile(r"(!?\[[^\]]*\])\(([^)\s]+)\)")
 
 # Repository files that are published as pages (via ``<!-- include: -->``).
 INCLUDED_AS = {
+    "CHANGELOG.md": "docs/changelog.md",
     "CONTRIBUTING.md": "docs/contributing.md",
     "benchmarks/README.md": "docs/benchmarks/methodology.md",
     "examples/README.md": "docs/examples.md",

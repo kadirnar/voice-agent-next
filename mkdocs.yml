@@ -195,4 +195,7 @@ nav:
       - Presets: reference/presets.md
       - Models: reference/models.md
       - Benchmarks: reference/bench.md
-  - Contributing: contributing.md
+  - Project:
+      - Contributing: contributing.md
+      - Releasing: releasing.md
+      - Changelog: changelog.md
