@@ -207,7 +207,7 @@ emits finals mid-stream after `endpointing_ms` of trailing silence (default 800 
 is off by default: in a cascade, the VAD and turn detector decide when the user stopped
 and flush the stream. On the LibriSpeech smoke set, server endpointing split 23 of 50
 utterances at short pauses, and NeMo-Speech.cpp 0.1.0 dropped a word at some of these
-boundaries ("if ~~worse~~ comes to worst"). WER rose from 1.8 % to 4.1 %.
+boundaries ("if ~~worse~~ comes to worst"). WER at 160 ms chunks rose from 2.6 % to 4.1 %.
 
 **Batch STT.** `transcribe()` posts a WAV to `/v1/audio/transcriptions`, the
 OpenAI-compatible multipart subset (`response_format=json`, or `verbose_json` for
@@ -226,17 +226,39 @@ Measured on an RTX 5070 Ti (16 GB) with a Ryzen 5 5600, NeMo-Speech.cpp 0.1.0
 real time in 20 ms chunks. TTFS is the time from the end of the audio to the final
 transcript.
 
-<!-- results filled in from `van bench asr` runs; see the PR for the raw tables -->
-
 | System | Mode | WER | CER | TTFS p50 | TTFS p90 | First partial p50 | RTFx |
 |---|---|---:|---:|---:|---:|---:|---:|
-| NeMo-Speech.cpp Nemotron EN, 80 ms chunks | streaming | TBD | | | | | |
-| NeMo-Speech.cpp Nemotron EN, 160 ms chunks | streaming | TBD | | | | | |
-| NeMo-Speech.cpp Nemotron EN, 560 ms chunks | streaming | TBD | | | | | |
-| NeMo-Speech.cpp Nemotron EN, 1120 ms chunks | streaming | TBD | | | | | |
-| NeMo-Speech.cpp Nemotron EN | batch (HTTP) | TBD | | | | | |
+| NeMo-Speech.cpp Nemotron EN, 80 ms chunks (GPU) | streaming | 2.64 % | 0.66 % | 41 ms | 50 ms | 921 ms | 1.0 |
+| NeMo-Speech.cpp Nemotron EN, 160 ms chunks (GPU) | streaming | 2.64 % | 0.66 % | 41 ms | 45 ms | 1,000 ms | 1.0 |
+| NeMo-Speech.cpp Nemotron EN, 560 ms chunks (GPU) | streaming | 2.11 % | 0.54 % | 41 ms | 44 ms | 1,161 ms | 1.0 |
+| NeMo-Speech.cpp Nemotron EN, 1120 ms chunks (GPU) | streaming | 2.02 % | 0.53 % | 41 ms | 43 ms | 1,241 ms | 1.0 |
+| NeMo-Speech.cpp Nemotron EN (GPU) | batch (HTTP) | 1.67 % | 0.44 % | 22 ms | 39 ms | – | 339 |
 | sherpa-onnx `nemo-fastconformer-en-80ms` (CPU) | streaming | 2.29 % | 0.71 % | 64 ms | 96 ms | 948 ms | 1.0 |
 | faster-whisper `small.en` (CUDA) | batch | 2.82 % | 0.71 % | 140 ms | 244 ms | – | 52 |
+
+The final arrives about 41 ms after the flush at every chunk size: the commit decodes only
+the audio still buffered. The chunk size trades the time to the first partial (counted
+from the start of the audio, leading silence included) against accuracy. Larger chunks
+see more right context. Batch recognition of the complete utterance over HTTP remains the
+most accurate. sherpa-onnx and faster-whisper `small.en` ran with the same harness.
+faster-whisper `large-v3-turbo` was not measured: its 1.6 GB download exceeds this
+machine's budget.
+
+**T1 voice-to-voice latency.** The same local cascade was run three times, changing only
+the STT: LFM2.5-1.2B on Ollama, Kokoro v1.0 fp16, Silero VAD and Smart Turn, on
+`benchmarks/scenarios/latency-local-gpu.yaml` (6 turns × 2 sessions, 10 measured).
+Nemotron streamed at 160 ms chunks.
+
+| STT | v2v p50 | v2v p90 | STT final latency p50 | end-of-turn delay | dead air |
+|---|---:|---:|---:|---:|---:|
+| NeMo-Speech.cpp Nemotron EN (GPU, streaming) | 1,163 ms | 1,730 ms | **60 ms** | 401 ms | 0 % |
+| sherpa-onnx `nemo-fastconformer-en-80ms` (CPU, streaming) | 1,255 ms | 1,593 ms | 119 ms | 401 ms | 10 % |
+| faster-whisper `small.en` (CUDA, batch) | 1,222 ms | 2,239 ms | 95 ms | 401 ms | 20 % |
+
+With the cascade, the final transcript comes about 60 ms after the flush, half the time
+of the other two. The rest of the voice-to-voice time is the turn detector's hold and
+Kokoro's time to first audio on the CPU. Those dominate here and vary from turn to turn,
+so the v2v confidence intervals overlap.
 
 ## Limitations
 
