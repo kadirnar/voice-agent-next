@@ -96,6 +96,10 @@ class Endpointer:
         self.mode: EndpointingMode = options.endpointing
         self.dictation = options.dictation
         self.pauses = PauseTracker(alpha=options.pause_alpha, beta=options.pause_alpha)
+        self.guard: float | None = None
+        """Dynamic policy: the least delay of a *confident* pause while the detector is not
+        trusted — it said "done" and the user went on (:meth:`observe_cutoff`). Decays back
+        to the floor with every commit the user leaves alone (:meth:`observe_commit`)."""
 
     @property
     def policy(self) -> EndpointingPolicy:
@@ -150,9 +154,10 @@ class Endpointer:
         if probability is None or threshold is None:
             delay = hold
         elif probability >= threshold:
-            # likely done: from the hold (at the threshold) down to the floor (at 1.0)
+            # likely done: from the hold (at the threshold) down to the floor (at 1.0) —
+            # unless the detector cut this user off recently
             w = 1.0 if threshold >= 1.0 else (probability - threshold) / (1.0 - threshold)
-            delay = hold + (lo - hold) * w
+            delay = max(hold + (lo - hold) * w, self.guard or lo)
         else:
             # likely mid-thought: from the hold (at the threshold) up to the ceiling (at 0)
             w = (threshold - probability) / threshold
@@ -164,3 +169,26 @@ class Endpointer:
         the user resumed from before the commit, or right after a (false) commit."""
         if not self.dictation:  # dictation pauses (digit groups...) are not typical pauses
             self.pauses.add(pause)
+
+    def observe_cutoff(self, pause: float) -> None:
+        """The turn detector said the user was done, but they went on after ``pause``
+        seconds (a false commit, or a confident pause they resumed from in time).
+
+        The pause is learned, and (dynamic policy) confident pauses wait at least the
+        learned hold delay from now on: an audio detector that is sure a complete sentence
+        ends the turn is wrong for a user who pauses between sentences, and the confidence
+        alone would keep cutting them off."""
+        if self.dictation:
+            return
+        self.pauses.add(pause)
+        if self.mode == "dynamic":
+            self.guard = max(self.guard or 0.0, self.hold())
+
+    def observe_commit(self) -> None:
+        """A commit the user did not contest: the detector regains trust, the guard decays
+        towards the floor (by ``pause_alpha`` of its excess)."""
+        if self.guard is None:
+            return
+        lo, _ = self.bounds()
+        excess = (self.guard - lo) * (1.0 - self.options.pause_alpha)
+        self.guard = lo + excess if excess > 0.01 else None

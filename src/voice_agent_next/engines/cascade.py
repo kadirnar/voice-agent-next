@@ -585,12 +585,31 @@ class CascadeConnection(EngineConnection):
         await self._commit_gate.wait()
         await self._commit_turn()
 
+    async def _wait_unconfirmed_speech(self) -> None:
+        """Don't commit while the user may have just started speaking again.
+
+        The VAD confirms speech only after ``min_speech_duration`` (+ a window), ~0.15 s
+        after its onset; a commit made in that gap answers over a user who resumed. While
+        the speech probability is above the activation threshold without a confirmed
+        start, wait (at most ``min_speech_duration`` + 0.1 s): ``START_OF_SPEECH`` cancels
+        this endpointing (the turn goes on), silence lets it commit."""
+        vad = self._vad
+        if vad is None or self._e.vad is None or vad.speaking:
+            return
+        opts = self._e.vad.options
+        deadline = now() + opts.min_speech_duration + 0.1
+        while vad.probability >= opts.activation_threshold and now() < deadline:
+            await asyncio.sleep(0.01)
+
     def _on_resumed(self, pause: _Pause | None, onset: float) -> None:
         """The user spoke again before the pending pause was committed."""
         if self._speech_end_wall is None:
             return
         length = max(0.0, onset - self._speech_end_wall)
-        self._endpointer.observe_pause(length)
+        if pause is not None and _confident(pause.decision):
+            self._endpointer.observe_cutoff(length)
+        else:
+            self._endpointer.observe_pause(length)
         if pause is not None:
             self._emit_endpointing(pause, committed=False, length=length)
 
@@ -612,7 +631,11 @@ class CascadeConnection(EngineConnection):
         if self.chat_ctx.get(pause.item_id) is None:
             return  # nothing was committed (no transcript)
         length = None if onset is None else max(0.0, onset - pause.speech_end)
-        if length is not None:
+        if length is None:
+            self._endpointer.observe_commit()
+        elif _confident(pause.decision):
+            self._endpointer.observe_cutoff(length)
+        else:
             self._endpointer.observe_pause(length)
         self._emit_endpointing(
             pause, committed=True, length=length, false_commit=length is not None
@@ -673,6 +696,7 @@ class CascadeConnection(EngineConnection):
                 self._speculate(prob)
                 await asyncio.sleep(remaining)
             await self._commit_gate.wait()  # the session may still drop this turn
+            await self._wait_unconfirmed_speech()
         finally:
             if early is not None and not early.done():
                 early.cancel()
@@ -1195,6 +1219,12 @@ class CascadeConnection(EngineConnection):
 
 async def _once(text: str) -> AsyncIterator[str]:
     yield text
+
+
+def _confident(decision: EndpointingDecision) -> bool:
+    """The turn detector said the user was done at this pause."""
+    p, threshold = decision.probability, decision.threshold
+    return p is not None and threshold is not None and p >= threshold
 
 
 def _normalize(text: str) -> str:

@@ -41,6 +41,7 @@ from voice_agent_next.session.interruptions import (
     Overlap,
     Verdict,
     backchannel_words_for,
+    interruption_words_for,
     split_words,
 )
 from voice_agent_next.transports import LoopbackTransport
@@ -644,3 +645,146 @@ async def test_uninterruptible_say_started_mid_utterance_is_not_cancelled() -> N
     assert said.text == notice and not said.interrupted
     expected = MockTTS(chars_per_second=30.0).audio_duration_for(notice)
     assert played(transport) == pytest.approx(expected, abs=0.1)
+
+
+# ------------------------------------------- short-utterance rule (issue #113, T4 battery)
+# Small streaming ASR models drop fillers from their training transcripts: sherpa-onnx NeMo
+# heard Kokoro's "Uh-huh." as "but high", Kroko as "Earth high", "Mm-hmm." as "m" /
+# "Memhum". No backchannel list matches those, so the duration rule alone confirmed 100 %
+# of the battery's backchannels as barge-ins.
+
+
+def test_interruption_words_per_language() -> None:
+    assert "stop" in interruption_words_for(None) and "what" in interruption_words_for("en-GB")
+    assert "warte" in interruption_words_for("de") and "stop" in interruption_words_for("de")
+    assert interruption_words_for("xx") == interruption_words_for("fr-XX")[-7:]
+    policy = InterruptionPolicy.from_options(SessionOptions(interruption_words=["arrête"]))
+    assert policy.interruptions.contains(split_words("Arrête !"))
+    assert not policy.interruptions.contains(split_words("stop"))
+    with pytest.raises(ValueError):
+        SessionOptions(max_backchannel_duration=-1)
+    with pytest.raises(TypeError):
+        SessionOptions(interruption_words="stop")  # type: ignore[arg-type]
+
+
+def short_rule(**kwargs: Any) -> InterruptionPolicy:
+    return InterruptionPolicy(max_backchannel_duration=1.0, **kwargs)
+
+
+def test_short_garbled_backchannel_does_not_interrupt() -> None:
+    # without the rule, 0.5 s of speech (VAD hangover included) confirms the barge-in
+    assert Overlap.begin(InterruptionPolicy(), 0.0).verdict(0.6) == Verdict.INTERRUPT
+    ov = Overlap.begin(short_rule(), 0.0)
+    assert ov.verdict(0.6) is None  # still speaking (or the VAD's hangover): maybe a reaction
+    assert ov.deadline() == pytest.approx(1.0)  # the duration rule needs 1 s of speech now
+    ov.speech_stopped(0.6, 0.9)
+    ov.add_transcript("item", "but high", final=True)  # the STT's "uh-huh"
+    assert ov.not_a_turn()  # dropped, not answered
+    assert ov.verdict(0.95) == Verdict.RESUME and ov.reason() == "backchannel"
+
+
+def test_short_utterance_with_an_interruption_word_is_a_barge_in() -> None:
+    ov = Overlap.begin(short_rule(), 0.0)
+    ov.add_transcript("item", "stop")
+    assert ov.urgent() and ov.verdict(0.5) == Verdict.INTERRUPT  # the usual duration rule
+    short = Overlap.begin(short_rule(false_interruption_timeout=1.0), 0.0)
+    short.speech_stopped(0.3, 0.55)
+    short.add_transcript("item", "Okay, wait.", final=True)
+    assert not short.not_a_turn()  # a real turn: the engine commits (and answers) it
+    assert short.verdict(0.6) is None and short.verdict(1.55) == Verdict.INTERRUPT
+
+
+def test_long_or_wordy_speech_is_never_a_backchannel() -> None:
+    long = Overlap.begin(short_rule(), 0.0)
+    long.add_transcript("item", "but high")
+    assert long.verdict(0.99) is None and long.verdict(1.0) == Verdict.INTERRUPT
+    wordy = Overlap.begin(short_rule(), 0.0)
+    wordy.speech_stopped(0.8, 1.05)
+    wordy.add_transcript("item", "can I pay", final=True)  # three words in 0.8 s
+    assert not wordy.short_backchannel(2.0) and not wordy.not_a_turn()
+    assert wordy.verdict(1.1) == Verdict.INTERRUPT  # the usual duration rule
+
+
+async def test_garbled_backchannel_resumes_with_the_short_rule() -> None:
+    session = cascade(["but high"], max_backchannel_duration=1.0)
+    rec = Recorder(session)
+    transport = LoopbackTransport(realtime_playout=True)
+    await agent_speaking(session, transport)
+    t0 = await burst(transport, 0.6)  # longer than min_interruption_duration
+    await wait_for(lambda: bool(rec.false_interruptions()), 3)
+    resumed_at = now()
+    await asyncio.sleep(0.6)  # longer than the cascade's endpointing delay
+    await session.aclose()
+    ev = rec.false_interruptions()[0]
+    assert ev.resumed and ev.reason == "backchannel" and ev.transcript == "but high"
+    assert resumed_at - t0 < 1.5
+    assert not rec.interrupted()
+    users = [i.text for i in session.history.items if getattr(i, "role", "") == "user"]
+    assert users == ["tell me something"]  # not committed as a user turn
+    [answer] = assistant_messages(session)
+    assert answer.text == ANSWER and not answer.interrupted
+
+
+async def test_garbled_backchannel_interrupts_without_the_rule() -> None:
+    """The root cause, kept as a regression reference: duration alone confirms it."""
+    session = cascade(["but high"])
+    rec = Recorder(session)
+    transport = LoopbackTransport(realtime_playout=True)
+    await agent_speaking(session, transport)
+    await burst(transport, 0.6)
+    await wait_for(lambda: bool(rec.interrupted()), 3)
+    await session.aclose()
+    assert not rec.false_interruptions()
+
+
+async def test_short_real_interruption_still_interrupts_with_the_rule() -> None:
+    session = cascade(["stop"], max_backchannel_duration=1.0)
+    rec = Recorder(session)
+    transport = LoopbackTransport(realtime_playout=True)
+    await agent_speaking(session, transport)
+    await burst(transport, 0.3)  # shorter than min_interruption_duration
+    await wait_for(lambda: len(assistant_messages(session)) == 2, 4)
+    await session.aclose()
+    assert rec.interrupted() and not rec.false_interruptions()
+    users = [i.text for i in session.history.items if getattr(i, "role", "") == "user"]
+    assert users == ["tell me something", "stop"]  # committed once the verdict allowed it
+
+
+async def test_commits_are_deferred_while_an_overlap_awaits_its_verdict() -> None:
+    """With no endpointing delay left when the final transcript arrives, the cascade could
+    commit (and answer) a backchannel before the session dropped it — a race the local
+    stack lost with Smart Turn. Commits now wait for the session's verdict."""
+    llm = MockLLM(responses=[ANSWER])
+    session = AgentSession(
+        stt=MockSTT(transcripts=["uh-huh"]), llm=llm, tts=MockTTS(chars_per_second=30.0),
+        vad=EnergyVAD(), cascade_options=CascadeOptions(min_endpointing_delay=0.0),
+    )  # fmt: skip
+    rec = Recorder(session)
+    transport = LoopbackTransport(realtime_playout=True)
+    await agent_speaking(session, transport)
+    conn: Any = session.connection
+    calls: list[bool] = []
+    defer = conn.defer_commit
+    conn.defer_commit = lambda deferred: (calls.append(deferred), defer(deferred))
+    await burst(transport, 0.35)
+    await wait_for(lambda: bool(rec.false_interruptions()), 3)
+    await asyncio.sleep(0.3)
+    await session.aclose()
+    assert calls == [True, False]  # held from the onset until the verdict
+    assert rec.false_interruptions()[0].resumed and not rec.interrupted()
+    assert len(llm.requests) == 1  # the backchannel was not answered
+
+
+async def test_deferred_commits_wait_for_release() -> None:
+    session = cascade(["hello there"])
+    rec = Recorder(session)
+    transport = LoopbackTransport()
+    await session.start(Agent("x"), transport)
+    conn: Any = session.connection
+    conn.defer_commit(True)
+    await burst(transport, 0.5)
+    await asyncio.sleep(0.9)  # the endpointing delay has long passed
+    assert not [e for e in rec.of("user_transcript") if e.is_final]
+    conn.defer_commit(False)
+    await wait_for(lambda: bool([e for e in rec.of("user_transcript") if e.is_final]), 2)
+    await session.aclose()
