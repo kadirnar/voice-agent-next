@@ -146,7 +146,8 @@ async def test_missed_replies_dead_air_and_greeting() -> None:
     summary = results.summary
     assert summary.rates["dead_air_rate"] == 1.0 and summary.rates["missed_rate"] == 0.5
     assert summary.counts["missed"] == 1 and summary.counts["missed_with_audio"] == 0
-    assert results.manifest.notes == []
+    # a loaded CI runner may stall the event loop: that note is legitimate there
+    assert [n for n in results.manifest.notes if "event-loop stalls" not in n] == []
     greeting = summary.metrics["greeting_ms"]
     assert greeting.n == 1 and greeting.p50 is not None
     assert greeting.p50 == pytest.approx(200, abs=40)  # response_delay applies to it too

@@ -1,0 +1,47 @@
+# T1 latency of the fully local GPU cascade with a GPU TTS (#79): faster-whisper on CUDA,
+# Ollama, and Chatterbox or Qwen3-TTS on CUDA. Same stimuli as latency-local.yaml and
+# latency-local-gpu.yaml (Kokoro am_adam, same pacing), so the numbers compare directly.
+#
+# The GPU TTS extras conflict with each other (and with pocket-tts): one environment each.
+#
+#   UV_PROJECT_ENVIRONMENT=.venv-chatterbox uv sync --extra chatterbox --extra local \
+#       --extra cuda --extra openai --extra bench
+#   UV_PROJECT_ENVIRONMENT=.venv-qwen uv sync --extra qwen-tts --extra local \
+#       --extra cuda --extra openai --extra bench
+#   van bench latency -c agent-gpu-tts.yaml -s benchmarks/scenarios/latency-local-gpu-tts.yaml \
+#       --turns 6 --sessions 2 --label chatterbox-turbo
+#
+# agent-gpu-tts.yaml (swap the tts line):
+#
+#   stt: {provider: faster_whisper/base, language: en, device: cuda}
+#   llm: {provider: ollama/LiquidAI/lfm2.5-1.2b-instruct, temperature: 0}
+#   tts: chatterbox/turbo            # or chatterbox/nano
+#   # tts: {provider: qwen-tts/0.6b-custom, voice: ryan, language: en}
+#   # tts: {provider: qwen-tts/0.6b, voice: reference.wav, language: en}
+#   # tts: kokoro/v1.0-fp16          # the CPU baseline
+#   vad: silero
+#   turn_detector: smart_turn
+#   agent:
+#     instructions: You are a helpful customer-service agent on a phone call. Answer in
+#       two or three full sentences, in plain spoken English.
+#
+# Results: docs/providers/qwen-tts.md#performance and the pull request of #79.
+name: latency-local-gpu-tts
+version: 1
+description: >-
+  latency-local stimuli (Kokoro am_adam) for comparing TTS models in the local GPU
+  cascade (faster-whisper CUDA + Ollama + Chatterbox / Qwen3-TTS / Kokoro).
+sample_rate: 16000
+loudness_dbfs: -20.0
+lead_in: 0.5
+stimuli: tts
+tts: {provider: kokoro/v1.0-fp16, voice: am_adam}
+reply_timeout: 15.0
+gap_after_reply: 0.5
+turns:
+  - {id: "time", text: "What time does the store open tomorrow?"}
+  - {id: "table", text: "Can you book a table for two people tonight?"}
+  - {id: "order", text: "Where is my order? I placed it last week."}
+  - {id: "sunday", text: "Are you open on Sunday afternoon?"}
+  - {id: "flight", text: "Please change my flight to Friday morning."}
+  - {id: "refund", text: "How long does a refund usually take?"}

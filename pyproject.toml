@@ -75,6 +75,18 @@ kokoro = ["kokoro-onnx>=0.6.1; python_version < '3.14'"]  # upstream caps Requir
 moonshine = [
   "moonshine-voice>=0.1.5; (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')) or (sys_platform == 'darwin' and platform_machine == 'arm64') or (sys_platform == 'win32' and platform_machine == 'AMD64')",
 ]
+# Local GPU TTS (#79). Each pulls CUDA PyTorch (Linux: PyPI's CUDA build; Windows: the
+# PyTorch cu130 index, see [tool.uv.sources]) and pins its own transformers, so these extras
+# conflict with each other and with `pocket-tts` (CPU torch): install one at a time.
+# chatterbox-tts 0.1.7 pins torch==2.6.0 (no Blackwell kernels): see
+# [[tool.uv.dependency-metadata]] below and docs/providers/chatterbox.md.
+chatterbox = [
+  "chatterbox-tts>=0.1.7; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
+  "torch>=2.6; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
+  "torchaudio>=2.6; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
+  # resemble-perth 1.0.1 (its watermarker) imports pkg_resources, gone in setuptools 81
+  "setuptools<81; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
+]
 # CPU-only torch (see [tool.uv.sources]); no torch wheels for Intel macOS since torch 2.3
 pocket-tts = [
   "pocket-tts>=3.3,<4; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
@@ -83,6 +95,11 @@ pocket-tts = [
 # sherpa-onnx wheels (except Linux armv7l, which bundles it) depend on sherpa-onnx-core of the
 # same version, which uv's universal lock misses: it reads the armv7l metadata. Upgrade both.
 # 1.13.3 (2026-06) postdates every model in the catalog (Nemotron 3.5 streaming, 2026-06-11).
+qwen-tts = [
+  "qwen-tts>=0.1.1; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
+  "torch>=2.7; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
+  "torchaudio>=2.7; python_version < '3.15' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
+]
 sherpa-onnx = [
   "sherpa-onnx>=1.13.3",
   "sherpa-onnx-core>=1.13.3; platform_machine != 'armv7l'",
@@ -135,14 +152,76 @@ docs = [
   "mkdocstrings[python]>=0.26",
 ]
 
+[tool.uv]
+# The GPU TTS extras need CUDA torch and pin different transformers versions; pocket-tts
+# needs CPU torch. uv resolves each of them in its own fork of the lockfile.
+conflicts = [
+  [{ extra = "pocket-tts" }, { extra = "chatterbox" }],
+  [{ extra = "pocket-tts" }, { extra = "qwen-tts" }],
+  [{ extra = "chatterbox" }, { extra = "qwen-tts" }],
+]
+
+# chatterbox-tts 0.1.7 pins torch==2.6.0 (no kernels for Blackwell GPUs, RTX 50xx), numpy<2
+# on Python < 3.13 (conflicts with kokoro-onnx) and gradio (its demo, unused by the library).
+# This is its dependency list with those pins relaxed, for uv's resolution only; pip users
+# see docs/providers/chatterbox.md.
+[[tool.uv.dependency-metadata]]
+name = "chatterbox-tts"
+version = "0.1.7"
+requires-dist = [
+  "numpy>=1.24.0",
+  "librosa==0.11.0",
+  "s3tokenizer",
+  "torch>=2.7",
+  "torchaudio>=2.7",
+  "transformers==5.2.0",
+  "diffusers==0.29.0",
+  "resemble-perth>=1.0.0",
+  "conformer==0.3.2",
+  "safetensors==0.5.3",
+  "spacy-pkuseg",
+  "pykakasi==2.3.0",
+  "pyloudnorm",
+  "omegaconf",
+]
+
+# qwen-tts 0.1.1 without gradio (its web demo, unused by the library).
+[[tool.uv.dependency-metadata]]
+name = "qwen-tts"
+version = "0.1.1"
+requires-dist = [
+  "transformers==4.57.3",
+  "accelerate==1.12.0",
+  "librosa",
+  "torchaudio",
+  "soundfile",
+  "sox",
+  "onnxruntime",
+  "einops",
+]
+
 [tool.uv.sources]
-# Linux/Windows: CPU wheels (~200 MB) instead of the multi-GB CUDA build; macOS wheels on PyPI
-# are CPU/MPS already.
-torch = [{ index = "pytorch-cpu", marker = "sys_platform != 'darwin'" }]
+# pocket-tts, Linux/Windows: CPU wheels (~200 MB) instead of the multi-GB CUDA build; macOS
+# wheels on PyPI are CPU/MPS already. GPU extras: PyPI's Linux wheels are CUDA builds; on
+# Windows PyPI only has CPU wheels, so they come from the PyTorch CUDA 13.0 index.
+torch = [
+  { index = "pytorch-cpu", extra = "pocket-tts", marker = "sys_platform != 'darwin'" },
+  { index = "pytorch-cu130", extra = "chatterbox", marker = "sys_platform == 'win32'" },
+  { index = "pytorch-cu130", extra = "qwen-tts", marker = "sys_platform == 'win32'" },
+]
+torchaudio = [
+  { index = "pytorch-cu130", extra = "chatterbox", marker = "sys_platform == 'win32'" },
+  { index = "pytorch-cu130", extra = "qwen-tts", marker = "sys_platform == 'win32'" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.hatch.build.targets.wheel]
