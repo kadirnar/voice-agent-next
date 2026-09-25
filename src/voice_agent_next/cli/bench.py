@@ -9,7 +9,7 @@ import logging
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -52,7 +52,7 @@ _TABLE_METRICS = (
 
 @app.callback()
 def _bench() -> None:
-    """Benchmark suite: T1 latency, T2 ASR, T3 TTS, T7 framework overhead (see ROADMAP M6)."""
+    """Benchmark suite: T1 latency, T2 ASR, T3 TTS, T4 VAD / turn-taking, T7 overhead."""
 
 
 def _num(value: float | None) -> str:
@@ -225,14 +225,18 @@ def report(
 ) -> None:
     """Re-render report.md from a run directory and print it."""
     from ..bench.results import REPORT_FILE, load_run
-    from ..bench.tracks import asr, latency, overhead
+    from ..bench.tracks import asr, latency, overhead, turn_taking, turns
     from ..bench.tracks import tts as tts_track
+    from ..bench.tracks import vad as vad_track
 
     renderers = {
         latency.TRACK: latency.render_latency_report,
         overhead.TRACK: overhead.render_overhead_report,
         asr.TRACK: asr.render_asr_report,
         tts_track.TRACK: tts_track.render_tts_report,
+        vad_track.TRACK: vad_track.render_vad_report,
+        turns.TRACK: turns.render_turns_report,
+        turn_taking.TRACK: turn_taking.render_turn_taking_report,
     }
     try:
         results = load_run(run_dir)
@@ -905,3 +909,337 @@ def tts_command(
         typer.echo(json.dumps(results.summary.model_dump(mode="json"), indent=2))
     else:
         _print_tts(results)
+
+
+# --------------------------------------------------------------- T4 VAD / turn-taking
+
+
+def _print_notes(results: object) -> None:
+    from rich.markup import escape
+
+    from ..bench.results import RunResults
+
+    assert isinstance(results, RunResults)
+    if results.directory is not None:
+        console.print(f"results: [bold]{results.directory}[/bold] (report.md, summary.json)")
+    for note in results.manifest.notes:
+        console.print(f"[yellow]note:[/yellow] {escape(note)}")
+
+
+def _logging(verbose: bool) -> None:
+    _tolerate_narrow_console()
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+
+@app.command("vad")
+def vad_cmd(
+    vad: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--vad", help="VAD spec, repeatable: energy, silero, sherpa-onnx/ten-vad, or a mapping"
+        ),
+    ] = None,
+    dataset: Annotated[
+        str,
+        typer.Option(
+            "--dataset", "-d", help="Source utterances: an ASR smoke subset or a manifest file"
+        ),
+    ] = "librispeech-test-clean-smoke",
+    condition: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--condition",
+            help="Noise condition, repeatable: clean, transient, white@10, pink@5, brown@0 "
+            "(default: clean, pink@20/10/5, white@10, transient)",
+        ),
+    ] = None,
+    limit: Annotated[int | None, typer.Option(min=1, help="Only the first N utterances")] = None,
+    corpus_seed: Annotated[int, typer.Option(help="Seed of the corpus layout and noise")] = 0,
+    chunk_ms: Annotated[float, typer.Option(min=1.0, max=1000.0, help="Push size (ms)")] = 20.0,
+    out: Annotated[Path, typer.Option("--out", "-o", help="Results directory")] = Path(
+        "bench-results"
+    ),
+    run_id: Annotated[str | None, typer.Option(help="Run directory name")] = None,
+    label: Annotated[str | None, typer.Option(help="System label used in reports")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Print summary.json to stdout")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """T4: VAD frame accuracy, onset/offset lag and false alarms in noise.
+
+    Precision/recall/F1/AUC on 10 ms frames, onset and offset lag of the VAD's events,
+    false alarms per minute and speed, on a deterministic labelled corpus.
+
+    Examples:
+
+        van bench vad --vad energy --vad silero --vad sherpa-onnx/ten-vad
+
+        van bench vad --vad silero --condition clean --condition pink@0 --limit 20
+    """
+    from ..bench.asr_datasets import load_asr_dataset, load_audio
+    from ..bench.system import parse_component_spec
+    from ..bench.tracks.vad import VadClipResult, VadOptions, run_vad_benchmark, vad_markdown_table
+    from ..bench.vad_corpus import DEFAULT_CONDITIONS, build_vad_corpus, parse_condition
+    from ..errors import VoiceAgentError
+
+    _logging(verbose)
+    try:
+        specs = [parse_component_spec(v) for v in (vad or ["energy"])]
+        conditions = [parse_condition(c) for c in condition] if condition else DEFAULT_CONDITIONS
+        progress = lambda line: err.print(f"  {line}", highlight=False)  # noqa: E731
+        data = load_asr_dataset(dataset, progress=progress).limit(limit)
+        err.print(f"building the corpus from {len(data.utterances)} utterances of {data.name}...")
+        corpus = build_vad_corpus(
+            [(u.id, load_audio(u.audio)) for u in data.utterances],
+            conditions=conditions,
+            seed=corpus_seed,
+        )
+    except (VoiceAgentError, ValueError) as exc:
+        err.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(2) from exc
+
+    def on_clip(r: VadClipResult) -> None:
+        f1 = "-" if r.f1 is None else f"{100 * r.f1:.1f}%"
+        err.print(f"  {r.vad:<24} {r.condition:<14} F1 {f1:>6}  FA/min "
+                  f"{r.false_alarms_per_min or 0:.1f}", highlight=False)  # fmt: skip
+
+    try:
+        results = asyncio.run(
+            run_vad_benchmark(
+                [s for s in specs if s is not None], corpus, VadOptions(chunk_ms=chunk_ms),
+                dataset=data.name, out_dir=out, run_id=run_id, label=label, on_clip=on_clip,
+            )
+        )  # fmt: skip
+    except ValueError as exc:
+        err.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(2) from exc
+    except VoiceAgentError as exc:
+        err.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    if as_json:
+        typer.echo(json.dumps(results.summary.model_dump(mode="json"), indent=2))
+    else:
+        typer.echo(vad_markdown_table(results))
+        _print_notes(results)
+
+
+@app.command()
+def turns(
+    detector: Annotated[
+        str,
+        typer.Option(
+            "--detector", "--turn", help="Turn detector spec: smart_turn, mock, or a mapping"
+        ),
+    ] = "smart_turn",
+    dataset: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--dataset",
+            "-d",
+            help="eot-bench-<lang> (en, de, es, fr, it, pt, nl, tr, ar, hi, id, ja, ko, zh; "
+            "downloaded once, 96-166 MB) or a .jsonl manifest. Repeatable.",
+        ),
+    ] = None,
+    limit: Annotated[int | None, typer.Option(min=1, help="Only the first N turns")] = None,
+    score_point: Annotated[
+        float, typer.Option(min=0.01, help="Seconds into a pause at which the detector is asked")
+    ] = 0.2,
+    transcript_lag: Annotated[
+        float, typer.Option(min=0.0, help="Words reach text detectors this late (s)")
+    ] = 0.5,
+    threshold: Annotated[
+        float | None, typer.Option(min=0.0, max=1.0, help="Decision threshold (default: own)")
+    ] = None,
+    min_endpointing_delay: Annotated[
+        float, typer.Option(min=0.0, help="Configured policy: delay when the turn is complete")
+    ] = 0.4,
+    max_endpointing_delay: Annotated[
+        float, typer.Option(min=0.0, help="Configured policy: delay otherwise (timeout)")
+    ] = 2.5,
+    out: Annotated[Path, typer.Option("--out", "-o", help="Results directory")] = Path(
+        "bench-results"
+    ),
+    run_id: Annotated[str | None, typer.Option(help="Run directory name")] = None,
+    label: Annotated[str | None, typer.Option(help="System label used in reports")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Print summary.json to stdout")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """T4: end-of-turn detection on LiveKit's eot-bench.
+
+    False cutoffs at 300/600 ms, latency at 5/10 % false cutoffs, the configured cascade
+    policy, accuracy/F1 (complete vs incomplete) and inference time.
+
+    Examples:
+
+        van bench turns --detector smart_turn                  # eot-bench English, 400 turns
+
+        van bench turns --detector '{provider: smart_turn, model: v3.2-gpu}' -d eot-bench-de
+
+        van bench turns --detector mock -d my-turns.jsonl
+    """
+    from ..bench.eot_datasets import load_eot_dataset
+    from ..bench.system import parse_component_spec
+    from ..bench.tracks.turns import (
+        TurnsOptions,
+        run_turns_benchmark,
+        turns_markdown_table,
+    )
+    from ..errors import VoiceAgentError
+
+    _logging(verbose)
+    options = TurnsOptions(
+        score_point=score_point, transcript_lag=transcript_lag, threshold=threshold,
+        min_endpointing_delay=min_endpointing_delay,
+        max_endpointing_delay=max_endpointing_delay, limit=limit,
+    )  # fmt: skip
+    try:
+        options.validate()
+        spec = parse_component_spec(detector)
+        progress = lambda line: err.print(f"  {line}", highlight=False)  # noqa: E731
+        sets = [load_eot_dataset(d, progress=progress) for d in (dataset or ["eot-bench-en"])]
+    except (VoiceAgentError, ValueError) as exc:
+        err.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(2) from exc
+    total = sum(len(d.limit(limit).turns) for d in sets)
+    err.print(f"[bold]van bench turns[/bold] · {label or detector} · "
+              f"{', '.join(d.name for d in sets)} ({total} turns)", highlight=False)  # fmt: skip
+    done = 0
+
+    def on_turn(_turn: Any, _items: Any) -> None:
+        nonlocal done
+        done += 1
+        if done % 50 == 0 or done == total:
+            err.print(f"  {done}/{total} turns", highlight=False)
+
+    try:
+        results = asyncio.run(
+            run_turns_benchmark(
+                spec, sets, options, out_dir=out, run_id=run_id, label=label, on_turn=on_turn
+            )
+        )
+    except ValueError as exc:
+        err.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(2) from exc
+    except VoiceAgentError as exc:
+        err.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    if as_json:
+        typer.echo(json.dumps(results.summary.model_dump(mode="json"), indent=2))
+    else:
+        typer.echo(turns_markdown_table(results))
+        _print_notes(results)
+
+
+@app.command("turn-taking")
+def turn_taking_cmd(
+    engine: Annotated[
+        str | None,
+        typer.Option(help="Native S2S engine spec (default: the mock engine with long replies)"),
+    ] = None,
+    stt: Annotated[str | None, typer.Option(help="Cascade STT spec")] = None,
+    llm: Annotated[str | None, typer.Option(help="Cascade LLM spec")] = None,
+    tts: Annotated[str | None, typer.Option(help="Cascade TTS spec")] = None,
+    vad: Annotated[str | None, typer.Option(help="Cascade VAD spec")] = None,
+    turn_detector: Annotated[
+        str | None, typer.Option("--turn", help="Cascade turn detector spec")
+    ] = None,
+    config: Annotated[
+        Path | None, typer.Option("--config", "-c", help="Agent config (YAML/TOML/JSON)")
+    ] = None,
+    scenario: Annotated[
+        str, typer.Option("--scenario", "-s", help="Built-in scenario name or YAML file")
+    ] = "turn-taking-smoke",
+    turns: Annotated[
+        int | None, typer.Option("--turns", "-n", min=1, help="Turns per session (default: all)")
+    ] = None,
+    sessions: Annotated[int, typer.Option(min=1, help="Separate sessions")] = 1,
+    warmup_turns: Annotated[int, typer.Option(min=0, help="Leading turns not scored")] = 1,
+    reply_timeout: Annotated[
+        float | None, typer.Option(min=0.1, help="Seconds without reply before a turn is missed")
+    ] = None,
+    reference_vad: Annotated[
+        str, typer.Option(help="Reference VAD for the recording: rms, rms:<dBFS> or a VAD spec")
+    ] = "rms",
+    out: Annotated[Path, typer.Option("--out", "-o", help="Results directory")] = Path(
+        "bench-results"
+    ),
+    run_id: Annotated[str | None, typer.Option(help="Run directory name")] = None,
+    label: Annotated[str | None, typer.Option(help="System label used in reports")] = None,
+    audio: Annotated[
+        bool, typer.Option("--audio/--no-audio", help="Save stereo recordings and labels")
+    ] = True,
+    as_json: Annotated[bool, typer.Option("--json", help="Print summary.json to stdout")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """T4: turn-taking battery on any engine (premature replies, barge-in, false barge-ins).
+
+    Premature replies in mid-turn pauses, barge-in stop time, false barge-ins on
+    backchannels and noise, resumption, missed turns and dead air, on the call recording.
+
+    Examples:
+
+        van bench turn-taking                                  # mock engine, smoke scenario
+
+        van bench turn-taking --engine '{provider: mock, vad_options: {min_silence_duration: 1.0}}'
+
+        van bench turn-taking -c agent.yaml -s benchmarks/scenarios/turn-taking-local.yaml
+    """
+    from ..bench.caller import TurnTiming
+    from ..bench.onset import OnsetDetector, make_reference_vad
+    from ..bench.stimuli import load_scenario
+    from ..bench.system import BenchSystem, parse_component_spec
+    from ..bench.tracks.turn_taking import (
+        DEFAULT_MOCK_ENGINE,
+        TurnTakingOptions,
+        run_turn_taking_benchmark,
+        turn_taking_markdown_table,
+    )
+    from ..errors import VoiceAgentError
+
+    _logging(verbose)
+    try:
+        engine_spec = parse_component_spec(engine)
+        cascade = any(x is not None for x in (stt, llm, tts, turn_detector))
+        if engine_spec is None and not cascade and config is None:
+            engine_spec = DEFAULT_MOCK_ENGINE
+        system = BenchSystem.from_options(
+            config=config, engine=engine_spec, stt=parse_component_spec(stt),
+            llm=parse_component_spec(llm), tts=parse_component_spec(tts),
+            vad=parse_component_spec(vad), turn_detector=parse_component_spec(turn_detector),
+            label=label, default_engine="mock",
+        )  # fmt: skip
+        scn = load_scenario(scenario)
+        detector = OnsetDetector(make_reference_vad(reference_vad))
+    except (VoiceAgentError, ValueError) as exc:
+        err.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(2) from exc
+    options = TurnTakingOptions(
+        turns=turns, sessions=sessions, warmup_turns=warmup_turns, reply_timeout=reply_timeout,
+        save_audio=audio,
+    )  # fmt: skip
+    err.print(f"[bold]van bench turn-taking[/bold] · {system.label} · scenario {scn.name}",
+              highlight=False)  # fmt: skip
+
+    def on_turn(session: int, turn: TurnTiming) -> None:
+        heard = "-" if turn.reply_start is None else (
+            f"~{(turn.reply_start - turn.speech_end) * 1000:,.0f} ms")  # fmt: skip
+        err.print(f"  session {session + 1} turn {turn.index + 1:>3} {turn.stimulus.id:<12} "
+                  f"{heard}", highlight=False)  # fmt: skip
+
+    try:
+        results = asyncio.run(
+            run_turn_taking_benchmark(
+                system, scn, options, out_dir=out, run_id=run_id, detector=detector,
+                on_turn=on_turn,
+            )
+        )  # fmt: skip
+    except VoiceAgentError as exc:
+        err.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    if as_json:
+        typer.echo(json.dumps(results.summary.model_dump(mode="json"), indent=2))
+    else:
+        typer.echo(turn_taking_markdown_table(results))
+        _print_notes(results)

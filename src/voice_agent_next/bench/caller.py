@@ -13,7 +13,9 @@
   the harness annotations share one clock;
 * after each utterance the caller keeps streaming silence until the agent has replied and
   gone quiet (``gap_after_reply``), or until ``reply_timeout`` passes without any agent
-  audio (a *missed* turn), then speaks the next utterance;
+  audio (a *missed* turn), then speaks the next utterance. A stimulus with ``barge_in``
+  is spoken that many seconds after the agent's reply to the previous turn started, over
+  the agent (interruptions, backchannels, coughs);
 * agent audio is taken from the transport's playout log (``played_log``), i.e. placed at
   the time it started playing, and truncated at playback clears (barge-in).
 
@@ -66,7 +68,8 @@ class TurnTiming:
     start: float
     """Acoustic start of the clip."""
     reply_start: float | None = None
-    """Start of the first agent audio played after the user started speaking."""
+    """Start of the first agent audio played after the user started speaking (after the
+    user stopped, for ``barge_in`` turns)."""
     reply_end: float | None = None
     """End of the last agent audio played before the next turn."""
     missed: bool = False
@@ -77,6 +80,12 @@ class TurnTiming:
     @property
     def speech_start(self) -> float:
         return self.start + self.stimulus.speech_start
+
+    @property
+    def reply_after(self) -> float:
+        """Agent audio starting from here counts as the reply: the user's onset, or, for a
+        turn spoken over the agent (``barge_in``), the end of the user's speech."""
+        return self.speech_end if self.stimulus.barge_in is not None else self.speech_start
 
     @property
     def speech_end(self) -> float:
@@ -197,7 +206,9 @@ class CallerEmulator:
             for k in range(0, len(audio.data), step):
                 if not await self._send(audio.data[k : k + step]):
                     break
-            await self._after_turn(turn, reply_timeout, gap_after_reply, max_reply)
+            nxt = stimuli[i + 1] if i + 1 < len(stimuli) else None
+            barge_in = nxt.barge_in if nxt is not None else None
+            await self._after_turn(turn, reply_timeout, gap_after_reply, max_reply, barge_in)
             if self.on_turn is not None:
                 self.on_turn(turn)
         if not self._aborted:
@@ -244,7 +255,7 @@ class CallerEmulator:
         for played in log[self._scanned :]:
             end = played.start_time + played.frame.duration
             self._agent_end = max(self._agent_end, end)
-            if turn is not None and played.start_time >= turn.speech_start:
+            if turn is not None and played.start_time >= turn.reply_after:
                 if turn.reply_start is None:
                     turn.reply_start = played.start_time
                 turn.reply_end = end if turn.reply_end is None else max(turn.reply_end, end)
@@ -267,14 +278,27 @@ class CallerEmulator:
                 return
 
     async def _after_turn(
-        self, turn: TurnTiming, reply_timeout: float, gap: float, max_reply: float
+        self,
+        turn: TurnTiming,
+        reply_timeout: float,
+        gap: float,
+        max_reply: float,
+        barge_in: float | None = None,
     ) -> None:
+        """Stream silence until the caller may speak again: the agent replied and went
+        quiet, or (``barge_in``) its reply has been playing for ``barge_in`` seconds."""
         silence = bytes(self._chunk_samples * 2)
         earliest = turn.end + turn.stimulus.pause
         while True:
             self._scan_agent(turn)
             t = now()
             if t >= earliest:
+                if (
+                    barge_in is not None
+                    and turn.reply_start is not None
+                    and t >= turn.reply_start + barge_in
+                ):
+                    return  # talk over the agent
                 if turn.reply_start is None:
                     if not turn.stimulus.expect_reply and self._quiet(gap):
                         return
