@@ -351,7 +351,8 @@ async def test_an_ended_stt_stream_is_reopened(closing: list[EngineConnection]) 
     await feed(conn, AudioFrame.silence(0.2, SR))  # the first stream ends after 0.1 s
     await wait_for(lambda: any(isinstance(e, EngineStatus) for e in rec.events))
     await feed(conn, AudioFrame.silence(0.1, SR))  # sent during the backoff: buffered
-    await wait_for(lambda: len(stt.streams) == 2)
+    # the collector sees the events one loop step after the reopen
+    await wait_for(lambda: len(rec.of(EngineStatus)) == 2)
     statuses = [e.status for e in rec.of(EngineStatus)]
     assert statuses == ["reconnecting", "reconnected"]
     first, second = stt.streams
@@ -420,6 +421,7 @@ async def test_retryable_stt_errors_reopen_the_stream(closing: list[EngineConnec
     closing.append(conn)
     await feed(conn, AudioFrame.silence(0.02, SR))
     await wait_for(lambda: len(stt.streams) >= 2)
+    await wait_for(lambda: rec.of(EngineStatus))
     assert rec.of(EngineStatus)[0].status == "reconnecting"
 
 
