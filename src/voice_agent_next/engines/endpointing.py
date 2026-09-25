@@ -86,6 +86,9 @@ class EndpointingDecision:
     text_probability: float | None = None
     """Fused detector: the text half's probability (``None``: no transcript, or over its
     latency budget)."""
+    detector_error: str | None = None
+    """The turn detector failed at this pause (``repr`` of its error): the delay was
+    chosen without its verdict."""
 
 
 class Endpointer:
