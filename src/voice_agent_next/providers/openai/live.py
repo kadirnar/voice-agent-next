@@ -501,11 +501,23 @@ class OpenAILiveConnection(RotatingConnection):
         the acknowledgement. The agent keeps talking and backend work goes on."""
         self._input_muted = True
         await self._call(lambda c: _as_live(c).mute_input())
+        await self._sync_standby()
 
     async def unmute_input(self) -> None:
         """Let the model hear the user again (``session.input_audio.unmute``)."""
         self._input_muted = False
         await self._call(lambda c: _as_live(c).unmute_input())
+        await self._sync_standby()
+
+    async def _sync_standby(self) -> None:
+        """A session prepared for the next rotation takes over the current mute state."""
+        standby = self._standby
+        if standby is None:
+            return
+        live = _as_live(standby.conn)
+        if live.input_muted != self._input_muted:
+            with contextlib.suppress(Exception):  # a broken standby is replaced anyway
+                await (live.mute_input() if self._input_muted else live.unmute_input())
 
     async def append_instructions(self, text: str, *, delegation_id: str | None = None) -> None:
         """``session.instructions.append``: trusted instructions (may redirect speech)."""
