@@ -8,6 +8,8 @@ propagation and metrics. Providers subclass these (see
 
 ::: voice_agent_next.tts
 
+::: voice_agent_next.text.normalize
+
 ::: voice_agent_next.llm
 
 ::: voice_agent_next.vad

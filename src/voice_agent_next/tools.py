@@ -28,8 +28,10 @@ import sys
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import (
+    TYPE_CHECKING,
     Annotated,
     Any,
+    Generic,
     Literal,
     TypeAlias,
     get_args,
@@ -39,10 +41,16 @@ from typing import (
 )
 
 import pydantic
+from typing_extensions import TypeVar
 
 from .chat import FunctionCall, FunctionCallOutput
 from .errors import ToolError
 from .utils.log import logger
+
+if TYPE_CHECKING:
+    from .llm import LLM
+    from .session.agent import Agent
+    from .session.handoff import Handoff, HistoryMode
 
 __all__ = [
     "DEFAULT_TOOL_ACK",
@@ -50,6 +58,7 @@ __all__ = [
     "FunctionTool",
     "ToolContext",
     "ToolScheduling",
+    "UserdataT",
     "execute_function_call",
     "find_tool",
     "function_tool",
@@ -74,19 +83,49 @@ DEFAULT_TOOL_ACK = (
 """Immediate output of a non-blocking tool on engines without native asynchronous tools."""
 
 
+UserdataT = TypeVar("UserdataT", default=Any)
+"""Type of the application state shared by the agents of a session
+(``AgentSession[MyData]``, ``ToolContext[MyData]``)."""
+
+
 @dataclass(slots=True)
-class ToolContext:
-    """Injected into tools that declare a parameter annotated as ``ToolContext``.
+class ToolContext(Generic[UserdataT]):
+    """Injected into tools that declare a parameter annotated as ``ToolContext`` (or
+    ``ToolContext[MyData]``, which types ``userdata``).
 
     Attributes:
         call: the function call being executed.
         session: the running :class:`~voice_agent_next.session.AgentSession` (if any).
-        userdata: application-defined state shared across tool calls.
+        userdata: application-defined state shared across tool calls and agents
+            (``AgentSession(userdata=...)``).
+        pending_handoff: set by :meth:`handoff`.
     """
 
     call: FunctionCall
     session: Any = None
-    userdata: Any = None
+    userdata: UserdataT = None  # type: ignore[assignment]
+    pending_handoff: Handoff | None = field(default=None, repr=False)
+
+    def handoff(
+        self,
+        agent: Agent,
+        *,
+        history: HistoryMode = "full",
+        message: str | None = None,
+        respond: bool = True,
+        summary_llm: LLM | None = None,
+    ) -> Handoff:
+        """Hand the conversation to ``agent`` once this tool round is over.
+
+        The tool may return the result (or anything else: the handoff happens either way).
+        See :class:`~voice_agent_next.session.handoff.Handoff` for the arguments.
+        """
+        from .session.handoff import Handoff
+
+        self.pending_handoff = Handoff(
+            agent, history=history, message=message, respond=respond, summary_llm=summary_llm
+        )
+        return self.pending_handoff
 
     async def report_progress(
         self, message: str, *, speak: bool = True, to_model: bool = False
@@ -223,9 +262,9 @@ def _strip_titles(schema: Any) -> Any:
 
 
 def _is_tool_context(annotation: Any) -> bool:
-    if annotation is ToolContext:
+    if annotation is ToolContext or get_origin(annotation) is ToolContext:
         return True
-    return get_origin(annotation) is Annotated and get_args(annotation)[0] is ToolContext
+    return get_origin(annotation) is Annotated and _is_tool_context(get_args(annotation)[0])
 
 
 def _build_tool(

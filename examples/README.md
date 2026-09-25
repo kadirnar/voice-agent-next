@@ -33,6 +33,7 @@ needs.
 | 08 | [`08_recording_and_tracing.py`](08_recording_and_tracing.py) | stereo call recording + JSONL timeline, OpenTelemetry spans | extra `otel` + `opentelemetry-sdk` for spans |
 | 09 | [`09_benchmark.md`](09_benchmark.md) | `van bench latency` / `van bench overhead`, and how to read the results | — |
 | 10 | [`10_custom_provider.py`](10_custom_provider.py) | writing a provider, `@register_provider`, plugin entry points | — |
+| 11 | [`11_handoffs.py`](11_handoffs.py) | multi-agent handoffs (front desk -> billing), typed shared `userdata`, a three-step conversation `Flow` | any engine (`--engine`) or a cascade (`--stt/--llm/--tts`) |
 
 Other demos:
 

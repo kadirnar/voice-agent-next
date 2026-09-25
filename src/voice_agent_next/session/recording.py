@@ -57,6 +57,7 @@ SESSION_EVENTS = (
     "tool_cancelled",
     "interrupted",
     "agent_false_interruption",
+    "agent_handoff",
     "metrics",
     "error",
 )

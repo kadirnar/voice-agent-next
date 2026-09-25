@@ -59,7 +59,7 @@ from ..errors import (
 from ..metrics import STTMetrics
 from ..registry import register_provider
 from ..stt import STT, STTCapabilities, STTEvent, STTEventType, STTStream, Transcript, WordTiming
-from ..tts import TTS, ChunkedStream, SynthesizeStream, TTSCapabilities
+from ..tts import TTS, ChunkedStream, NormalizeOption, SynthesizeStream, TTSCapabilities
 from ..utils.aio import BackgroundTasks, ChanClosed, cancel_and_wait
 from ..utils.clock import now
 from ..utils.ids import new_id
@@ -810,6 +810,8 @@ class DeepgramTTS(TTS):
         idle_timeout: close pooled WebSocket connections unused for this many seconds.
         clear_timeout: max wait for ``Cleared`` before a connection is dropped instead.
         mip_opt_out, tags, extra_params: passed through as query parameters.
+        normalize: spoken-form text normalization (see :class:`~voice_agent_next.tts.TTS`),
+            off by default: the service normalizes text itself.
     """
 
     provider = PROVIDER
@@ -833,6 +835,7 @@ class DeepgramTTS(TTS):
         tags: str | Sequence[str] = (),
         extra_params: Mapping[str, Any] | None = None,
         clean_text: bool = True,
+        normalize: NormalizeOption = None,
     ) -> None:
         if sample_rate not in _AURA_SAMPLE_RATES:
             raise ConfigurationError(
@@ -845,6 +848,7 @@ class DeepgramTTS(TTS):
             capabilities=TTSCapabilities(streaming=streaming),
             voice=voice,
             clean_text=clean_text,
+            normalize=normalize,
         )
         self._api_key = _resolve_api_key(api_key)
         self.speed = speed

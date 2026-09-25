@@ -13,20 +13,24 @@ Responsibilities (identical for native speech-to-speech and cascaded engines):
 * execute tool calls and feed the results back to the engine: a filler when a round is
   slow (watchdog), non-blocking tools whose results arrive later, progress updates and
   background work (:meth:`AgentSession.delegate`);
-* keep the conversation history and emit transcripts, state changes and metrics.
+* keep the conversation history and emit transcripts, state changes and metrics;
+* hand the conversation over to another :class:`Agent` when a tool asks for it
+  (:mod:`~voice_agent_next.session.handoff`).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
+import inspect
 import os
 import random
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Generic, Literal, cast
 
 from ..audio.frame import AudioFrame
 from ..audio.processing import AudioProcessor, ProcessorChain
@@ -56,6 +60,7 @@ from ..tools import (
     FunctionTool,
     ToolContext,
     ToolScheduling,
+    UserdataT,
     _stringify,
     execute_function_call,
     find_tool,
@@ -69,6 +74,7 @@ from ..utils.log import logger
 from .agent import Agent
 from .events import (
     AgentFalseInterruption,
+    AgentHandoff,
     AgentState,
     AgentStateChanged,
     AgentTranscript,
@@ -85,11 +91,13 @@ from .events import (
     UserStateChanged,
     UserTranscript,
 )
+from .handoff import Handoff, HistoryMode, as_handoff, carry_history, history_mode_name
 from .interruptions import InterruptionPolicy, Overlap, Verdict
 from .taps import SessionTap
 
 if TYPE_CHECKING:
     from ..engines.cascade import CascadeOptions
+    from ..llm import LLM
     from .recording import SessionRecorder
     from .tracing import SessionTracer
 
@@ -317,8 +325,11 @@ class _SayRequest:
     """Set once the engine finished generating the utterance."""
 
 
-class AgentSession(EventEmitter):
+class AgentSession(EventEmitter, Generic[UserdataT]):
     """Runs an :class:`Agent` over a :class:`Transport` with a speech-to-speech engine.
+
+    ``userdata`` is application state shared by every agent and tool of the session
+    (``ToolContext.userdata``); ``AgentSession[MyData](..., userdata=MyData())`` types it.
 
     Either pass a native/prebuilt ``engine`` (instance or spec such as
     ``"openai/gpt-realtime"``) **or** the cascade components ``stt``/``llm``/``tts``
@@ -344,12 +355,13 @@ class AgentSession(EventEmitter):
         cascade_options: CascadeOptions | None = None,
         options: SessionOptions | None = None,
         processors: Sequence[AudioProcessor] = (),
-        userdata: Any = None,
+        userdata: UserdataT | None = None,
         record: str | os.PathLike[str] | SessionRecorder | None = None,
         trace: bool | SessionTracer | None = None,
     ) -> None:
         """
         Args:
+            userdata: application state shared by the agents and tools (``None`` if unset).
             record: record the call to a stereo WAV (user left, agent right) and a JSONL
                 event timeline: a directory, a ``.wav`` path or a
                 :class:`~voice_agent_next.session.SessionRecorder`. Overrides
@@ -377,7 +389,8 @@ class AgentSession(EventEmitter):
                 options=cascade_options,
             )  # fmt: skip
         self.options = options or SessionOptions()
-        self.userdata = userdata
+        self.userdata: UserdataT = cast(UserdataT, userdata)
+        """Application state shared by every agent and tool (survives handoffs)."""
         self.history = ChatContext()
         self.usage = UsageSummary()
         self.agent_state = AgentState.INITIALIZING
@@ -402,6 +415,10 @@ class AgentSession(EventEmitter):
         self._tool_runs: dict[str, _ToolRun] = {}  # running executions by call id
         self._pending_rounds: set[_Response] = set()  # tool rounds the model waits for
         self._fillers = _PhrasePicker()
+        self._handoffs: dict[str, Handoff] = {}  # handoffs requested by finished tool calls
+        self._handoff_lock = asyncio.Lock()
+        self._voice: str | None = None  # the voice the engine speaks with
+        self._reply_requests = 0  # say()/generate_reply() calls (did on_enter speak?)
         # interruption policy: the overlap awaiting a verdict and the playback pause state
         self._barge: _BargeIn | None = None
         self._barge_timer: asyncio.TimerHandle | None = None
@@ -489,6 +506,7 @@ class AgentSession(EventEmitter):
         if self._agent is not None:
             raise RuntimeError("session already started")
         self._agent = agent
+        self._voice = agent.voice
         self._transport = transport
         if self.options.warmup:
             try:  # before the transport opens, so no user audio queues up meanwhile
@@ -582,6 +600,7 @@ class AgentSession(EventEmitter):
         self, text: str, allow_interruptions: bool | None, *, aside: bool = False
     ) -> None:
         # the engine gives no handle for the response it starts: the next one is ours
+        self._reply_requests += 1
         request = _SayRequest(allow_interruptions, aside)
         self._say_requests.append(request)
         try:
@@ -596,6 +615,7 @@ class AgentSession(EventEmitter):
         self, *, instructions: str | None = None, user_input: str | None = None
     ) -> None:
         """Make the agent respond now, optionally to a typed ``user_input``."""
+        self._reply_requests += 1
         if user_input is not None:
             msg = self.history.add_message("user", user_input)
             self.emit("conversation_item", ConversationItemAdded(msg))
@@ -613,6 +633,133 @@ class AgentSession(EventEmitter):
     async def update_instructions(self, instructions: str) -> None:
         self.agent.instructions = instructions
         await self.connection.update(instructions=instructions)
+
+    def update_endpointing(
+        self, *, mode: Literal["fixed", "dynamic"] | None = None, dictation: bool | None = None
+    ) -> None:
+        """Switch the cascade's endpointing policy and/or dictation mode from the next user
+        pause on (e.g. from a tool before the user reads out a phone number). See
+        ``docs/concepts/endpointing.md``. Engines that own turn detection themselves
+        (native speech-to-speech models) raise :class:`ConfigurationError`."""
+        update = getattr(self.connection, "update_endpointing", None)
+        if update is None:
+            raise ConfigurationError(
+                f"{type(self.connection).__name__} does not support endpointing updates"
+            )
+        update(mode=mode, dictation=dictation)
+
+    async def handoff(
+        self,
+        agent: Agent,
+        *,
+        history: HistoryMode = "full",
+        respond: bool = True,
+        summary_llm: LLM | None = None,
+    ) -> None:
+        """Hand the conversation to ``agent`` now (from application code; tools return the
+        agent instead, see :mod:`~voice_agent_next.session.handoff`).
+
+        Args:
+            history: what ``agent`` sees of the conversation (see
+                :data:`~voice_agent_next.session.handoff.HistoryMode`).
+            respond: let ``agent`` speak right away (its greeting, or a generated reply)
+                unless the user or the agent is talking.
+            summary_llm: the LLM for ``history="summary"`` (default: the cascade's LLM).
+        """
+        request = Handoff(agent, history=history, respond=respond, summary_llm=summary_llm)
+        await self._apply_handoff(request, call=None, respond=not self._agent_or_user_talking())
+
+    async def _apply_handoff(
+        self, handoff: Handoff, *, call: FunctionCall | None, respond: bool
+    ) -> bool:
+        """Switch to ``handoff.agent``; returns whether a reply was started (by the new
+        agent's ``on_enter``, its greeting or a generated reply)."""
+        async with self._handoff_lock:
+            if self._closing:
+                return False
+            started = now()
+            old, new = self.agent, handoff.agent
+            try:
+                await old.on_exit(self)
+            except Exception:
+                logger.exception("on_exit of agent %s failed", old.name)
+            ctx = await self._carried_history(handoff)
+            self._agent = new
+            conn = self.connection
+            unsupported: list[str] = []
+            try:
+                await conn.update(instructions=new.instructions, tools=list(new.tools))
+            except Exception as exc:
+                logger.warning("engine update failed during the handoff to %s: %s", new.name, exc)
+                self.emit("error", SessionError(exc, recoverable=True))
+            if ctx is not None and not await self._try_engine(conn.update_chat_ctx, ctx):
+                unsupported.append("chat_ctx")
+            voice_changed = False
+            if new.voice is not None and new.voice != self._voice:
+                voice_changed = await self._try_engine(conn.update_voice, new.voice)
+                if voice_changed:
+                    self._voice = new.voice
+                else:
+                    unsupported.append("voice")
+            if unsupported:
+                logger.info(
+                    "handoff to %s: the engine cannot change %s mid-session; keeping the "
+                    "current one", new.name, " or ".join(unsupported),
+                )  # fmt: skip
+            self.emit(
+                "agent_handoff",
+                AgentHandoff(
+                    from_agent=old.name,
+                    to_agent=new.name,
+                    history=history_mode_name(handoff.history),
+                    call=call,
+                    voice_changed=voice_changed,
+                    unsupported=unsupported,
+                    duration=now() - started,
+                ),
+            )
+            requests = self._reply_requests
+            try:
+                await new.on_enter(self)
+            except Exception as exc:
+                logger.exception("on_enter of agent %s failed", new.name)
+                self.emit("error", SessionError(exc, recoverable=True))
+            if self._reply_requests != requests:
+                return True  # on_enter spoke
+            if not (respond and handoff.respond) or self._closing:
+                return False
+            if new.greeting:
+                await self.say(new.greeting)
+            else:
+                await self.generate_reply()
+            return True
+
+    async def _carried_history(self, handoff: Handoff) -> ChatContext | None:
+        """The context the new agent starts with (``None``: keep the model's context)."""
+        llm = handoff.summary_llm
+        if llm is None and handoff.history == "summary":
+            from ..engines.cascade import CascadeEngine
+
+            if isinstance(self.engine, CascadeEngine):
+                llm = self.engine.llm
+        try:
+            ctx = await carry_history(self.history, handoff.history, llm=llm)
+        except Exception as exc:
+            logger.warning("history carry-over failed (%s); keeping the full history", exc)
+            ctx = None
+        own = handoff.agent.chat_ctx
+        if own is not None and own.items:  # the new agent's own seed goes first
+            base = ctx if ctx is not None else self.history
+            ctx = ChatContext([*own.items, *base.items])
+        return ctx
+
+    @staticmethod
+    async def _try_engine(method: Callable[[Any], Awaitable[bool]], arg: Any) -> bool:
+        try:
+            return bool(await method(arg))
+        except Exception as exc:
+            logger.warning("engine %s failed: %s", getattr(method, "__name__", method), exc)
+            return False
 
     def cancel_tool_call(self, call_id: str) -> bool:
         """Cancel a running tool call (e.g. a non-blocking one the user no longer needs).
@@ -932,12 +1079,54 @@ class AgentSession(EventEmitter):
         return True
 
     async def _run_tool(self, call: FunctionCall) -> FunctionCallOutput:
-        return await execute_function_call(
-            call,
-            self.agent.tools,
-            ctx=ToolContext(call=call, session=self, userdata=self.userdata),
-            timeout=self.options.tool_timeout,
+        ctx: ToolContext[UserdataT] = ToolContext(call=call, session=self, userdata=self.userdata)
+        tools = self.agent.tools
+        tool = find_tool(tools, call.name)
+        if tool is not None and tool.fn is not None:
+            tools = [self._capture_handoff(tool, ctx)]
+        output = await execute_function_call(
+            call, tools, ctx=ctx, timeout=self.options.tool_timeout
         )
+        handoff = ctx.pending_handoff
+        if handoff is not None and not output.is_error:
+            self._handoffs[call.call_id] = handoff
+            if not output.output:
+                output.output = handoff.output
+        return output
+
+    @staticmethod
+    def _capture_handoff(tool: FunctionTool, ctx: ToolContext[Any]) -> FunctionTool:
+        """``tool`` whose returned :class:`Agent`/:class:`Handoff` is recorded on ``ctx``
+        (the model gets the handoff's message as the output)."""
+        fn = tool.fn
+        assert fn is not None
+        is_async = inspect.iscoroutinefunction(fn)
+
+        async def run(**kwargs: Any) -> Any:
+            result = await fn(**kwargs) if is_async else await asyncio.to_thread(fn, **kwargs)
+            handoff, rest = as_handoff(result)
+            if handoff is not None:
+                ctx.pending_handoff = handoff
+            return rest
+
+        return dataclasses.replace(tool, fn=run)
+
+    def _take_handoff(self, runs: Sequence[_ToolRun]) -> tuple[FunctionCall, Handoff] | None:
+        """The handoff requested by a finished (blocking) call of a tool round."""
+        found: tuple[FunctionCall, Handoff] | None = None
+        for run in runs:
+            if run.ack:
+                continue  # the real run is delivered later (see _deliver_later)
+            handoff = self._handoffs.pop(run.call.call_id, None)
+            if handoff is None or run.outcome() is None:
+                continue
+            if found is not None:
+                logger.warning(
+                    "several handoffs in one tool round: %s wins over %s",
+                    handoff.agent.name, found[1].agent.name,
+                )  # fmt: skip
+            found = (run.call, handoff)
+        return found
 
     def _on_response_done(self, ev: ResponseDone) -> None:
         resp = self._responses.get(ev.response_id)
@@ -987,12 +1176,16 @@ class AgentSession(EventEmitter):
             )
         if resp.turn is not None:
             resp.turn.tool_calls += len(resp.tool_runs)
+        handoff = self._take_handoff(resp.tool_runs)
         if respond:
             await self._wait_asides()  # the follow-up response would cut a filler off
         for i, output in enumerate(outputs):
             await self.connection.send_tool_output(
-                output, respond=respond and i == len(outputs) - 1
+                output, respond=respond and handoff is None and i == len(outputs) - 1
             )
+        if handoff is not None:  # the new agent answers (the old one is done)
+            call, request = handoff
+            respond = await self._apply_handoff(request, call=call, respond=respond)
         if not respond and not resp.interrupted:
             if resp.turn is not None:
                 self._close_turn(resp.turn)
@@ -1101,6 +1294,10 @@ class AgentSession(EventEmitter):
         scheduling: ToolScheduling = tool.scheduling if tool is not None else "when_idle"
         output = run.outcome()
         call = run.call
+        handoff = self._handoffs.pop(call.call_id, None)
+        if handoff is not None and output is not None:
+            await self._deliver_later_handoff(run, output, handoff, native=native)
+            return
         if output is None:
             self.emit("tool_cancelled", ToolCancelled(call, now() - run.started))
             if not native:  # the model was told a result would follow
@@ -1119,6 +1316,24 @@ class AgentSession(EventEmitter):
         else:
             text = f"Result of {what}: {output.output}"
         await self._inject(text, scheduling, {"tool_call_id": call.call_id})
+
+    async def _deliver_later_handoff(
+        self, run: _ToolRun, output: FunctionCallOutput, handoff: Handoff, *, native: bool
+    ) -> None:
+        """A non-blocking call asked for a handoff: tell the model silently, then switch at
+        the next quiet moment."""
+        call = run.call
+        self.emit("tool_result", ToolResult(call, output, now() - run.started, blocking=False))
+        if native:
+            self.history.append(output)
+            self.emit("conversation_item", ConversationItemAdded(output))
+            await self.connection.send_async_tool_output(output, scheduling="silent")
+            await self._wait_for_quiet(interrupt=False)
+        else:
+            text = f"Result of the background task {call.name} (call {call.call_id}): "
+            await self._inject(text + output.output, "silent", {"tool_call_id": call.call_id})
+        if not self._closing:
+            await self._apply_handoff(handoff, call=call, respond=True)
 
     async def _inject(self, text: str, scheduling: ToolScheduling, meta: dict[str, Any]) -> None:
         """Add a background result to the conversation at a moment that fits ``scheduling``."""
@@ -1619,6 +1834,7 @@ class AgentSession(EventEmitter):
                 agent_speech_duration=turn.agent_speech,
                 interrupted=turn.interrupted,
                 tool_calls=turn.tool_calls,
+                agent=self._agent.name if self._agent is not None else None,
             ),
         )
 

@@ -89,7 +89,7 @@ lists the extra and environment variables of every provider.
 
 ```bash
 van version
-van doctor       # Python, audio devices, ML runtimes, GPUs, API keys
+van doctor       # Python, audio devices, GPUs, presets, models (see docs/cli/doctor.md)
 van providers    # every provider and what it still needs here
 van demo         # offline: a simulated user talks to the mock engine
 ```

@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
@@ -45,7 +45,7 @@ from ..metrics import EngineMetrics
 from ..registry import register_provider
 from ..stt import STT, STTCapabilities, STTEvent, STTEventType, STTStream, Transcript
 from ..tools import FunctionTool
-from ..tts import TTS, ChunkedStream, SynthesizeStream, TTSCapabilities
+from ..tts import TTS, ChunkedStream, NormalizeOption, SynthesizeStream, TTSCapabilities
 from ..turn import TurnDetector
 from ..utils.clock import now
 from ..utils.ids import new_id
@@ -103,8 +103,9 @@ def _default_reply(ctx: ChatContext) -> str:
 
 
 class _Script:
-    def __init__(self, responses: ResponseScript) -> None:
+    def __init__(self, responses: ResponseScript, default: str | None = None) -> None:
         self._responses = responses
+        self._default = default
         self._i = 0
 
     def next(self, ctx: ChatContext) -> MockResponse:
@@ -114,7 +115,7 @@ class _Script:
             r = self._responses[self._i]
             self._i += 1
             return r
-        return _default_reply(ctx)
+        return self._default if self._default is not None else _default_reply(ctx)
 
 
 # ------------------------------------------------------------------------------ STT
@@ -233,7 +234,11 @@ class _MockSTTStream(STTStream):
     default_model="mock-llm",
 )
 class MockLLM(LLM):
-    """Streams scripted replies word by word (default: echoes the last user message)."""
+    """Streams scripted replies word by word (default: echoes the last user message).
+
+    ``default_response`` replaces the echo once the script is exhausted (e.g. a long reply
+    for barge-in benchmarks).
+    """
 
     provider = "mock"
 
@@ -242,6 +247,7 @@ class MockLLM(LLM):
         *,
         model: str = "mock-llm",
         responses: ResponseScript = None,
+        default_response: str | None = None,
         ttft: float = 0.0,
         token_delay: float = 0.0,
         temperature: float | None = None,
@@ -253,7 +259,7 @@ class MockLLM(LLM):
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        self.script = _Script(responses)
+        self.script = _Script(responses, default_response)
         self.ttft = ttft
         self.token_delay = token_delay
         self.requests: list[ChatContext] = []
@@ -323,6 +329,7 @@ class MockTTS(TTS):
         ttfb: delay before the first chunk.
         realtime_factor: 0 = produce audio instantly; 1.0 = at real-time speed.
         streaming: expose a native input-streaming interface (synthesizes per flush).
+        normalize: spoken-form text normalization (off by default).
     """
 
     provider = "mock"
@@ -340,12 +347,14 @@ class MockTTS(TTS):
         streaming: bool = False,
         frequency: float = 220.0,
         amplitude: float = 0.3,
+        normalize: NormalizeOption = None,
     ) -> None:
         super().__init__(
             model=model,
             sample_rate=sample_rate,
             capabilities=TTSCapabilities(streaming=streaming),
             voice=voice,
+            normalize=normalize,
         )
         self.ttfb = ttfb
         self.chars_per_second = chars_per_second
@@ -461,8 +470,13 @@ class MockEngine(S2SEngine):
     Args:
         responses: reply script (strings / :class:`MockToolCall` / lists / callable).
         transcripts: user transcript script (see :class:`MockSTT`).
+        default_response: reply once ``responses`` is exhausted (default: echo the user).
         response_delay: delay between turn commit and the first response audio.
+        vad_options: server-side VAD settings (a :class:`VADOptions` or a mapping of its
+            fields, e.g. ``{min_silence_duration: 0.25}`` to end turns sooner).
         realtime_factor: 0 = audio produced instantly; 1.0 = at real-time speed.
+        voice_updates / chat_ctx_updates: whether connections accept ``update_voice`` /
+            ``update_chat_ctx`` (``False`` simulates a native model that cannot).
     """
 
     provider = "mock"
@@ -473,14 +487,17 @@ class MockEngine(S2SEngine):
         model: str = "mock-s2s",
         responses: ResponseScript = None,
         transcripts: Sequence[str] | None = None,
+        default_response: str | None = None,
         response_delay: float = 0.0,
         token_delay: float = 0.0,
         input_sample_rate: int = 16_000,
         output_sample_rate: int = 24_000,
-        vad_options: VADOptions | None = None,
+        vad_options: VADOptions | Mapping[str, Any] | None = None,
         chars_per_second: float = 15.0,
         chunk_duration: float = 0.04,
         realtime_factor: float = 0.0,
+        voice_updates: bool = True,
+        chat_ctx_updates: bool = True,
     ) -> None:
         super().__init__(
             model=model,
@@ -497,7 +514,9 @@ class MockEngine(S2SEngine):
             input_sample_rate=input_sample_rate,
             output_sample_rate=output_sample_rate,
         )
-        self.llm = MockLLM(responses=responses, token_delay=token_delay)
+        self.llm = MockLLM(
+            responses=responses, default_response=default_response, token_delay=token_delay
+        )
         self.stt = MockSTT(transcripts=transcripts)
         self.tts = MockTTS(
             sample_rate=output_sample_rate,
@@ -506,9 +525,15 @@ class MockEngine(S2SEngine):
             realtime_factor=realtime_factor,
         )
         self.response_delay = response_delay
+        if isinstance(vad_options, Mapping):
+            vad_options = VADOptions(
+                **{"min_speech_duration": 0.1, "min_silence_duration": 0.4, **vad_options}
+            )
         self.vad_options = vad_options or VADOptions(
             min_speech_duration=0.1, min_silence_duration=0.4
         )
+        self.voice_updates = voice_updates
+        self.chat_ctx_updates = chat_ctx_updates
         self.connections: list[MockEngineConnection] = []
 
     async def connect(self, options: EngineOptions) -> EngineConnection:
@@ -608,6 +633,18 @@ class MockEngineConnection(EngineConnection):
             self.instructions = instructions
         if tools is not None:
             self.tools = list(tools)
+
+    async def update_voice(self, voice: str) -> bool:
+        if not self._engine.voice_updates:
+            return False
+        self.options.voice = voice
+        return True
+
+    async def update_chat_ctx(self, chat_ctx: ChatContext) -> bool:
+        if not self._engine.chat_ctx_updates:
+            return False
+        self.chat_ctx = ChatContext(chat_ctx.items)
+        return True
 
     async def aclose(self) -> None:
         await self.cancel_response()
