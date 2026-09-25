@@ -5,6 +5,11 @@ subclass whose :meth:`LLMStream._run` calls ``self._push(ChatChunk(...))``.
 
 Tool calls must be emitted *complete* (name + full JSON arguments) — providers
 accumulate streamed argument deltas internally.
+
+Audio-output ("omni") models (``LLMCapabilities.audio_output``) also stream their own
+speech: :attr:`ChatChunk.audio` carries s16le audio deltas next to the text deltas, which
+are the transcript of that speech. The cascade plays that audio instead of running a TTS
+(see ``docs/concepts/omni-models.md``).
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal, TypeAlias
 
+from .audio.frame import AudioFrame
 from .chat import ChatContext, FunctionCall
 from .metrics import LLMMetrics
 from .tools import FunctionTool
@@ -62,6 +68,13 @@ class ChatChunk:
     """Complete tool calls (emitted once each)."""
     usage: CompletionUsage | None = None
     finish_reason: str | None = None
+    audio: AudioFrame | None = None
+    """Audio delta of an audio-output model's speech (s16le, at
+    ``LLMCapabilities.audio_sample_rate``); ``delta`` is its transcript."""
+    audio_offset: float | None = None
+    """Where ``delta`` starts being spoken, in seconds of the response's audio — for
+    models that report how their text and audio interleave. ``None``: unknown (the text
+    may run ahead of the audio), and truncation estimates what was heard."""
 
 
 @dataclass(slots=True)
@@ -78,6 +91,11 @@ class LLMCapabilities:
     audio_input: bool = False
     """Accepts :class:`~voice_agent_next.chat.AudioContent` in user messages."""
     image_input: bool = False
+    audio_output: bool = False
+    """Streams its own speech in :attr:`ChatChunk.audio` (omni models: LFM2.5-Audio,
+    gpt-audio, Qwen-Omni...): the cascade can run without a TTS."""
+    audio_sample_rate: int = 24_000
+    """Sample rate of :attr:`ChatChunk.audio` frames (``audio_output`` models)."""
 
 
 class LLM(ABC, EventEmitter):
@@ -171,6 +189,7 @@ class LLMStream(ABC):
         self._error: BaseException | None = None
         self._start = now()
         self._first_token: float | None = None
+        self._first_audio: float | None = None
         self._usage: CompletionUsage | None = None
         self._cancelled = False
         self._task = asyncio.create_task(self._main(), name=f"{type(self).__name__}._main")
@@ -180,8 +199,10 @@ class LLMStream(ABC):
         """Call the model and push chunks with :meth:`_push`."""
 
     def _push(self, chunk: ChatChunk) -> None:
-        if self._first_token is None and (chunk.delta or chunk.tool_calls):
+        if self._first_token is None and (chunk.delta or chunk.tool_calls or chunk.audio):
             self._first_token = now()
+        if self._first_audio is None and chunk.audio:
+            self._first_audio = now()
         if chunk.usage is not None:
             self._usage = chunk.usage
         if not self._events.closed:
@@ -211,6 +232,7 @@ class LLMStream(ABC):
                 model=self._llm.model,
                 request_id=self.request_id,
                 ttft=None if self._first_token is None else self._first_token - self._start,
+                ttfb=None if self._first_audio is None else self._first_audio - self._start,
                 duration=end - self._start,
                 prompt_tokens=usage.prompt_tokens,
                 completion_tokens=usage.completion_tokens,

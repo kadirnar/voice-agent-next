@@ -230,7 +230,14 @@ async def test_barge_in_clears_queued_audio_at_once(peers: list[Peer]) -> None:
         assert heard < len(long_answer) / 15 / 2
         assert final["played_ms"] / 1000 == pytest.approx(heard, abs=0.4)
         (session,) = server.sessions
-        assert session.history.messages()[-1].interrupted
+        # the long answer (not a reply to the barge-in turn, which may already exist on a
+        # slow runner) is the interrupted one
+        [story] = [
+            m
+            for m in session.history.messages()
+            if m.role == "assistant" and long_answer.startswith(m.text)
+        ]
+        assert story.interrupted
 
 
 async def test_data_channel_text_app_messages_and_playout_reports(peers: list[Peer]) -> None:

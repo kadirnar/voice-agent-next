@@ -172,7 +172,7 @@ def _model_builders(
         builders.append((preset, build_preset))
     cascade = {"stt": stt, "llm": llm, "tts": tts, "turn_detector": turn_detector}
     if any(v is not None for v in cascade.values()):
-        if llm is None or tts is None:
+        if llm is None:  # --tts is optional for audio-output LLMs (the cascade checks)
             raise ConfigurationError("a cascade needs at least --llm and --tts (and --stt)")
 
         def build_cascade() -> Any:
@@ -286,7 +286,7 @@ def build_app_config(sources: SourceOptions) -> Any:
             raise ConfigurationError(f"config file not found: {path}")
         cfg = load_config(path)
     elif cascade:
-        if sources.llm is None or sources.tts is None:
+        if sources.llm is None:  # --tts is optional for audio-output LLMs
             raise ConfigurationError("a cascade needs at least --llm and --tts (and --stt)")
         cfg = AppConfig.model_validate(
             {
