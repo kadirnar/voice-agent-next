@@ -133,6 +133,9 @@ mlx-whisper = ["mlx-whisper>=0.4.3; sys_platform == 'darwin' and platform_machin
 moshi = ["sphn>=0.2,<0.3"]
 # --- cloud providers (Deepgram, Cartesia, AssemblyAI, ElevenLabs... use raw WS/HTTP) --
 anthropic = ["anthropic>=0.60"]
+# Bedrock bidirectional streaming (Nova Sonic) exists only in the experimental Smithy SDK
+# (boto3 has no bidi streams); it needs Python >= 3.12 and its API still moves: pinned minor.
+aws = ["aws-sdk-bedrock-runtime>=0.11,<0.12; python_version >= '3.12'"]
 google = ["google-genai>=2.25"]
 openai = ["openai>=2.0"]
 # --- transports -------------------------------------------------------------------
@@ -144,7 +147,7 @@ otel = ["opentelemetry-api>=1.27"]  # tracing API only: pick your own SDK and ex
 bench = ["jiwer>=3.0", "soundfile>=0.12", "pyarrow>=15"]
 # --- bundles ------------------------------------------------------------------------
 local = ["voice-agent-next[audio,silero,smart-turn,faster-whisper,kokoro]"]
-cloud = ["voice-agent-next[openai,anthropic,google]"]
+cloud = ["voice-agent-next[openai,anthropic,aws,google]"]
 
 [project.scripts]
 van = "voice_agent_next.cli.main:main"
