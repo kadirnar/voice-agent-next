@@ -51,7 +51,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD/docker/nginx/demo.conf:/etc/nginx/conf.d/default.conf:ro" \
             nginx:1.30-alpine nginx -t
-          docker run --rm -e PUBLIC_HOST=example.trycloudflare.com \
+          docker run --rm \
             -v "$PWD/docker/nginx/telephony.conf.template:/etc/nginx/templates/default.conf.template:ro" \
             nginx:1.30-alpine nginx -t
       - name: Container scripts
@@ -92,7 +92,9 @@ jobs:
           docker run --rm van:ci python -c "import aiortc, kokoro_onnx, onnxruntime, openai, sherpa_onnx, soxr; print('native libraries OK')"
       - name: "Smoke: van serve (mock engine): /health, /ready, /metrics, a session"
         run: |
-          docker run -d --name van -p 8765:8765 van:ci --protocol websocket --engine mock
+          # the entrypoint binds 0.0.0.0: the server requires an API key (#156)
+          docker run -d --name van -p 8765:8765 -e VAN_SERVER_API_KEY=ci-smoke-key van:ci \
+            --protocol websocket --engine mock
           for _ in $(seq 60); do
             status=$(docker inspect -f '{{.State.Health.Status}}' van)
             [ "$status" = healthy ] && break
@@ -111,6 +113,7 @@ jobs:
         run: |
           uv sync
           uv run python examples/websocket_agent.py client --url ws://127.0.0.1:8765/ \
+            --api-key ci-smoke-key \
             --text "Hello there" --listen 2 --output "$RUNNER_TEMP/reply.wav"
           test -s "$RUNNER_TEMP/reply.wav"
       - name: "Smoke: SIGTERM drains and exits 0"

@@ -26,6 +26,7 @@ WebSocket runs over TCP, so a lost packet stalls the stream (head-of-line blocki
 a good fit for backends, LANs and prototypes; prefer WebRTC for clients on lossy networks.
 
 Secure by default: browser pages from other websites are refused (``allowed_origins``),
+clients can be required to present an API key (``api_keys``),
 sessions are limited in number, duration and idle time, both directions are bounded (a
 flooding client is slowed down by TCP backpressure, a client that never reads is
 disconnected with 1008), and errors reach clients as a generic message with an
@@ -61,7 +62,9 @@ from ..server.security import (
     DEFAULT_MAX_SESSIONS,
     INBOX_HIGH,
     INBOX_LOW,
+    KEY_SUBPROTOCOL,
     MAX_SEND_BUFFER,
+    ApiKeys,
     OriginPolicy,
     exposure_warning,
     header_origin,
@@ -967,6 +970,10 @@ class WebSocketAgentServer:
             (``http://localhost:*``...) and clients without an ``Origin`` header (native
             clients, telephony providers); others get HTTP 403. See
             :class:`~voice_agent_next.server.security.OriginPolicy`.
+        api_keys: require one of these keys (HTTP 401 ``invalid_api_key`` otherwise), sent
+            as ``Authorization: Bearer <key>``, an ``api-key`` header or — from browsers —
+            the ``van-key.<key>`` subprotocol (see
+            :class:`~voice_agent_next.server.security.ApiKeys`). Default: none.
         forward_events: send transcripts, state changes, metrics and errors to clients.
         input_sample_rate / output_sample_rate / frame_duration / hello_timeout: per
             connection transport options (see :class:`WebSocketServerTransport`).
@@ -997,6 +1004,7 @@ class WebSocketAgentServer:
         allowed_origins: str | Sequence[str] | None = (),
         max_send_buffer: int | None = MAX_SEND_BUFFER,
         forward_events: bool = True,
+        api_keys: str | Sequence[str] | None = None,
         **serve_options: Any,
     ) -> None:
         for option, value in (
@@ -1013,6 +1021,7 @@ class WebSocketAgentServer:
         self.max_session_duration = max_session_duration
         self.idle_timeout = idle_timeout
         self.origin_policy = OriginPolicy(allowed_origins)
+        self.api_keys = ApiKeys(api_keys)
         self.forward_events = forward_events
         self.serve_options = serve_options
         self._transport_options: dict[str, Any] = {
@@ -1046,16 +1055,25 @@ class WebSocketAgentServer:
             options["process_request"] = _check_origin(
                 self.origin_policy, options.get("process_request")
             )
+        if self.api_keys:
+            options["process_request"] = _check_api_key(
+                self.api_keys, options.get("process_request")
+            )
+            options.setdefault("select_subprotocol", _select_key_subprotocol)
         self._server = await serve(self._handle, self.host, self.port, **options)
         self.port = _bound_port(self._server, self.port)
         logger.info("serving voice agents on %s (%s)", self.url, self.protocol)
         warning = exposure_warning(
             self.host,
-            authenticated=self.serve_options.get("process_request") is not None,
+            authenticated=self._authenticated(),
             what=f"the {self.protocol} server",
         )
         if warning is not None:
             logger.warning(warning)
+
+    def _authenticated(self) -> bool:
+        """Clients must authenticate (API keys, or a ``process_request`` hook)."""
+        return bool(self.api_keys) or self.serve_options.get("process_request") is not None
 
     async def serve_forever(self) -> None:
         """Serve until :meth:`aclose` is called or this coroutine is cancelled."""
@@ -1096,28 +1114,8 @@ class WebSocketAgentServer:
 
     async def _watchdog(self, transport: WebSocketServerTransport) -> str:
         """Returns (after telling the client) once the session is too old or idle."""
-        started = now()
-        limit, idle = self.max_session_duration, self.idle_timeout
-        while True:
-            t = now()
-            waits = [1.0]
-            if limit is not None:
-                if t - started >= limit:
-                    code = "session_expired"
-                    message = f"The session reached its maximum duration of {limit:g} seconds."
-                    break
-                waits.append(started + limit - t)
-            if idle is not None:
-                idle_for = transport.idle_time()
-                if idle_for >= idle:
-                    code = "session_idle"
-                    message = f"The session was closed after {idle:g} seconds without messages."
-                    break
-                waits.append(idle - idle_for)
-            await asyncio.sleep(min(waits) + 0.001)
-        logger.info("WebSocket session %s: %s", transport.session_id, code)
-        transport.send_message_nowait(
-            {"type": "error", "code": code, "message": message, "fatal": True}
+        code = await _session_watchdog(
+            transport, self.max_session_duration, self.idle_timeout, what="WebSocket"
         )
         transport.close_reason = code.replace("_", " ")
         return code
@@ -1273,6 +1271,79 @@ def _check_origin(
         return response
 
     return process_request
+
+
+async def _session_watchdog(
+    transport: Any, limit: float | None, idle: float | None, *, what: str
+) -> str:
+    """Returns ``"session_expired"`` or ``"session_idle"`` (after sending the client that
+    error) once the session is older than ``limit`` seconds or ``transport.idle_time()``
+    reaches ``idle``."""
+    started = now()
+    while True:
+        t = now()
+        waits = [1.0]
+        if limit is not None:
+            if t - started >= limit:
+                code = "session_expired"
+                message = f"The session reached its maximum duration of {limit:g} seconds."
+                break
+            waits.append(started + limit - t)
+        if idle is not None:
+            idle_for = transport.idle_time()
+            if idle_for >= idle:
+                code = "session_idle"
+                message = f"The session was closed after {idle:g} seconds without messages."
+                break
+            waits.append(idle - idle_for)
+        await asyncio.sleep(min(waits) + 0.001)
+    logger.info("%s session %s: %s", what, transport.session_id, code)
+    transport.send_message_nowait(
+        {"type": "error", "code": code, "message": message, "fatal": True}
+    )
+    return code
+
+
+def _check_api_key(
+    keys: ApiKeys, inner: Callable[..., Any] | None
+) -> Callable[..., Awaitable[Response | None]]:
+    """A ``process_request`` hook: ``inner`` (routes, Origin check) first, then the API key
+    (HTTP 401 ``invalid_api_key``)."""
+
+    async def process_request(connection: ServerConnection, request: Request) -> Response | None:
+        if inner is not None:
+            result = inner(connection, request)
+            if inspect.isawaitable(result):
+                result = await result
+            if result is not None:
+                return result
+        if keys.authorized(request.headers.get_all):
+            return None
+        logger.info("refused a WebSocket client without a valid API key")
+        body = _dumps(
+            {
+                "type": "error",
+                "code": "invalid_api_key",
+                "message": "Incorrect or missing API key (send 'Authorization: Bearer <key>' "
+                f"or the '{KEY_SUBPROTOCOL}<key>' subprotocol).",
+                "fatal": True,
+            }
+        )
+        response = connection.respond(HTTPStatus.UNAUTHORIZED, body + "\n")
+        del response.headers["Content-Type"]
+        response.headers["Content-Type"] = "application/json"
+        return response
+
+    return process_request
+
+
+def _select_key_subprotocol(connection: ServerConnection, subprotocols: Sequence[str]) -> Any:
+    """Browsers that authenticate with a ``van-key.<key>`` subprotocol need one selected:
+    ``van-ws`` when offered, else the key subprotocol itself (it goes back to the client
+    that sent it)."""
+    if "van-ws" in subprotocols:
+        return "van-ws"
+    return next((p for p in subprotocols if p.startswith(KEY_SUBPROTOCOL)), None)
 
 
 async def _close_quietly(websocket: ServerConnection, code: int, reason: str) -> None:

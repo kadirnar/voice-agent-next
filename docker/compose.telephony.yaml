@@ -1,12 +1,16 @@
-# Phone agent on Twilio Media Streams: Ollama + `van serve -p twilio` + a TwiML webhook.
+# Phone agent on Twilio Media Streams: Ollama + `van serve -p twilio` (media stream and
+# the TwiML answer webhook) behind nginx.
 #
 #   export TWILIO_ACCOUNT_SID=AC... TWILIO_AUTH_TOKEN=...      # or put them in docker/.env
+#   export VAN_SERVER_API_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(24))")
 #   docker compose -f docker/compose.telephony.yaml --profile tunnel up --build
 #   docker compose -f docker/compose.telephony.yaml logs tunnel   # https://<name>.trycloudflare.com
 #
-# Then set the Twilio number's "A call comes in" webhook to https://<public host>/twiml
-# and call the number. Without the `tunnel` profile, put your own TLS proxy in front of
-# port 8080 and set PUBLIC_HOST to its host name. Details: docs/deploy/docker.md.
+# Then set the Twilio number's "A call comes in" webhook to
+# https://<public host>/answer?key=$VAN_SERVER_API_KEY with method HTTP GET, and call the
+# number. With a fixed public URL (your own TLS proxy in front of port 8080), set
+# PUBLIC_URL=wss://voice.example.com instead: the agent then checks Twilio's signature on
+# the webhook and the stream, and the webhook needs no key. Details: docs/deploy/docker.md.
 name: voice-agent-next-telephony
 
 services:
@@ -56,12 +60,17 @@ services:
       dockerfile: docker/Dockerfile
       target: cpu
     command: ["--protocol", "twilio", "--port", "8765", "--config", "/config/agent.yaml",
-              "--max-sessions", "4", "--log-format", "json"]
+              "--max-sessions", "4", "--log-format", "json",
+              "--public-url", "${PUBLIC_URL:-}"]
     environment:
       OLLAMA_HOST: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      # the key of the answer webhook (?key=...); empty: generated, see `logs agent`
+      VAN_SERVER_API_KEY: ${VAN_SERVER_API_KEY:-}
+      # stream-token secret; empty: generated per run (the agent's own webhook issues tokens)
+      VAN_TELEPHONY_SECRET: ${VAN_TELEPHONY_SECRET:-}
       VAN_OFFLINE: "1"
     volumes:
       - models:/models
@@ -75,12 +84,10 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # GET/POST /twiml answers the call with <Connect><Stream url="wss://PUBLIC_HOST/stream">;
-  # /stream is proxied to the agent.
+  # Public routes only: GET /answer (TwiML with the stream token), / (the media stream) and
+  # /health are proxied to the agent, paths and Host unchanged.
   web:
     image: nginx:${NGINX_VERSION:-1.30-alpine}
-    environment:
-      PUBLIC_HOST: ${PUBLIC_HOST:-} # empty: the Host header the tunnel or proxy forwards
     volumes:
       - ./nginx/telephony.conf.template:/etc/nginx/templates/default.conf.template:ro
     ports:

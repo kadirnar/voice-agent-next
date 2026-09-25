@@ -18,7 +18,9 @@ L16 audio, marks, clear, DTMF, start/stop) to the library's transport model::
     await server.serve_forever()
 
 Every stream must carry the stream token of its call (:func:`stream_token`): the markup
-helpers add it when given the secret and the call ID. See ``docs/transports/telephony.md``
+helpers add it when given the secret and the call ID, and the server can serve the markup
+itself (``answer_path``). Carrier signatures (Twilio, Plivo, Vonage) can be checked on the
+WebSocket upgrade too (:class:`CarrierVerifier`). See ``docs/transports/telephony.md``
 for the provider setup (TwiML, NCCO, XML).
 """
 
@@ -27,10 +29,13 @@ from __future__ import annotations
 from .auth import (
     SECRET_ENV,
     TOKEN_PARAMETER,
+    plivo_signature_v3,
     stream_token,
     twilio_signature,
+    validate_plivo_signature_v3,
     validate_twilio_signature,
     verify_stream_token,
+    verify_vonage_jwt,
 )
 from .markup import plivo_stream_xml, telnyx_stream_texml, twilio_stream_twiml, vonage_ncco
 from .serializers import (
@@ -53,6 +58,7 @@ from .transport import (
     VonageTransport,
     serve_telephony,
 )
+from .webhook import CarrierVerifier, answer_markup
 
 __all__ = [
     "SECRET_ENV",
@@ -60,6 +66,7 @@ __all__ = [
     "TOKEN_PARAMETER",
     "AudioCodec",
     "CallInfo",
+    "CarrierVerifier",
     "PlivoSerializer",
     "PlivoTransport",
     "TelephonySerializer",
@@ -71,14 +78,18 @@ __all__ = [
     "TwilioTransport",
     "VonageSerializer",
     "VonageTransport",
+    "answer_markup",
     "create_serializer",
+    "plivo_signature_v3",
     "plivo_stream_xml",
     "serve_telephony",
     "stream_token",
     "telnyx_stream_texml",
     "twilio_signature",
     "twilio_stream_twiml",
+    "validate_plivo_signature_v3",
     "validate_twilio_signature",
     "verify_stream_token",
+    "verify_vonage_jwt",
     "vonage_ncco",
 ]

@@ -46,16 +46,16 @@ asyncio.run(main())
 | --- | --- |
 | `--protocol/-p` | Wire protocol: `openai-realtime` (default, this page), or `websocket`, `webrtc`, `twilio`, `telnyx`, `vonage`, `plivo` (see [Serving in production](serving.md)). |
 | `--engine/-e [NAME=]SOURCE` | A registry spec (`mock`, `openai/gpt-realtime`), an inline mapping (`'{provider: mock, response_delay: 0.2}'`) or an agent config file (YAML/TOML/JSON, engine or cascade). Repeat it to serve several models. |
-| `--stt --llm --tts --vad --turn` | Build a cascade (named `--name`, default `cascade`). |
+| `--stt --llm --tts --vad --turn` | Build a cascade (named `--name`, default `cascade`), or change the components of `--preset`/`--config`. |
 | `--name/-n` | Model name of a single engine. |
 | `--instructions --voice --language` | Session defaults. A client's `session.update` overrides them. |
-| `--api-key` (env `VAN_SERVER_API_KEY`) | Require this bearer token. Repeat it to accept several. Without it there is no authentication. |
+| `--api-key` (env `VAN_SERVER_API_KEY`) | Require this bearer token. Repeat it to accept several. Without it there is no authentication, and a non-loopback `--host` is refused unless `--insecure`. |
 | `--max-sessions` | Refuse clients beyond this many live sessions (HTTP 503, `Retry-After: 1`). |
 | `--any-model/--strict-model` | Serve the default model for an unknown `?model=` (for clients with a hard-coded `gpt-realtime`). Default: only when a single model is served. |
 | `--max-session-duration` | Close sessions after N seconds with a `session_expired` error, like OpenAI. |
 | `--warmup/--no-warmup` | Call `engine.warmup()` before accepting clients (default on). |
 | `--host --port` | Listening address. `--port 0` picks a free port. |
-| `--preset --config` | Serve a preset's or a config file's engine (like `-e agent.yaml`). |
+| `--preset --config` | Serve one model from a preset and/or a config file, layered like `van run` (`--preset` < `--config` < `--stt --llm --tts --vad --turn`), named after the preset or the file (or `--name`). |
 | `--prewarm N`, `--engine-per-session` | Keep N engine connections open ahead of calls; one engine per session. See [prewarm](serving.md#prewarm-no-model-load-or-connection-setup-in-the-call-path). |
 | `--workers N`, `--drain-timeout S`, `--log-format json` | Worker processes on one port, graceful drain, structured logs. See [Serving in production](serving.md). |
 

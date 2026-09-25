@@ -1,8 +1,13 @@
-# Twilio front of docker/compose.telephony.yaml (nginx substitutes ${PUBLIC_HOST} at start).
-#   GET/POST /twiml  -> TwiML that connects the call to wss://<public host>/stream
-#   /stream          -> the media-stream WebSocket of `van serve -p twilio` (agent:8765)
-# Point the Twilio number's "A call comes in" webhook at https://<public host>/twiml.
-# TLS terminates in front of this server (a tunnel such as cloudflared/ngrok, or your proxy).
+# Public front of docker/compose.telephony.yaml: only the call routes reach the agent.
+#   GET /answer  -> `van serve -p twilio` answers the call with TwiML: <Connect><Stream
+#                   url="wss://<public host>/"> plus the call's stream token
+#   /            -> the media-stream WebSocket (agent:8765)
+#   /health      -> liveness (/ready and /metrics stay on the agent's port, off the tunnel)
+# Point the Twilio number's "A call comes in" webhook at https://<public host>/answer
+# (method GET; add ?key=<VAN_SERVER_API_KEY> unless PUBLIC_URL lets the agent check
+# Twilio's signature). TLS terminates in front of this server (a tunnel such as
+# cloudflared/ngrok, or your proxy). Paths and the Host header are passed unchanged: the
+# agent builds the stream URL from them and checks Twilio's signature over them.
 
 map $http_upgrade $connection_upgrade {
     default upgrade;
@@ -16,19 +21,13 @@ server {
     resolver 127.0.0.11 valid=10s ipv6=off;
     set $agent http://agent:8765;
 
-    # PUBLIC_HOST set: that host; empty: the Host header the tunnel forwards.
-    set $public_host "${PUBLIC_HOST}";
-    if ($public_host = "") {
-        set $public_host $http_host;
+    location = /answer {
+        limit_except GET { deny all; }
+        proxy_pass $agent;
+        proxy_set_header Host $host;
     }
 
-    location = /twiml {
-        default_type text/xml;
-        return 200 '<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="wss://$public_host/stream"/></Connect></Response>';
-    }
-
-    location = /stream {
-        rewrite ^ / break;
+    location = / {
         proxy_pass $agent;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -38,7 +37,6 @@ server {
         proxy_send_timeout 3600s;
     }
 
-    # Liveness only: /ready and /metrics stay on the agent's port, off the public tunnel.
     location = /health {
         proxy_pass $agent;
     }

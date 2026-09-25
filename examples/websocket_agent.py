@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -196,7 +197,8 @@ async def wait_until_idle(state: dict[str, Any], quiet: float = 0.5, timeout: fl
 async def run_client(args: argparse.Namespace) -> None:
     speech = read_wav(args.input).to_mono() if args.input else synth_speech(1.2, 16_000)
     rate = speech.sample_rate
-    async with connect(args.url, compression=None) as ws:
+    headers = {"Authorization": f"Bearer {args.api_key}"} if args.api_key else None
+    async with connect(args.url, compression=None, additional_headers=headers) as ws:
         hello: dict[str, Any] = {"type": "hello", "protocol": PROTOCOL, "codec": "pcm_s16le"}
         hello |= {"sample_rate": rate, "channels": 1, "output_sample_rate": args.output_rate}
         await ws.send(json.dumps(hello))
@@ -260,6 +262,11 @@ def main() -> None:
 
     cli = sub.add_parser("client", help="talk to a running agent from Python")
     cli.add_argument("--url", default="ws://127.0.0.1:8765/")
+    cli.add_argument(
+        "--api-key",
+        default=os.environ.get("VAN_SERVER_API_KEY") or None,
+        help="the server's API key, if it requires one (default: $VAN_SERVER_API_KEY)",
+    )
     cli.add_argument("--input", type=Path, help="WAV file with the user's speech")
     cli.add_argument("--output", type=Path, help="write the agent's audio to this WAV file")
     cli.add_argument("--text", help="also send this typed message")

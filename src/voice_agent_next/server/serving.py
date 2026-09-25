@@ -279,9 +279,10 @@ def build_agent_served(
         preconnect: open prewarmed connections with the agent's options.
         max_sessions: per-process session limit (default 64; ``None``: no limit).
         server_options: extra arguments of the protocol server (``ssl``, ``ice_servers``,
-            ``serializer_options``, ``allowed_origins``, ``max_session_duration``,
-            ``idle_timeout``...). For ``webrtc``, ``allowed_origins`` become CORS origins
-            and the session duration / idle limits are not supported (ignored).
+            ``serializer_options``, ``allowed_origins``, ``api_keys``,
+            ``max_session_duration``, ``idle_timeout``; telephony: ``public_url``,
+            ``signature_secret``, ``answer_path``, ``stream_secret``...). For ``webrtc``,
+            ``allowed_origins`` are also CORS origins.
     """
     from ..app import build_agent
     from ..config import AppConfig, load_config
@@ -356,12 +357,10 @@ def build_agent_served(
         from ..transports.webrtc import WebRTCAgentServer
 
         server_options = dict(server_options)
-        origins = server_options.pop("allowed_origins", None) or ()
+        origins = server_options.get("allowed_origins") or ()
         origins = [origins] if isinstance(origins, str) else list(origins)
-        if origins:
+        if origins:  # the pages allowed to POST /offer may also read the answer (CORS)
             server_options["cors_origins"] = [*server_options.get("cors_origins", ()), *origins]
-        for unsupported in ("max_session_duration", "idle_timeout"):
-            server_options.pop(unsupported, None)
         server = WebRTCAgentServer(
             session_factory, agent_factory, host=host, port=port, max_sessions=max_sessions,
             **server_options,

@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import secrets
 import signal
 import sys
 from collections.abc import Callable, Mapping
@@ -51,6 +52,10 @@ console = Console(stderr=True)
 
 PROTOCOLS = ("openai-realtime", "websocket", "webrtc", "twilio", "telnyx", "vonage", "plivo")
 """Served protocols (``voice_agent_next.server.serving.PROTOCOLS``, without the import)."""
+TELEPHONY_PROTOCOLS = ("twilio", "telnyx", "vonage", "plivo")
+ANSWER_PATH = "/answer"
+"""Where ``van serve`` serves the telephony answer webhook (``GET``)."""
+SECRET_ENV_NAME = "VAN_TELEPHONY_SECRET"
 _CONFIG_SUFFIXES = (".yaml", ".yml", ".toml", ".json")
 _NAMED = re.compile(r"^([A-Za-z0-9][\w.:\-]*)=(.+)$", re.S)
 _DEFAULT_PORTS = {"openai-realtime": 8000, "webrtc": 8080}
@@ -68,10 +73,22 @@ class ServeOptions:
     host: str = "127.0.0.1"
     port: int = 8000
     api_keys: list[str] = field(default_factory=list)
+    """Accepted API keys: bearer tokens of ``openai-realtime``, ``websocket`` and
+    ``webrtc`` clients; the telephony answer webhook's ``?key=``."""
     allowed_origins: list[str] = field(default_factory=list)
     """Browser origins allowed besides this machine's pages (``*``: any)."""
     insecure: bool = False
     """Allow listening beyond this machine without authentication."""
+    public_url: str | None = None
+    """Telephony: the public ``wss://``/``https://`` base URL of the server (carrier
+    signature checks for Twilio and Plivo, stream URL of the served markup)."""
+    stream_secret: str | None = None
+    """Telephony: the stream-token secret (``None``: ``VAN_TELEPHONY_SECRET`` or generated
+    by :func:`resolve_auth`)."""
+    signature_secret: str | None = None
+    """Vonage: the account signature secret that verifies Vonage's JWTs."""
+    generated: list[str] = field(default_factory=list)
+    """What :func:`resolve_auth` generated for this run (``"api key"``, ``"stream secret"``)."""
     max_sessions: int | None = _DEFAULT_MAX_SESSIONS
     accept_any_model: bool | None = None
     warmup: bool = True
@@ -163,6 +180,7 @@ def _model_builders(
     turn_detector: str | None,
     name: str | None,
     preset: str | None = None,
+    config: str | None = None,
 ) -> list[tuple[str, Callable[[], Any]]]:
     """``(model name, builder)`` pairs; a builder returns a fresh model source."""
     from ..bench.system import parse_component_spec
@@ -176,16 +194,19 @@ def _model_builders(
         model_name, source = (match.group(1), match.group(2)) if match else (None, value)
         first = _load_source(source)  # validates now (missing file, bad inline spec)
         builders.append((model_name or _source_name(source), _first_then(first, source)))
-    if preset is not None:
-        from ..presets import load_preset
-
-        preset_cfg = load_preset(preset)  # raises with the fixes when it cannot run here
-
-        def build_preset() -> Any:
-            return engine_from_config(preset_cfg)
-
-        builders.append((preset, build_preset))
     cascade = {"stt": stt, "llm": llm, "tts": tts, "turn_detector": turn_detector}
+    if preset is not None or config is not None:
+        # one model: --preset < --config < cascade flags, like `van run`
+        overrides = {
+            key: parse_component_spec(value)
+            for key, value in {**cascade, "vad": vad}.items()
+            if value is not None
+        }
+        layered = layered_config(preset=preset, config=config, overrides=overrides)
+        base_name = preset if preset is not None else _source_name(str(config))
+        model_name = name if name is not None and not engines else base_name
+        builders.append((model_name, lambda: engine_from_config(layered)))
+        return builders
     if any(v is not None for v in cascade.values()):
         if llm is None:  # --tts is optional for audio-output LLMs (the cascade checks)
             raise ConfigurationError("a cascade needs at least --llm and --tts (and --stt)")
@@ -221,6 +242,7 @@ def build_models(
     voice: str | None = None,
     language: str | None = None,
     preset: str | None = None,
+    config: str | None = None,
     per_session: bool = False,
 ) -> dict[str, Any]:
     """Served models from CLI options.
@@ -228,8 +250,10 @@ def build_models(
     ``engines`` entries are ``[NAME=]SOURCE`` where SOURCE is a registry spec (``mock``,
     ``openai/gpt-realtime``), an inline mapping (``{provider: mock, response_delay: 0.2}``)
     or an agent config file (engine or cascade; its agent instructions/voice/language
-    become session defaults). ``preset`` serves a preset's engine or cascade.
-    ``stt``/``llm``/``tts``/``vad``/``turn_detector`` build one more model, a cascade
+    become session defaults). ``preset`` and/or ``config`` serve one more model, layered
+    like ``van run``: ``preset`` < ``config`` < the cascade options
+    (``stt``/``llm``/``tts``/``vad``/``turn_detector``), named after the preset or the
+    file (or ``name``). Without them, the cascade options build one more model, a cascade
     (named ``name`` or ``"cascade"``). Nothing given: the mock engine.
 
     ``per_session``: every model's engine is a factory (one engine per session).
@@ -240,7 +264,7 @@ def build_models(
 
     builders = _model_builders(
         engines, stt=stt, llm=llm, tts=tts, vad=vad, turn_detector=turn_detector, name=name,
-        preset=preset,
+        preset=preset, config=config,
     )  # fmt: skip
     models: dict[str, Any] = {}
     for model_name, builder in builders:
@@ -267,14 +291,29 @@ def build_models(
     return models
 
 
+def layered_config(*, preset: str | None, config: str | None, overrides: Mapping[str, Any]) -> Any:
+    """The validated :class:`~voice_agent_next.config.AppConfig` of ``preset`` < ``config``
+    file < ``overrides`` (the component flags), like ``van run``. A preset is checked for
+    readiness on this machine (with the layers on top)."""
+    from ..config import AppConfig, layer_config
+
+    raw = layer_config(preset=preset, file=config, overrides=dict(overrides))
+    if preset is not None:
+        from ..presets import load_preset
+
+        cfg = load_preset(preset, **{k: v for k, v in raw.items() if k != "extends"})
+    else:
+        cfg = AppConfig.model_validate(raw)
+    cfg.validate_components()
+    return cfg
+
+
 def build_app_config(sources: SourceOptions) -> Any:
     """The :class:`~voice_agent_next.config.AppConfig` served by the AgentSession
     protocols (``websocket``, ``webrtc``, telephony): one agent, layered like ``van run``
-    as ``--preset`` < ``--config`` and validated once, or made from ``--engine`` or
-    cascade flags (nothing given: the mock engine). A ``--preset`` is checked for
-    readiness."""
+    as ``--preset`` < ``--config`` < ``--engine`` or cascade flags and validated once
+    (nothing given: the mock engine). A ``--preset`` is checked for readiness."""
     from ..bench.system import parse_component_spec
-    from ..config import AppConfig, layer_config
     from ..errors import ConfigurationError
 
     engines = list(sources.engines)
@@ -286,10 +325,15 @@ def build_app_config(sources: SourceOptions) -> Any:
         v is not None for v in (sources.stt, sources.llm, sources.tts, sources.turn_detector)
     )
     base = sources.preset is not None or bool(configs)
-    if len(configs) > 1 or len(specs) > 1 or (specs and cascade) or (base and (specs or cascade)):
+    if len(configs) > 1 or len(specs) > 1:
         raise ConfigurationError(
-            "this protocol serves one agent: pass --preset and/or one --config (layered "
-            "in that order), or --engine, or cascade flags"
+            "this protocol serves one agent: pass --preset and/or one --config, then "
+            "--engine or cascade flags on top (layered in that order)"
+        )
+    if specs and cascade:
+        raise ConfigurationError(
+            "this protocol serves one agent: --engine or cascade flags (--stt/--llm/--tts), "
+            "not both"
         )
     if any(_NAMED.match(e.strip()) for e in specs):
         raise ConfigurationError("NAME=SOURCE model names only apply to --protocol openai-realtime")
@@ -307,15 +351,9 @@ def build_app_config(sources: SourceOptions) -> Any:
             raise ConfigurationError("--vad belongs to a cascade (--stt/--llm/--tts)")
         if not overrides:
             overrides["engine"] = "mock"
-    raw = layer_config(
-        preset=sources.preset, file=configs[0] if configs else None, overrides=overrides
+    cfg = layered_config(
+        preset=sources.preset, config=configs[0] if configs else None, overrides=overrides
     )
-    if sources.preset is not None:
-        from ..presets import load_preset
-
-        cfg = load_preset(sources.preset, **{k: v for k, v in raw.items() if k != "extends"})
-    else:
-        cfg = AppConfig.model_validate(raw)
     if sources.instructions is not None:
         cfg.agent.instructions = sources.instructions
     if sources.voice is not None:
@@ -338,6 +376,7 @@ def build_served(
         reuse_port_supported,
     )
 
+    resolve_auth(options)  # no-op when run() did it already (workers share its result)
     reuse_port = options.workers > 1 and reuse_port_supported()
     pool: dict[str, Any] = {
         "prewarm": options.prewarm,
@@ -349,7 +388,7 @@ def build_served(
     }
     if options.protocol == "openai-realtime":
         models = build_models(
-            [*sources.engines, *([sources.config] if sources.config else [])],
+            sources.engines, config=sources.config,
             stt=sources.stt, llm=sources.llm, tts=sources.tts, vad=sources.vad,
             turn_detector=sources.turn_detector, name=sources.name,
             instructions=sources.instructions, voice=sources.voice, language=sources.language,
@@ -363,17 +402,12 @@ def build_served(
             **pool,
         )  # fmt: skip
     if options.protocol in AGENT_PROTOCOLS:
-        if options.api_keys:
-            raise ConfigurationError(
-                "--api-key only applies to --protocol openai-realtime; put the other "
-                "protocols behind an authenticating proxy"
-            )
         return build_agent_served(
             options.protocol, build_app_config(sources),
             engine_per_session=options.engine_per_session, max_sessions=options.max_sessions,
             host=options.host, port=options.port, allowed_origins=options.allowed_origins,
             max_session_duration=options.max_session_duration,
-            idle_timeout=options.idle_timeout, **pool,
+            idle_timeout=options.idle_timeout, **_protocol_options(options), **pool,
         )  # fmt: skip
     raise ConfigurationError(
         f"unknown protocol {options.protocol!r}; expected one of {', '.join(PROTOCOLS)}"
@@ -418,8 +452,8 @@ def _banner(served: Any, options: ServeOptions, workers: int = 1) -> None:
     models = getattr(served.server, "models", None)
     if isinstance(models, dict):
         extra.append(f"models: {', '.join(models)}")
-    if options.protocol == "openai-realtime":
-        extra.append("bearer token" if options.api_keys else "no authentication")
+    if options.protocol in ("openai-realtime", "websocket", "webrtc"):
+        extra.append("API key" if options.api_keys else "no authentication")
     if options.allowed_origins:
         extra.append(f"origins: {', '.join(options.allowed_origins)}")
     if options.prewarm:
@@ -433,6 +467,40 @@ def _banner(served: Any, options: ServeOptions, workers: int = 1) -> None:
         + "".join(f" · {escape(x)}" for x in extra),
         highlight=False,
     )
+    _print_credentials(options, answer_url=getattr(served.server, "answer_url", None))
+
+
+def _print_credentials(options: ServeOptions, *, answer_url: Callable[[], Any] | None) -> None:
+    """Tell the operator what was generated and where the carrier's webhook points."""
+    key = options.api_keys[0] if options.api_keys else None
+    if "api key" in options.generated and key is not None:
+        if options.protocol in TELEPHONY_PROTOCOLS:
+            what = "the answer webhook"
+        else:
+            what = "clients (Authorization: Bearer <key>)"
+        console.print(
+            f"[yellow]API key for {escape(what)}, generated for this run:[/yellow] "
+            f"[bold]{escape(key)}[/bold] [dim](set --api-key or VAN_SERVER_API_KEY to keep "
+            "one; --insecure turns it off beyond loopback)[/dim]",
+            highlight=False,
+        )
+    if "stream secret" in options.generated:
+        console.print(
+            "[dim]stream tokens use a secret generated for this run: only the served "
+            f"answer webhook can issue them (set {SECRET_ENV_NAME} to share it with your "
+            "own webhook)[/dim]",
+            highlight=False,
+        )
+    if options.protocol in TELEPHONY_PROTOCOLS and answer_url is not None:
+        url = answer_url()
+        if url:
+            if not _carrier_checked(options) and key is not None:
+                url += "?key=" + (key if "api key" in options.generated else "<api key>")
+            console.print(
+                f"answer webhook (HTTP GET): [bold]{escape(url)}[/bold]"
+                + ("" if options.public_url else " [dim](behind your public https:// host)[/dim]"),
+                highlight=False,
+            )
 
 
 def _worker_main(sources: SourceOptions, options: ServeOptions, index: int) -> None:
@@ -462,14 +530,17 @@ def _worker_main(sources: SourceOptions, options: ServeOptions, index: int) -> N
 def check_exposure(options: ServeOptions) -> str | None:
     """Refuse (return the error) or warn about listening beyond this machine unauthenticated.
 
-    ``openai-realtime`` has bearer-token authentication, so a non-loopback bind without
-    ``--api-key`` is refused unless ``--insecure`` says the network or a proxy protects the
-    server. The other protocols have no built-in authentication (telephony providers and
-    WebRTC peers cannot send a key): they get a warning, unless ``--insecure``.
+    ``openai-realtime`` refuses a non-loopback bind without ``--api-key`` unless
+    ``--insecure`` says the network or a proxy protects the server. ``websocket`` and
+    ``webrtc`` get an API key from :func:`resolve_auth` (called first by :func:`run`); when
+    they have none, they get a warning, unless ``--insecure``. Telephony media streams
+    are authenticated by their stream token.
     """
     from ..server.security import is_loopback_host
 
     if options.insecure or is_loopback_host(options.host):
+        return None
+    if options.protocol in TELEPHONY_PROTOCOLS or options.api_keys:
         return None
     if options.protocol == "openai-realtime":
         if options.api_keys:
@@ -489,11 +560,87 @@ def check_exposure(options: ServeOptions) -> str | None:
     return None
 
 
+def resolve_auth(options: ServeOptions) -> None:
+    """Fill in the credentials this run needs and nobody gave (in place; see
+    :attr:`ServeOptions.generated`). Secure by default:
+
+    * ``websocket`` / ``webrtc`` beyond this machine: an API key clients must send, unless
+      ``--api-key`` gives one or ``--insecure`` turns authentication off;
+    * telephony: the stream secret (``--stream-secret`` or ``VAN_TELEPHONY_SECRET``,
+      else a random one: the served answer webhook hands out the tokens), and an API key
+      for the answer webhook when the carrier's signature is not checked (Twilio/Plivo
+      need ``--public-url``, Vonage ``--vonage-signature-secret``).
+
+    ``openai-realtime`` never gets a generated key: it refuses to listen beyond this
+    machine without one (:func:`check_exposure`).
+    """
+    from ..server.security import generate_api_key, is_loopback_host
+    from ..transports.telephony.auth import stream_secret_from_env
+
+    protocol = options.protocol
+    if protocol in TELEPHONY_PROTOCOLS:
+        if not options.stream_secret:
+            options.stream_secret = stream_secret_from_env()
+        if not options.stream_secret:
+            options.stream_secret = secrets.token_urlsafe(32)
+            options.generated.append("stream secret")
+        if not options.api_keys and not _carrier_checked(options):
+            options.api_keys = [generate_api_key()]
+            options.generated.append("api key")
+    elif protocol in ("websocket", "webrtc"):
+        exposed = not is_loopback_host(options.host)
+        if exposed and not options.api_keys and not options.insecure:
+            options.api_keys = [generate_api_key()]
+            options.generated.append("api key")
+
+
+def _answer_url(options: ServeOptions) -> str:
+    """The answer webhook URL (``--public-url`` host, else the listening address)."""
+    from ..transports.websocket import _url_host
+
+    if options.public_url is not None:
+        from ..transports.telephony.webhook import public_base
+
+        base = public_base(options.public_url)
+    else:
+        base = f"http://{_url_host(options.host)}:{options.port}"
+    return base.rstrip("/") + ANSWER_PATH
+
+
+def _carrier_checked(options: ServeOptions) -> bool:
+    """The telephony server checks the carrier's signature (webhook and upgrades)."""
+    if options.protocol in ("twilio", "plivo"):
+        return options.public_url is not None
+    return options.protocol == "vonage" and bool(options.signature_secret)
+
+
+def _protocol_options(options: ServeOptions) -> dict[str, Any]:
+    """Protocol-specific server arguments of :func:`build_agent_served`."""
+    from ..errors import ConfigurationError
+
+    keys = options.api_keys or None
+    if options.protocol in TELEPHONY_PROTOCOLS:
+        out: dict[str, Any] = {
+            "answer_path": ANSWER_PATH,
+            "api_keys": keys,
+            "public_url": options.public_url,
+        }
+        if options.stream_secret:
+            out["stream_secret"] = options.stream_secret
+        if options.protocol == "vonage" and options.signature_secret:
+            out["signature_secret"] = options.signature_secret
+        return out
+    if options.public_url is not None:
+        raise ConfigurationError("--public-url applies to the telephony protocols")
+    return {"api_keys": keys}
+
+
 def run(sources: SourceOptions, options: ServeOptions) -> int:
     """Run ``van serve``: one process, or a supervisor and ``options.workers`` workers."""
     from ..errors import VoiceAgentError
     from ..server.serving import free_port, reuse_port_supported, run_served, run_workers
 
+    resolve_auth(options)  # before the workers start: they share what is generated
     refusal = check_exposure(options)
     if refusal is not None:
         console.print(f"[red]error:[/red] {escape(refusal)}")
@@ -540,6 +687,7 @@ def run(sources: SourceOptions, options: ServeOptions) -> int:
         f"{escape(options.host)}:{options.port} (SO_REUSEPORT)",
         highlight=False,
     )
+    _print_credentials(options, answer_url=lambda: _answer_url(options))
     code = run_workers(
         _worker_main,
         (sources, options),
@@ -557,7 +705,7 @@ def _validate(sources: SourceOptions, options: ServeOptions) -> None:
 
     if options.protocol == "openai-realtime":
         build_models(
-            [*sources.engines, *([sources.config] if sources.config else [])],
+            sources.engines, config=sources.config,
             stt=sources.stt, llm=sources.llm, tts=sources.tts, vad=sources.vad,
             turn_detector=sources.turn_detector, name=sources.name, preset=sources.preset,
         )  # fmt: skip
@@ -619,8 +767,40 @@ def serve(
         typer.Option(
             "--api-key",
             envvar="VAN_SERVER_API_KEY",
-            help="openai-realtime: require this bearer token (repeatable). Default: no "
-            "authentication (then only loopback binds are allowed; see --insecure).",
+            help="Require this API key (repeatable): a bearer token for openai-realtime, "
+            "websocket and webrtc clients; ?key= of the telephony answer webhook. Default: "
+            "none on loopback; beyond it openai-realtime refuses to start and websocket/"
+            "webrtc/telephony generate one (see --insecure).",
+        ),
+    ] = None,
+    public_url: Annotated[
+        str | None,
+        typer.Option(
+            "--public-url",
+            help="Telephony: the public wss:// (or https://) URL of this server, without "
+            "the path. Twilio and Plivo: check the carrier's request signature on the "
+            "answer webhook and every media stream. Also the stream URL of the served "
+            "markup (default: from the webhook request's Host).",
+        ),
+    ] = None,
+    stream_secret: Annotated[
+        str | None,
+        typer.Option(
+            "--stream-secret",
+            envvar="VAN_TELEPHONY_SECRET",
+            help="Telephony: the secret of the per-call stream tokens (default: generated "
+            "for this run; set it to share it with your own webhook).",
+            show_default=False,
+        ),
+    ] = None,
+    vonage_signature_secret: Annotated[
+        str | None,
+        typer.Option(
+            "--vonage-signature-secret",
+            envvar="VONAGE_SIGNATURE_SECRET",
+            help="Vonage: your account's signature secret; the JWT of the answer webhook "
+            "and of every media stream is then checked.",
+            show_default=False,
         ),
     ] = None,
     allowed_origin: Annotated[
@@ -638,7 +818,8 @@ def serve(
         typer.Option(
             "--insecure",
             help="Allow listening beyond this machine without authentication (a firewall "
-            "or an authenticating proxy protects the port).",
+            "or an authenticating proxy protects the port): no API key is required or "
+            "generated for websocket and webrtc.",
         ),
     ] = False,
     max_sessions: Annotated[
@@ -738,6 +919,9 @@ def serve(
         api_keys=[k for k in (api_key or []) if k],
         allowed_origins=[o for o in (allowed_origin or []) if o.strip()],
         insecure=insecure,
+        public_url=public_url.strip() if public_url and public_url.strip() else None,
+        stream_secret=stream_secret or None,
+        signature_secret=vonage_signature_secret or None,
         max_sessions=max_sessions or None,
         accept_any_model=any_model,
         warmup=warmup,

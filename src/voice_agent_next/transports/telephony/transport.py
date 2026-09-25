@@ -6,10 +6,11 @@ import asyncio
 import contextlib
 import inspect
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any, ClassVar
+from urllib.parse import parse_qs
 
 import httpx
 from websockets.asyncio.server import ServerConnection
@@ -19,6 +20,7 @@ from websockets.http11 import Request
 from ...audio.frame import AudioFormat, AudioFrame
 from ...audio.resample import StreamResampler
 from ...errors import ConfigurationError, TransportError
+from ...server.security import ApiKeys
 from ...utils.clock import now
 from ...utils.ids import new_id
 from ...utils.log import logger
@@ -38,7 +40,6 @@ from .auth import (
     TELNYX_TOKEN_HEADER,
     TOKEN_PARAMETER,
     stream_secret_from_env,
-    validate_twilio_signature,
     verify_stream_token,
 )
 from .serializers import (
@@ -55,6 +56,13 @@ from .serializers import (
     TelephonySerializer,
     create_serializer,
 )
+from .webhook import (
+    CarrierVerifier,
+    answer_markup,
+    call_id_from_query,
+    stream_url_for,
+)
+from .webhook import public_base as webhook_public_base
 
 __all__ = [
     "PlivoTransport",
@@ -537,9 +545,23 @@ class TelephonyServer(WebSocketAgentServer):
         max_sessions: refuse calls beyond this many live sessions.
         stream_secret / authenticate: stream token check of every call (see
             :class:`TelephonyTransport`); required unless ``authenticate=False``.
-        public_url: Twilio only: the ``wss://`` base URL Twilio connects to (as written in
-            the TwiML, without the path). The ``X-Twilio-Signature`` of every WebSocket
-            upgrade is then checked with the Twilio auth token (HTTP 403 otherwise).
+        public_url: the public ``wss://`` base URL the carrier connects to (as written in
+            the markup, without the path). Twilio and Plivo: the request signature
+            (``X-Twilio-Signature``, ``X-Plivo-Signature-V3``) of every WebSocket upgrade
+            and answer webhook is then checked with the account's auth token (HTTP 403
+            otherwise). Every provider: the stream URL of the served markup.
+        signature_secret: Vonage only: your account's signature secret. The
+            ``Authorization: Bearer`` JWT of every WebSocket upgrade and answer webhook
+            is then checked (HTTP 403 otherwise), and the served NCCO asks Vonage to sign
+            the upgrade (``"authorization": {"type": "vonage"}``).
+        answer_path: serve the markup that answers a call (TwiML, TeXML, NCCO, Plivo XML)
+            on ``GET answer_path`` (default: not served), with the stream URL and the
+            call's stream token. Point the carrier's voice webhook (answer URL, method
+            ``GET``) at it. It mints stream tokens, so it needs the carrier check above or
+            ``api_keys``.
+        api_keys: keys that authorize the answer webhook when the carrier's signature is
+            not checked: ``https://host/answer?key=<key>``, or an ``Authorization``
+            header. Media streams are authenticated by their stream token instead.
         serve_options: ``ssl``, ``process_request``...
     """
 
@@ -559,14 +581,36 @@ class TelephonyServer(WebSocketAgentServer):
         stream_secret: str | None = None,
         authenticate: bool = True,
         public_url: str | None = None,
+        signature_secret: str | None = None,
+        answer_path: str | None = None,
+        api_keys: str | Sequence[str] | None = None,
         **serve_options: Any,
     ) -> None:
         serializer = create_serializer(provider, **(serializer_options or {}))  # validate early
-        _resolve_secret(authenticate, stream_secret)  # fail fast
-        if public_url is not None:
-            serve_options["process_request"] = _twilio_signature_check(
-                serializer, public_url, serve_options.get("process_request")
-            )
+        secret = _resolve_secret(authenticate, stream_secret)  # fail fast
+        verifier = CarrierVerifier.create(
+            serializer, public_url=public_url, signature_secret=signature_secret
+        )
+        keys = ApiKeys(api_keys)
+        if answer_path is not None:
+            if not answer_path.startswith("/") or "?" in answer_path:
+                raise ConfigurationError(f"answer_path must be a path (/answer): {answer_path!r}")
+            if secret is not None and verifier is None and not keys:
+                raise ConfigurationError(
+                    "the answer webhook mints stream tokens: authenticate it with the "
+                    "carrier's signature (public_url for Twilio/Plivo, signature_secret for "
+                    "Vonage) or with api_keys"
+                )
+        self.verifier = verifier
+        """Checks the carrier's signature on upgrades and webhooks (``None``: not checked)."""
+        self.public_url = public_url
+        self.answer_path = answer_path
+        self.answer_keys = keys
+        self._secret = secret
+        self._serializer = serializer
+        user = serve_options.get("process_request")
+        if verifier is not None or answer_path is not None:
+            serve_options["process_request"] = self._carrier_hook(user)
         super().__init__(
             session_factory,
             agent_factory,
@@ -592,6 +636,82 @@ class TelephonyServer(WebSocketAgentServer):
     def _create_transport(self, websocket: ServerConnection) -> TelephonyTransport:
         return TelephonyTransport(websocket, provider=self.provider, **self._telephony_options)
 
+    def _authenticated(self) -> bool:
+        return self._secret is not None or super()._authenticated()
+
+    def answer_url(self, public_base: str | None = None) -> str | None:
+        """The answer webhook URL to configure at the carrier (``None``: not served)."""
+        if self.answer_path is None:
+            return None
+        if public_base is None and self.public_url is not None:
+            public_base = webhook_public_base(self.public_url)
+        base = (public_base or self.url.replace("ws", "http", 1)).rstrip("/")
+        return base + self.answer_path
+
+    def _carrier_hook(self, user: Callable[..., Any] | None) -> Callable[..., Any]:
+        """``process_request``: ``user`` first, then the answer webhook, then the carrier
+        signature of WebSocket upgrades."""
+
+        async def process_request(connection: ServerConnection, request: Request) -> Any:
+            if user is not None:
+                result = user(connection, request)
+                if inspect.isawaitable(result):
+                    result = await result
+                if result is not None:
+                    return result
+            upgrade = request.headers.get("Upgrade", "").lower() == "websocket"
+            path, _, query = request.path.partition("?")
+            if not upgrade and self.answer_path is not None and path == self.answer_path:
+                return self._answer(connection, request, query)
+            verifier = self.verifier
+            if (
+                upgrade
+                and verifier is not None
+                and not verifier.verify(request.path, request.headers, scheme="wss")
+            ):
+                logger.warning(
+                    "refused a %s media stream without a valid carrier signature", self.provider
+                )
+                return connection.respond(HTTPStatus.FORBIDDEN, "Forbidden\n")
+            return None
+
+        return process_request
+
+    def _answer(self, connection: ServerConnection, request: Request, query: str) -> Any:
+        """The markup that answers a call (``GET answer_path``)."""
+        if self.verifier is not None:
+            allowed = self.verifier.verify(request.path, request.headers, scheme="https")
+        elif self.answer_keys:
+            key = parse_qs(query).get("key", [None])[0]
+            allowed = self.answer_keys.authorized(request.headers.get_all, query_key=key)
+        else:
+            allowed = self._secret is None  # nothing to mint: authenticate=False
+        if not allowed:
+            logger.warning("refused a %s answer webhook request (signature or key)", self.provider)
+            return connection.respond(HTTPStatus.FORBIDDEN, "Forbidden\n")
+        try:
+            call_id = (
+                call_id_from_query(self.provider, type(self._serializer), query)
+                if self._secret is not None
+                else None
+            )
+            url = stream_url_for(self.public_url, request.headers.get("Host"))
+        except ValueError as exc:
+            return connection.respond(HTTPStatus.BAD_REQUEST, f"{exc}\n")
+        content_type, body = answer_markup(
+            self._serializer, url, secret=self._secret, call_id=call_id,
+            vonage_authorization=self.verifier is not None and self.provider == "vonage",
+        )  # fmt: skip
+        logger.info("answered %s call %s with its media stream", self.provider, call_id or "?")
+        response = connection.respond(HTTPStatus.OK, "")
+        response.body = body.encode()
+        del response.headers["Content-Type"]
+        del response.headers["Content-Length"]
+        response.headers["Content-Type"] = f"{content_type}; charset=utf-8"
+        response.headers["Content-Length"] = str(len(response.body))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
 
 async def serve_telephony(
     session_factory: SessionFactory,
@@ -607,37 +727,6 @@ async def serve_telephony(
     )
     await server.start()
     return server
-
-
-def _twilio_signature_check(
-    serializer: TelephonySerializer, public_url: str, user: Callable[..., Any] | None
-) -> Callable[..., Any]:
-    """``process_request`` that refuses WebSocket upgrades without a valid Twilio signature."""
-    auth_token = getattr(serializer, "auth_token", None)
-    if serializer.provider != "twilio" or not auth_token:
-        raise ConfigurationError(
-            "public_url checks X-Twilio-Signature: it needs provider='twilio' and the Twilio "
-            "auth_token (serializer_options or TWILIO_AUTH_TOKEN)"
-        )
-    if not public_url.startswith("wss://"):
-        raise ConfigurationError(f"public_url must be the wss:// URL Twilio uses: {public_url!r}")
-    base = public_url.rstrip("/")
-
-    async def process_request(connection: ServerConnection, request: Request) -> Any:
-        if request.headers.get("Upgrade", "").lower() == "websocket":
-            signature = request.headers.get("X-Twilio-Signature")
-            path = request.path
-            # Twilio's docs: a WebSocket handshake may be signed with a trailing "/"
-            urls = {base + path, base + path.rstrip("/"), base + path.rstrip("/") + "/"}
-            if not any(validate_twilio_signature(auth_token, u, None, signature) for u in urls):
-                logger.warning("refused a media stream without a valid X-Twilio-Signature")
-                return connection.respond(HTTPStatus.FORBIDDEN, "Forbidden\n")
-        if user is None:
-            return None
-        result = user(connection, request)
-        return await result if inspect.isawaitable(result) else result
-
-    return process_request
 
 
 async def _close(websocket: ServerConnection, code: int, reason: str) -> None:

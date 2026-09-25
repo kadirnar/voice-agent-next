@@ -80,6 +80,42 @@ The CLI does the same: `van run --transport twilio` (and `van serve -p twilio` f
 calls); both read the secret from `VAN_TELEPHONY_SECRET`. The transport types are `twilio`,
 `telnyx`, `vonage`, `plivo`, and `telephony` (which takes a `provider` option).
 
+## `van serve`: the answer webhook included
+
+`van serve -p twilio` (or `telnyx`, `vonage`, `plivo`) serves the media stream **and** the
+voice webhook that answers the call, on the same port:
+
+```bash
+export TWILIO_AUTH_TOKEN=...            # Twilio: checks X-Twilio-Signature
+van serve -p twilio --config agent.yaml --host 0.0.0.0 --port 8765 \
+    --public-url wss://agent.example.com
+# answer webhook (HTTP GET): https://agent.example.com/answer
+```
+
+Set the number's voice webhook to `https://<public host>/answer` with **HTTP GET** (the
+server shares its port with the WebSocket, which only takes `GET` requests). For every
+call, `GET /answer` returns the provider's markup (TwiML, TeXML, an NCCO or Plivo XML)
+with the media-stream URL `wss://<public host>/` and the call's stream token, so the
+stream that follows is accepted. The stream secret comes from `--stream-secret` or
+`VAN_TELEPHONY_SECRET`; without one, `van serve` generates a secret for the run (then only
+its own webhook can issue tokens).
+
+The webhook issues tokens, so it is always authenticated:
+
+| Provider | How `/answer` and the media stream are checked |
+| --- | --- |
+| Twilio | `--public-url` plus `TWILIO_AUTH_TOKEN`: `X-Twilio-Signature` on the webhook and the WebSocket upgrade. |
+| Plivo | `--public-url` plus `PLIVO_AUTH_TOKEN` (and `PLIVO_AUTH_ID`): `X-Plivo-Signature-V3` on the webhook and the upgrade. |
+| Vonage | `--vonage-signature-secret` (or `VONAGE_SIGNATURE_SECRET`, your account's signature secret): the `Authorization: Bearer` JWT on the webhook and the upgrade. The served NCCO asks Vonage to sign the upgrade (`"authorization": {"type": "vonage"}`). Enable signed webhooks on the application. |
+| Telnyx, or no signature check | An API key in the webhook URL: `https://<public host>/answer?key=<key>`, or `Authorization: Bearer`/`Basic` (`https://user:<key>@host/answer`). `--api-key` sets it; otherwise `van serve` generates one and prints the URL. |
+
+Without `--public-url`, the stream URL in the markup is built from the webhook request's
+`Host` header: put the server behind a TLS proxy or tunnel that forwards it. The call ID
+comes from the webhook's query string (`CallSid`, `CallControlId`, `uuid` or `CallUUID`)
+and must have the provider's format. The media stream is still authenticated by the
+token. In Python, the same is `TelephonyServer(..., answer_path="/answer")` with
+`public_url`, `signature_secret` or `api_keys`.
+
 ## Provider setup
 
 Each provider needs a voice webhook that returns call-control markup pointing at your
@@ -120,8 +156,8 @@ Twilio also signs the WebSocket upgrade of the media stream with `X-Twilio-Signa
 (HMAC-SHA1 of the `wss://` URL with your auth token). Pass
 `public_url="wss://agent.example.com"` (the URL from the TwiML, without the path) to
 `TelephonyServer` together with the Twilio `auth_token`, and upgrades without a valid
-signature get HTTP 403. The stream URL cannot carry a query string, so the token travels
-as a `<Parameter>`.
+signature get HTTP 403 (`van serve --public-url`). The stream URL cannot carry a query
+string, so the token travels as a `<Parameter>`.
 
 Set the phone number's "A call comes in" webhook to a URL that returns this TwiML with
 `Content-Type: text/xml`. `<Connect><Stream>` makes the stream bidirectional. Twilio
@@ -196,6 +232,15 @@ ncco = vonage_ncco(
 Vonage does not identify the call in `websocket:connected`, so the helper adds the `uuid`
 header that the token is bound to.
 
+To have Vonage sign the WebSocket upgrade, pass `authorization={"type": "vonage"}`: the
+endpoint then carries that `authorization` object, and Vonage sends
+`Authorization: Bearer <JWT>` in the opening handshake, the same HS256 JWT as its signed
+webhooks, signed with your account's signature secret. Give that secret to
+`TelephonyServer(signature_secret=...)` (`van serve --vonage-signature-secret`): upgrades
+without a valid JWT, issued at most 5 minutes earlier (`iat`), get HTTP 403.
+`verify_vonage_jwt(token, secret)` checks one yourself, for example in your answer
+webhook. The `payload_hash` claim is not checked: upgrades and `GET` webhooks have no body.
+
 Return the NCCO from your answer webhook. Audio is 16-bit little-endian PCM in binary
 frames. Vonage recommends 16 kHz for speech recognition. The transport sends whole 20 ms
 frames, padding the last frame of a response with silence. The `headers` arrive in
@@ -219,6 +264,15 @@ xml = plivo_stream_xml(
 
 Plivo only allows letters and digits in `extraHeaders`; the token is hexadecimal.
 
+Plivo signs every request, the WebSocket upgrade of the stream included, with
+`X-Plivo-Signature-V3` and `X-Plivo-Signature-V3-Nonce`: base64 HMAC-SHA256 of the URL
+(query parameters sorted), a `.` and the nonce, keyed with your auth token. Pass
+`public_url="wss://agent.example.com"` and the Plivo `auth_token` to `TelephonyServer`
+(`van serve --public-url` with `PLIVO_AUTH_TOKEN`), and upgrades without a valid signature
+get HTTP 403. The header may list several signatures (one per active auth token); one
+match is enough. `validate_plivo_signature_v3(auth_token, url, nonce, signature)` checks
+a `GET` webhook the same way.
+
 `contentType` is `audio/x-mulaw;rate=8000` (the default), `audio/x-l16;rate=8000` or
 `audio/x-l16;rate=16000`. The `playAudio` messages use the same format.
 `keepCallAlive="true"` keeps the call up while the stream runs. `extraHeaders` values
@@ -239,11 +293,15 @@ with your credentials. So:
   `call.custom_parameters`. `authenticate=False` accepts any client (local development
   only).
 * **Webhook signatures.** Check that the webhook request comes from the provider before
-  you issue a token: `validate_twilio_signature` implements Twilio's
-  `X-Twilio-Signature`. See the provider's docs for
-  [Telnyx](https://developers.telnyx.com/docs/messaging/webhooks/receiving-webhooks),
-  [Vonage](https://developer.vonage.com/en/getting-started/concepts/webhooks) and
-  [Plivo](https://www.plivo.com/docs/voice/concepts/signature-validation) signatures.
+  you issue a token: `validate_twilio_signature` (Twilio's `X-Twilio-Signature`),
+  `validate_plivo_signature_v3` (Plivo's `X-Plivo-Signature-V3`) and `verify_vonage_jwt`
+  (Vonage's signed-webhook JWT). The answer webhook of `van serve` does this (see
+  [above](#van-serve-the-answer-webhook-included)). Telnyx signs webhooks with Ed25519
+  ([docs](https://developers.telnyx.com/docs/messaging/webhooks/receiving-webhooks)),
+  which is not implemented here: protect a Telnyx webhook with an API key.
+* **Carrier signatures on the media stream.** With `public_url` (Twilio, Plivo) or
+  `signature_secret` (Vonage), `TelephonyServer` also checks the carrier's signature on
+  every WebSocket upgrade (HTTP 403 otherwise), before any message is read.
 * **Call IDs are validated.** A start message is refused unless its call ID has the
   provider's format: Twilio `CA` plus 32 hex digits, a Telnyx `v<n>:` call control ID
   (letters, digits, `-`, `_`), a Plivo UUID. The IDs are also percent-encoded in the
@@ -261,9 +319,17 @@ References (checked 2026-09-25):
 [Twilio Call resource](https://www.twilio.com/docs/voice/api/call-resource),
 [Telnyx streaming_start](https://developers.telnyx.com/api-reference/call-commands/streaming-start),
 [Telnyx hangup](https://developers.telnyx.com/api-reference/call-commands/hangup-call),
-[Vonage WebSockets](https://developer.vonage.com/en/voice/voice-api/concepts/websockets),
+[Vonage WebSockets](https://developer.vonage.com/en/voice/voice-api/concepts/websockets)
+(the `authorization` object and the handshake JWT),
+[Vonage NCCO `websocket` endpoint](https://developer.vonage.com/en/voice/voice-api/ncco-reference),
+[Vonage signed webhooks](https://developer.vonage.com/en/voice/voice-api/webhook-reference#signed-webhooks)
+(HS256 JWT with the signature secret; `iat`, `payload_hash`),
 [Plivo audio streaming XML](https://www.plivo.com/docs/voice/xml/audio-streaming),
-[Plivo stream protocol](https://www.plivo.com/docs/voice-agents/audio-streaming/concepts/audio-streaming-reference).
+[Plivo stream protocol](https://www.plivo.com/docs/voice-agents/audio-streaming/concepts/audio-streaming-reference),
+[Plivo audio streaming guide](https://www.plivo.com/docs/voice-agents/audio-streaming/concepts/audio-streaming-guide)
+(V3 signature on the WebSocket upgrade),
+[Plivo SDK `signature_v3.py`](https://github.com/plivo/plivo-python/blob/master/plivo/utils/signature_v3.py)
+(the algorithm; the tests use vectors computed with it).
 
 ## What the transport does
 
@@ -316,8 +382,11 @@ Credentials come from the serializer options or from the environment:
 | `**serializer_options` | | `account_sid`/`auth_token` (Twilio), `api_key`/`outbound_encoding`/`outbound_sample_rate`/`l16_byteorder` (Telnyx), `sample_rate` (Vonage), `auth_id`/`auth_token`/`l16_byteorder` (Plivo), `api_base` |
 
 `TelephonyServer` / `serve_telephony` take `provider`, `stream_secret`, `authenticate`,
-`public_url` (Twilio handshake signatures), `serializer_options`, `transport_options`,
-`max_sessions`, and the `websockets` serve options (`ssl`, `process_request`, and so on).
+`public_url` (Twilio and Plivo signatures; the stream URL of the served markup),
+`signature_secret` (Vonage JWTs), `answer_path` (serve the answer webhook, e.g.
+`"/answer"`), `api_keys` (authorize the answer webhook without a carrier signature),
+`serializer_options`, `transport_options`, `max_sessions`, and the `websockets` serve
+options (`ssl`, `process_request`, and so on).
 
 ## Latency notes
 

@@ -7,7 +7,7 @@
 | `docker/Dockerfile` | The **CPU image** (target `cpu`, the default) and the **CUDA image** (target `cuda`). Both run [`van serve`](serving.md). |
 | `docker/compose.yaml` | A **fully local stack**: Ollama, `van serve` over WebSocket and WebRTC with the `local-cpu` stack, and the browser demos |
 | `docker/compose.gpu.yaml` | The **GPU variant** of that stack (an override file): the CUDA image, the `local-gpu` stack, Ollama on the GPU |
-| `docker/compose.telephony.yaml` | A **phone agent** on Twilio Media Streams, with a TwiML webhook and an optional tunnel |
+| `docker/compose.telephony.yaml` | A **phone agent** on Twilio Media Streams, with the TwiML answer webhook and an optional tunnel |
 | `docker/config/*.yaml` | The agent configs the stacks mount at `/config/agent.yaml` |
 
 CI (`.github/workflows/docker.yml`) builds both images on every pull request that touches
@@ -47,6 +47,12 @@ The agents accept browser pages from `http://localhost:*` only
 ([Origin allow-list](serving.md#who-may-connect-the-origin-allow-list)). To open the demos
 from another host name (an `https://` name on your LAN, for example), set
 `VAN_ALLOWED_ORIGINS=https://agent.example.lan` (space-separated for several).
+
+The demo pages send no API key, so both agents run with `--insecure`: anyone who can reach
+the `web` port (all interfaces, `WEB_PORT`) or `127.0.0.1:8765` can start a session, while
+the Origin allow-list keeps other websites out of your browser. That suits a local demo.
+Beyond it, drop `--insecure` and set `VAN_SERVER_API_KEY`; clients must then send the key
+([API keys](serving.md#api-keys)), or publish `web` on `127.0.0.1` only.
 
 ### Change the agent
 
@@ -158,8 +164,16 @@ docker run --rm --gpus all $IMAGE:latest-cuda doctor         # is the GPU used?
 The entrypoint binds `0.0.0.0` inside the container, so the
 [secure defaults](serving.md#listening-beyond-this-machine) apply: `-p openai-realtime`
 needs `--api-key` or `VAN_SERVER_API_KEY` (or `--insecure` behind an authenticating proxy),
-and the other protocols log a warning. Browser pages from other origins than `localhost`
-need `--allowed-origin` (or `VAN_ALLOWED_ORIGINS`, space-separated).
+and `websocket` and `webrtc` require an API key: `VAN_SERVER_API_KEY`, or one generated at
+start and printed in `docker logs`. Clients send it as `Authorization: Bearer <key>`
+([API keys](serving.md#api-keys)); `/health`, `/ready` and `/metrics` stay open for the
+healthcheck and your monitoring. Browser pages from other origins than `localhost` need
+`--allowed-origin` (or `VAN_ALLOWED_ORIGINS`, space-separated).
+
+```bash
+docker run --rm -p 127.0.0.1:8765:8765 -e VAN_SERVER_API_KEY="$KEY" $IMAGE
+python examples/websocket_agent.py client --api-key "$KEY"
+```
 
 `van serve` drains on `SIGTERM` ([graceful drain](serving.md#graceful-drain)). Give
 `docker stop -t` (or the Kubernetes `terminationGracePeriodSeconds`) more time than
@@ -230,19 +244,26 @@ docker compose -f docker/compose.telephony.yaml --profile tunnel up --build
 docker compose -f docker/compose.telephony.yaml logs tunnel   # prints https://<name>.trycloudflare.com
 ```
 
-The stack runs `van serve -p twilio` behind nginx. nginx serves two routes:
+The stack runs `van serve -p twilio` behind nginx, which passes three routes to it
+unchanged ([the answer webhook](../transports/telephony.md#van-serve-the-answer-webhook-included)):
 
-* `/twiml` answers the call with `<Connect><Stream url="wss://HOST/stream">`.
-* `/stream` proxies the media-stream WebSocket to the agent.
+* `GET /answer` answers the call with `<Connect><Stream url="wss://HOST/">` and the call's
+  stream token;
+* `/` is the media-stream WebSocket;
+* `/health` is the liveness probe.
 
 The `tunnel` profile starts a free Cloudflare quick tunnel that gives the stack a public
-HTTPS URL. In the Twilio console, set your number's **A call comes in** webhook to
-`https://<public host>/twiml`, then call the number.
+HTTPS URL. Its host name changes on every start, so the agent cannot check Twilio's
+signature against it: the webhook needs the API key. Set `VAN_SERVER_API_KEY` (or copy
+the generated one from `docker compose -f docker/compose.telephony.yaml logs agent`). In
+the Twilio console, set your number's **A call comes in** webhook to
+`https://<public host>/answer?key=<key>` with method **HTTP GET**, then call the number.
 
-Without the tunnel, put your own TLS proxy in front of port 8080 and set
-`PUBLIC_HOST=voice.example.com`. The TwiML then points at `wss://voice.example.com/stream`.
-If `PUBLIC_HOST` is empty, the TwiML uses the `Host` header that the tunnel or proxy
-forwards.
+With your own TLS proxy in front of port 8080, set `PUBLIC_URL=wss://voice.example.com`
+and the webhook to `https://voice.example.com/answer` (GET). The agent then checks
+`X-Twilio-Signature` on the webhook and on every media stream with `TWILIO_AUTH_TOKEN`,
+and no key is needed. The stream secret is generated per start unless
+`VAN_TELEPHONY_SECRET` is set.
 
 The credentials let the agent end calls through Twilio's REST API. The agent's `/ready`
 and `/metrics` stay on `127.0.0.1:8765`, off the public URL. The agent config is
