@@ -15,7 +15,14 @@ from typing import Any, Generic, TypeVar
 
 from .log import logger
 
-__all__ = ["BackgroundTasks", "Chan", "ChanClosed", "cancel_and_wait", "merge_async_iterators"]
+__all__ = [
+    "BackgroundTasks",
+    "Chan",
+    "ChanClosed",
+    "cancel_and_wait",
+    "closed_outside",
+    "merge_async_iterators",
+]
 
 T = TypeVar("T")
 
@@ -109,6 +116,27 @@ class Chan(Generic[T]):
             return await self.recv()
         except ChanClosed:
             raise StopAsyncIteration from None
+
+
+def closed_outside(task: asyncio.Task[Any] | None) -> bool:
+    """``True`` while ``task``'s coroutine is being closed from outside the task.
+
+    That only happens when an object owning a still-pending task was dropped without
+    being closed: the unreachable task is garbage-collected and its coroutine is closed
+    wherever the collector happens to run (e.g. in the middle of another request).
+    Nothing may be reported from there — no metrics, no error logs — because it would
+    land at a random time, possibly in another request's listeners.
+
+    ``False`` everywhere else: inside the task, in another task while the task's
+    coroutine is suspended (e.g. a child task the coroutine spawned), and for ``None``
+    (the task is still being created, e.g. by an eager task factory).
+    """
+    if task is None or not getattr(task.get_coro(), "cr_running", False):
+        return False  # the coroutine is not executing: this is not its finalization
+    try:
+        return asyncio.current_task() is not task
+    except RuntimeError:  # no running loop: collected after the loop is gone
+        return True
 
 
 async def cancel_and_wait(*tasks: asyncio.Task[Any] | None) -> None:

@@ -24,7 +24,7 @@ from .audio.frame import AudioFrame
 from .chat import ChatContext, FunctionCall
 from .metrics import LLMMetrics
 from .tools import FunctionTool
-from .utils.aio import Chan, ChanClosed, cancel_and_wait
+from .utils.aio import Chan, ChanClosed, cancel_and_wait, closed_outside
 from .utils.clock import now
 from .utils.emitter import EventEmitter
 from .utils.ids import new_id
@@ -215,11 +215,21 @@ class LLMStream(ABC):
             self._cancelled = True
             raise
         except Exception as exc:
-            logger.exception("%s failed", type(self).__name__)
+            if not self._collected():
+                logger.exception("%s failed", type(self).__name__)
             self._error = exc
         finally:
             self._events.close()
-            self._emit_metrics()
+            if not self._collected():
+                self._emit_metrics()
+
+    def _collected(self) -> bool:
+        """``True`` while a stream dropped without ``aclose()`` is garbage-collected.
+
+        Its coroutine is then closed from outside its task, at a random time: nothing
+        is reported from there (see :func:`~voice_agent_next.utils.aio.closed_outside`).
+        """
+        return closed_outside(getattr(self, "_task", None))
 
     def _emit_metrics(self) -> None:
         end = now()
