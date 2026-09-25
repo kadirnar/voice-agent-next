@@ -135,6 +135,7 @@ nav:
           - OpenAI Realtime (+ compatible): providers/openai-realtime.md
           - OpenAI GPT-Live (full-duplex, delegation): providers/openai-live.md
           - Gemini Live: providers/gemini-live.md
+          - Amazon Nova 2 Sonic: providers/aws-nova-sonic.md
           - Moshi and PersonaPlex: providers/moshi.md
           - LFM2.5-Audio (omni, local): providers/liquid-audio.md
       - Cloud:
