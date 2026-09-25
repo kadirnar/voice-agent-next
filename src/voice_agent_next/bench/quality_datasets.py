@@ -35,7 +35,7 @@ import io
 import json
 import os
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -344,7 +344,9 @@ def _parse_choices_field(value: Any) -> dict[str, str] | None:
     raise ValueError(f"choices must be a mapping or a list, got {type(value).__name__}")
 
 
-def load_quality_manifest(path: str | os.PathLike[str], *, name: str | None = None) -> QualityDataset:
+def load_quality_manifest(
+    path: str | os.PathLike[str], *, name: str | None = None
+) -> QualityDataset:
     """Load spoken questions from a JSONL/JSON/TSV/CSV manifest (see the module docstring)."""
     manifest = Path(path)
     if not manifest.is_file():
@@ -421,7 +423,3 @@ def load_quality_dataset(
         "or a manifest file (.jsonl/.json/.tsv/.csv)"
     )
 
-
-def with_items(dataset: QualityDataset, items: list[QualityItem]) -> QualityDataset:
-    """A copy of ``dataset`` with other items (same name and provenance)."""
-    return replace(dataset, items=items, source=dict(dataset.source))
