@@ -710,7 +710,7 @@ def test_find_executable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
 
 
 FAKE_SERVER = """
-import http.server, sys, time
+import http.server, socketserver, sys, time
 port = int(sys.argv[sys.argv.index("--port") + 1])
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -723,7 +723,11 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 time.sleep(0.3)  # "loading the model"
 print("key=" + str(__import__("os").environ.get("NEMO_SPEECH_HTTP_API_KEY")), flush=True)
-http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+class S(http.server.HTTPServer):
+    def server_bind(self):  # skip HTTPServer's getfqdn(): it can take 30 s on macOS
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "127.0.0.1", port
+S(("127.0.0.1", port), H).serve_forever()
 """
 
 
