@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -16,6 +17,12 @@ import numpy as np
 import pytest
 
 from voice_agent_next.providers import _mlx
+
+
+def hf(repo: str) -> str:
+    """Where the fake ``snapshot_download`` puts ``repo``, as the provider sees it."""
+    return str(Path(f"/hf/{repo}"))
+
 
 WORDS = ("Hello", "world,", "this", "is", "a", "streaming", "test.")
 

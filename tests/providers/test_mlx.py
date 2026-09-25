@@ -30,7 +30,7 @@ from voice_agent_next.providers.mock import synth_speech
 from voice_agent_next.registry import get_provider
 from voice_agent_next.stt import StreamAdapter, STTEvent, STTEventType
 
-from .mlx_fakes import MLXFakes
+from .mlx_fakes import MLXFakes, hf
 
 
 def chunks(frame: AudioFrame, step: float = 0.02) -> list[AudioFrame]:
@@ -118,7 +118,7 @@ async def test_batch_transcription(mlx_fakes: MLXFakes) -> None:
             },
         )
     ]
-    assert mlx_fakes.parakeet_loads == [("/hf/mlx-community/parakeet-tdt-0.6b-v3", "bfloat16")]
+    assert mlx_fakes.parakeet_loads == [(hf("mlx-community/parakeet-tdt-0.6b-v3"), "bfloat16")]
     assert mlx_fakes.generated == [8000]  # warm-up: half a second of silence
 
     # 48 kHz stereo in: resampled to 16 kHz mono by STT.transcribe()
@@ -338,7 +338,7 @@ async def test_whisper_transcribes(mlx_fakes: MLXFakes) -> None:
     assert stt.language == "en" and stt.capabilities.language_detection
     await stt.warmup()
     assert mlx_fakes.snapshots[0][0] == "mlx-community/whisper-tiny"
-    assert mlx_fakes.whisper_loads == [("/hf/mlx-community/whisper-tiny", "float16")]
+    assert mlx_fakes.whisper_loads == [(hf("mlx-community/whisper-tiny"), "float16")]
     result = await stt.transcribe(speech(1.0))
     assert result.text == "Hello there." and result.language == "en"
     assert [w.word for w in result.words or []] == ["Hello", "there."]
@@ -347,7 +347,7 @@ async def test_whisper_transcribes(mlx_fakes: MLXFakes) -> None:
     assert call["language"] == "en" and call["temperature"] == 0.0
     assert call["condition_on_previous_text"] is False and call["fp16"] is True
     assert isinstance(call["audio"], np.ndarray) and call["audio"].dtype == np.float32
-    assert mlx_fakes.holder.model_path == "/hf/mlx-community/whisper-tiny"
+    assert mlx_fakes.holder.model_path == hf("mlx-community/whisper-tiny")
     assert mlx_fakes.threads == {"mlx-test_0"}
 
 
@@ -359,9 +359,9 @@ async def test_whisper_models_do_not_evict_each_other(mlx_fakes: MLXFakes) -> No
     await base.transcribe(speech(0.5))
     await tiny.transcribe(speech(0.5))
     assert len(mlx_fakes.whisper_loads) == 2  # each instance loads its model once
-    assert mlx_fakes.whisper_loads[1] == ("/hf/mlx-community/whisper-base.en-mlx", "float32")
+    assert mlx_fakes.whisper_loads[1] == (hf("mlx-community/whisper-base.en-mlx"), "float32")
     assert mlx_fakes.whisper_calls[-2]["x"] == 1
-    assert mlx_fakes.whisper_calls[-1]["path_or_hf_repo"] == "/hf/mlx-community/whisper-tiny"
+    assert mlx_fakes.whisper_calls[-1]["path_or_hf_repo"] == hf("mlx-community/whisper-tiny")
 
 
 async def test_streaming_steps_pace_themselves(mlx_fakes: MLXFakes) -> None:
