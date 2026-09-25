@@ -7,6 +7,7 @@ Timing assertions are generous: CI runners are slow and Windows timers are coars
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import re
 import time
@@ -268,6 +269,11 @@ TINY = OverheadOptions(
     capacity_max_sessions=2,
     capacity_turns=1,
     capacity_stagger=0.1,
+    # the capacity thresholds are wall-clock: one stall of a shared (macOS) runner fails
+    # even a single tiny session. Out of reach here, so that the sweep is deterministic;
+    # test_capacity_step_fails_on_its_thresholds covers the failing side
+    max_overhead_p95_ms=1e6,
+    max_lag_p99_ms=1e6,
     micro_repeats=2,
     micro_min_time=0.001,
     micro_only=("energy_vad", "event_emit"),
@@ -291,7 +297,7 @@ def smoke(tmp_path_factory: pytest.TempPathFactory) -> RunResults:
             TINY, scenario=TINY_SCENARIO, out_dir=out, run_id="tiny", progress=lines.append
         )
     )
-    assert any(line.startswith("capacity: 2 session(s)") for line in lines)
+    assert any(line.startswith("capacity: 2 session(s)") for line in lines), lines
     return results
 
 
@@ -315,15 +321,28 @@ def test_smoke_run_measures_the_framework_overhead(smoke: RunResults) -> None:
     assert smoke.summary.rates["e2e_missed_rate"] == 0.0
     capacity = extra["capacity"]
     steps = capacity["steps"]
-    assert [s["sessions"] for s in steps] == [1, 2] and steps[0]["passed"]
+    assert [s["sessions"] for s in steps] == [1, 2]
     for step in steps:  # concurrent sessions work: none failed, every turn was answered
-        assert step["missed"] == 0 and all("ms >" in r for r in step["reasons"]), step
-    # two tiny sessions stay far below the 50 ms thresholds, but those are wall-clock: a
-    # stall of a shared (macOS) runner during the short step may exceed one of them
-    assert capacity["sessions_per_core"] == (2 if steps[1]["passed"] else 1)
-    assert capacity["limit_found"] is not steps[1]["passed"]
+        assert step["missed"] == 0 and step["errors"] == 0 and step["passed"], step
+        assert step["turns_measured"] == step["sessions"] and step["cpu_pct"] > 0
+    assert capacity["sessions_per_core"] == 2 and capacity["limit_found"] is False
     assert set(m) >= {"micro.energy_vad_us", "micro.event_emit_us"}
     assert extra["sections"] == ["micro", "e2e", "flush", "capacity"]
+
+
+def test_capacity_step_fails_on_its_thresholds(tmp_path: Path) -> None:
+    # an overhead budget no session can meet (any overhead exceeds -1e6 ms): the sweep
+    # stops at one session and reports why
+    options = dataclasses.replace(TINY, sections=("capacity",), max_overhead_p95_ms=-1e6)
+    results = asyncio.run(
+        run_overhead_benchmark(options, scenario=TINY_SCENARIO, out_dir=tmp_path, run_id="cap")
+    )
+    capacity = results.summary.extra["capacity"]
+    [step] = capacity["steps"]
+    assert step["sessions"] == 1 and not step["passed"] and step["missed"] == 0
+    assert step["reasons"] and step["reasons"][0].startswith("overhead p95 ")
+    assert step["reasons"][0].endswith("ms > -1e+06 ms")
+    assert capacity["sessions_per_core"] == 0 and capacity["limit_found"] is True
 
 
 def test_smoke_run_round_trips_through_the_result_files(smoke: RunResults) -> None:
