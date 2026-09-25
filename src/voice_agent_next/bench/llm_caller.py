@@ -15,7 +15,12 @@ still runs in real time over the T1 harness.
   servers, which accept it); with a deterministic agent a call is reproducible as far as
   the caller model is.
 * **End** — the LLM answers :data:`END_TOKEN` to hang up; the call also ends after
-  ``max_turns`` lines (default: the script's length + 3).
+  ``max_turns`` lines (default: the script's length + 3), when it would repeat its
+  previous line word for word (it has nothing left to say), on an error or on an empty
+  reply (both recorded in the item's errors).
+* **Reasoning models** think before every line (qwen3.5:4b on Ollama: ~14 s, while the
+  call waits in silence). Turn reasoning off in the spec, e.g.
+  ``llm:{provider: ollama/qwen3.5:4b, extra: {reasoning_effort: none}}`` (~0.1-0.3 s).
 
 The scripted caller stays the default (``--caller scripted``); ``--caller llm:<spec>``
 selects this one.
@@ -62,14 +67,16 @@ class LLMCallerOptions:
     temperature: float = 0.0
     seed: int | None = 0
     """Sent as ``seed`` to OpenAI-compatible servers (others ignore it)."""
-    max_tokens: int = 120
+    max_tokens: int | None = None
+    """Cap on the reply (default: none — a reasoning model spends its thinking tokens
+    first; turn reasoning off in the spec instead, see the module docstring)."""
 
     def validate(self) -> None:
         if self.max_turns is not None and self.max_turns < 1:
             raise ValueError("caller max_turns must be >= 1")
         if self.temperature < 0:
             raise ValueError("caller temperature must be >= 0")
-        if self.max_tokens < 8:
+        if self.max_tokens is not None and self.max_tokens < 8:
             raise ValueError("caller max_tokens must be >= 8")
 
 
@@ -104,9 +111,9 @@ def caller_prompt(suite: ToolSuite, scenario: ToolScenario) -> str:
         "your own words, and react to what the assistant just said: answer its "
         "questions, give a detail when it is needed, confirm when it asks you to. Say "
         "numbers the way the script says them. Never play the assistant and never "
-        "describe actions; write only the words you say. When your goal is done (or "
-        "cannot be done) and you have said goodbye, reply with exactly "
-        f"{END_TOKEN} to hang up.",
+        "describe actions; write only the words you say. Never repeat a line you already "
+        "said. When your goal is done (or cannot be done), say goodbye; once you have "
+        f"said goodbye, reply with exactly {END_TOKEN} to hang up.",
     ]
     return "\n\n".join(parts)
 
@@ -188,9 +195,16 @@ class LLMCaller:
         said = _clean(text.replace(END_TOKEN, " "))
         if END_TOKEN in text:
             self.ended = True
+        previous = next((ln.caller for ln in reversed(self.lines) if ln.caller), None)
+        if said and previous is not None and said.lower() == previous.lower():
+            # saying the same line again: the caller has nothing left to say
+            said, self.ended = "", True
         if not said:
+            if not self.ended:
+                self.errors.append(
+                    "caller LLM: empty reply (a reasoning model that used up its tokens?)"
+                )
             self.lines.append(CallerLine(reply, None))
-            self.ended = True
             return None
         self._ctx.add_message("assistant", said)
         self.lines.append(CallerLine(reply, said))

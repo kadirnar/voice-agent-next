@@ -120,6 +120,19 @@ async def test_a_line_with_the_end_token_is_said_then_the_call_ends() -> None:
     assert await caller.next_line("Bye!") is None
 
 
+async def test_an_empty_reply_ends_the_call_with_an_error() -> None:
+    caller, _ = _caller([""])  # e.g. a reasoning model that spent max_tokens thinking
+    assert await caller.next_line("") is None
+    assert not caller.ended and "empty reply" in caller.errors[0]
+
+
+async def test_repeating_the_previous_line_hangs_up() -> None:
+    caller, _ = _caller(["That's all, thanks.", "that's all, thanks."])
+    assert await caller.next_line("") == "That's all, thanks."
+    assert await caller.next_line("Okay.") is None
+    assert caller.ended and caller.errors == []
+
+
 async def test_max_turns_limits_the_call() -> None:
     caller, _ = _caller(None, max_turns=2)  # MockLLM echoes the last message
     assert await caller.next_line("") is not None
