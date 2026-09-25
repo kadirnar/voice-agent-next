@@ -61,9 +61,9 @@ EXPECTED: dict[str, list[str]] = {
     ],
     "06_telephony_twilio.py": [
         "<Connect><Stream url=",
-        "[call CA0] agent: Thanks for calling the bike shop!",
-        "[call CA0] user : Hi, is the shop open today?",
-        "[call CA0] agent: Yes, until 6 pm.",
+        "[call CA00000000000000000000000000000000] agent: Thanks for calling the bike shop!",
+        "[call CA00000000000000000000000000000000] user : Hi, is the shop open today?",
+        "[call CA00000000000000000000000000000000] agent: Yes, until 6 pm.",
         "the caller heard",
     ],
     "07_realtime_server.py": [

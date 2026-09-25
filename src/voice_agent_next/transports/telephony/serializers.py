@@ -323,9 +323,9 @@ def _credential(value: str | None, env: str) -> str | None:
     return value or os.environ.get(env) or None
 
 
-def _segment(value: str) -> str:
-    """One URL path segment: ``/``, ``..``, ``?``, ``#`` and ``%`` cannot escape it."""
-    return quote(value, safe="")
+def _segment(value: str, safe: str = "") -> str:
+    """One URL path segment: ``/``, ``?``, ``#`` and ``%`` cannot escape it."""
+    return quote(value, safe=safe)
 
 
 # Documented identifier formats (see the protocol references above and the docs page).
@@ -584,7 +584,8 @@ class TelnyxSerializer(TelephonySerializer):
         assert call.call_id is not None
         return httpx.Request(
             "POST",
-            f"{self.api_base}/v2/calls/{_segment(call.call_id)}/actions/hangup",
+            # ":" is a valid path character (RFC 3986) and appears verbatim in Telnyx's docs
+            f"{self.api_base}/v2/calls/{_segment(call.call_id, safe=':')}/actions/hangup",
             json={},
             headers={"Authorization": f"Bearer {self.api_key}"},
         )

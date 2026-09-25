@@ -466,8 +466,10 @@ async def test_sigterm_drains_then_exits() -> None:
     await asyncio.wait_for(task, 10)  # it ended: the process stops
 
 
-async def test_telephony_protocols_serve_ops_routes() -> None:
-    from voice_agent_next.transports.telephony import TelephonyServer
+async def test_telephony_protocols_serve_ops_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from voice_agent_next.transports.telephony import SECRET_ENV, TelephonyServer
+
+    monkeypatch.setenv(SECRET_ENV, "stream-secret")  # media streams are authenticated
 
     for provider in serving.TELEPHONY_PROTOCOLS:
         served = build_served(SourceOptions(), options(provider, max_sessions=3))
