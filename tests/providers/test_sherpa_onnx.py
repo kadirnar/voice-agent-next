@@ -1165,3 +1165,20 @@ async def test_real_vad_finds_the_phrases(jfk: AudioFrame) -> None:
     events = [ev for frame in chunks(jfk) for ev in stream.push_audio(frame)]
     starts = [e for e in events if e.type == VADEventType.START_OF_SPEECH]
     assert 3 <= len(starts) <= 5
+
+
+async def test_tts_normalization_language_follows_the_model_and_voice(
+    backend: FakeBackend, downloads: list[tuple[str, str | None]]
+) -> None:
+    backend.num_speakers = 54
+    piper = SherpaOnnxTTS()
+    assert piper.text_language(None) == "en"
+    await piper.synthesize("It costs $5.").collect()
+    assert backend.generate_calls[-1]["text"] == "It costs five dollars."
+    kokoro = SherpaOnnxTTS(model="kokoro-multi-lang-v1_0-int8")
+    assert kokoro.text_language("af_heart") == "en"
+    assert kokoro.text_language("ef_dora") == "es"
+    assert kokoro.text_language("26") == "en"  # bm_george
+    assert SherpaOnnxTTS(model="kokoro-multi-lang-v1_0-int8", lang="fr").text_language(None) == "fr"
+    assert SherpaOnnxTTS(normalize=False).normalizer_for() is None
+    await piper.aclose()

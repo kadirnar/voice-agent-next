@@ -42,7 +42,17 @@ from .errors import (
 from .fallback import FallbackLLM, FallbackSTT, FallbackTTS
 from .llm import LLM, ChatChunk, LLMCapabilities, LLMStream
 from .registry import create, list_providers, register_provider
-from .session import Agent, AgentSession, AgentState, SessionOptions, UserState
+from .session import (
+    Agent,
+    AgentSession,
+    AgentState,
+    Flow,
+    FlowNode,
+    Handoff,
+    SessionOptions,
+    Transition,
+    UserState,
+)
 from .stt import STT, StreamAdapter, STTCapabilities, STTEvent, STTEventType, STTStream, Transcript
 from .tools import FunctionTool, ToolContext, ToolScheduling, function_tool
 from .tts import TTS, ChunkedStream, SynthesizedAudio, SynthesizeStream, TTSCapabilities
@@ -79,9 +89,12 @@ __all__ = [
     "FallbackLLM",
     "FallbackSTT",
     "FallbackTTS",
+    "Flow",
+    "FlowNode",
     "FunctionCall",
     "FunctionCallOutput",
     "FunctionTool",
+    "Handoff",
     "ImageContent",
     "LLMCapabilities",
     "LLMStream",
@@ -102,6 +115,7 @@ __all__ = [
     "ToolContext",
     "ToolScheduling",
     "Transcript",
+    "Transition",
     "TurnDetector",
     "UserState",
     "VADEvent",

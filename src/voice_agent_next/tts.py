@@ -25,6 +25,13 @@ from .audio.silence import SilenceTrimmer
 from .metrics import TTSMetrics
 from .stt import WordTiming
 from .text.filters import tts_clean
+from .text.normalize import (
+    NormalizedText,
+    StreamNormalizer,
+    TextNormalizer,
+    WordAligner,
+    get_normalizer,
+)
 from .text.sentences import SentenceSegmenter
 from .utils.aio import Chan, ChanClosed, cancel_and_wait
 from .utils.clock import now
@@ -71,10 +78,18 @@ class _Flush:
 _FLUSH = _Flush()
 
 
+NormalizeOption = bool | str | TextNormalizer | None
+"""``TTS(normalize=...)``: ``None`` = the provider's default, ``True``/``False``, a
+language code, or a :class:`~voice_agent_next.text.normalize.TextNormalizer`."""
+
+
 class TTS(ABC, EventEmitter):
     """Base class for speech synthesizers. Emits ``"metrics"`` (:class:`TTSMetrics`)."""
 
     provider: ClassVar[str] = "unknown"
+    normalize_by_default: ClassVar[bool] = False
+    """Whether ``normalize=None`` turns spoken-form text normalization on: providers whose
+    model reads raw digits, prices or addresses badly set it."""
 
     def __init__(
         self,
@@ -86,6 +101,7 @@ class TTS(ABC, EventEmitter):
         voice: str | None = None,
         clean_text: bool = True,
         trim_silence: bool = True,
+        normalize: NormalizeOption = None,
     ) -> None:
         EventEmitter.__init__(self)
         self.model = model
@@ -97,12 +113,39 @@ class TTS(ABC, EventEmitter):
         self.trim_silence = trim_silence
         """Trim per-sentence leading/trailing silence when streaming via
         :class:`SentenceStreamAdapter` (many models pad every utterance)."""
+        self.normalize: NormalizeOption = normalize
+        """Rewrite numbers, prices, dates, e-mails, URLs... into words before synthesis
+        (:mod:`voice_agent_next.text.normalize`). Word timings and segment texts still
+        refer to the original text."""
+
+    def text_language(self, voice: str | None) -> str | None:
+        """Language of the text synthesized with ``voice`` (picks the normalizer)."""
+        return "en"
+
+    def normalizer_for(self, voice: str | None = None) -> TextNormalizer | None:
+        """The normalizer applied to text for ``voice``, or ``None``."""
+        option = self.normalize if self.normalize is not None else self.normalize_by_default
+        if option is False:
+            return None
+        if option is True:
+            return get_normalizer(self.text_language(voice or self.voice))
+        if isinstance(option, str):
+            return get_normalizer(option)
+        return option
 
     def synthesize(self, text: str, *, voice: str | None = None) -> ChunkedStream:
         """Synthesize a complete text. Iterate the result for streamed audio chunks."""
         if self.clean_text:
             text = tts_clean(text)
-        return self._synthesize(text, voice=voice or self.voice)
+        voice = voice or self.voice
+        normalizer = self.normalizer_for(voice)
+        if normalizer is not None:
+            normalized = normalizer.normalize(text)
+            if normalized.changed:
+                stream = self._synthesize(normalized.text, voice=voice)
+                stream._spoken_form(normalized)
+                return stream
+        return self._synthesize(text, voice=voice)
 
     @abstractmethod
     def _synthesize(self, text: str, *, voice: str | None) -> ChunkedStream:
@@ -110,9 +153,14 @@ class TTS(ABC, EventEmitter):
 
     def stream(self, *, voice: str | None = None) -> SynthesizeStream:
         """Open an incremental-text synthesis stream."""
+        voice = voice or self.voice
         if self.capabilities.streaming:
-            return self._create_stream(voice=voice or self.voice)
-        return SentenceStreamAdapter(self, voice=voice or self.voice)
+            stream = self._create_stream(voice=voice)
+            normalizer = self.normalizer_for(voice)
+            if normalizer is not None:
+                stream._normalize_input(normalizer)
+            return stream
+        return SentenceStreamAdapter(self, voice=voice)  # normalizes in synthesize()
 
     def _create_stream(self, *, voice: str | None) -> SynthesizeStream:
         raise NotImplementedError
@@ -148,6 +196,8 @@ class _AudioEmitter:
         self._remainder = b""
         self._error: BaseException | None = None
         self._cancelled = False
+        self._aligner: WordAligner | None = None
+        """Maps word timings on normalized text back to the original words."""
 
     def _push_audio(
         self, data: bytes | AudioFrame, *, words: list[WordTiming] | None = None
@@ -179,13 +229,21 @@ class _AudioEmitter:
     def _end_segment(self) -> None:
         """Mark the end of the current segment (emits an empty ``is_final`` chunk)."""
         empty = AudioFrame.empty(self._tts.sample_rate, self._tts.channels)
-        self._send(
-            SynthesizedAudio(empty, self._request_id, self._segment_id, True, self._segment_text)
+        words = (self._aligner.finish() or None) if self._aligner is not None else None
+        self._deliver(
+            SynthesizedAudio(
+                empty, self._request_id, self._segment_id, True, self._segment_text, words
+            )
         )
         self._segment_id = new_id("seg_")
         self._segment_text = None
 
     def _send(self, item: SynthesizedAudio) -> None:
+        if self._aligner is not None and item.words:
+            item.words = self._aligner.map(item.words) or None
+        self._deliver(item)
+
+    def _deliver(self, item: SynthesizedAudio) -> None:
         if not self._events.closed:
             self._events.send_nowait(item)
 
@@ -229,6 +287,13 @@ class ChunkedStream(_AudioEmitter, ABC):
         self._characters = len(text)
         self._segment_text = text
         self._task = asyncio.create_task(self._main(), name=f"{type(self).__name__}._main")
+
+    def _spoken_form(self, normalized: NormalizedText) -> None:
+        """``self.text`` is the spoken form of ``normalized.original``: report the original
+        as the segment text and map word timings back to it."""
+        self._segment_text = normalized.original
+        self._aligner = WordAligner()
+        self._aligner.add(normalized)
 
     @abstractmethod
     async def _run(self) -> None:
@@ -280,11 +345,18 @@ class SynthesizeStream(_AudioEmitter, ABC):
         super().__init__(tts, streamed=True)
         self.voice = voice
         self._input: Chan[str | _Flush] = Chan()
+        self._normalizer: StreamNormalizer | None = None
         self._task = asyncio.create_task(self._main(), name=f"{type(self).__name__}._main")
 
     @staticmethod
     def is_flush(item: object) -> bool:
         return item is _FLUSH
+
+    def _normalize_input(self, normalizer: TextNormalizer) -> None:
+        """Rewrite pushed text into its spoken form (numbers are never split across two
+        normalization calls) and map word timings back to the pushed text."""
+        self._normalizer = StreamNormalizer(normalizer)
+        self._aligner = WordAligner()
 
     def push_text(self, text: str) -> None:
         if self._input.closed:
@@ -294,11 +366,22 @@ class SynthesizeStream(_AudioEmitter, ABC):
         if self._first_text_time is None:
             self._first_text_time = now()
         self._characters += len(text)
-        self._input.send_nowait(text)
+        if self._normalizer is not None:
+            self._enqueue_spoken(self._normalizer.push(text))
+        else:
+            self._input.send_nowait(text)
+
+    def _enqueue_spoken(self, normalized: NormalizedText | None) -> None:
+        if normalized is not None:
+            assert self._aligner is not None
+            self._aligner.add(normalized)
+            self._input.send_nowait(normalized.text)
 
     def flush(self) -> None:
         """End the current segment: synthesize everything pushed so far without waiting."""
         if not self._input.closed:
+            if self._normalizer is not None:
+                self._enqueue_spoken(self._normalizer.flush())
             self._input.send_nowait(_FLUSH)
 
     def end_input(self) -> None:

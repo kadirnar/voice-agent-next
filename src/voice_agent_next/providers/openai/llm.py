@@ -14,6 +14,11 @@ What the stream does:
   the text (a reasoning model served without a reasoning parser) is stripped;
 * tool-call fragments are accumulated per ``index`` and emitted as complete
   :class:`~voice_agent_next.chat.FunctionCall` objects when the choice finishes;
+* audio-output models (``gpt-audio``, ``gpt-4o-audio-preview``, or any request with
+  ``modalities: ["text", "audio"]``) stream ``delta.audio``: its ``data`` (base64 pcm16,
+  24 kHz) becomes :attr:`~voice_agent_next.llm.ChatChunk.audio` and its ``transcript``
+  the text, so the cascade can play the model's own voice
+  (``LLMCapabilities.audio_output``, see ``docs/concepts/omni-models.md``);
 * token usage comes from ``stream_options={"include_usage": True}``. Cached prompt
   tokens are read from ``prompt_tokens_details.cached_tokens`` or DeepSeek's
   ``prompt_cache_hit_tokens``;
@@ -26,6 +31,7 @@ What the stream does:
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import os
 from collections.abc import Iterable, Mapping
@@ -33,6 +39,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal, TypeAlias
 from urllib.parse import urlsplit
 
+from ...audio.frame import AudioFrame
 from ...chat import ChatContext, FunctionCall
 from ...errors import (
     AuthenticationError,
@@ -58,6 +65,9 @@ MaxTokensParam: TypeAlias = Literal["max_tokens", "max_completion_tokens"]
 DeveloperRole: TypeAlias = Literal["developer", "system"]
 
 _PLACEHOLDER_API_KEY = "no-key"  # the SDK needs a key; servers without auth ignore it
+_AUDIO_MODELS = ("gpt-audio", "gpt-4o-audio", "gpt-4o-mini-audio")
+"""Model id prefixes of OpenAI's audio-output chat models (speech in and out)."""
+_AUDIO_SAMPLE_RATE = 24_000  # Chat Completions streams pcm16 at 24 kHz
 
 # ``chat.completions.create`` parameters, used when the SDK signature can't be inspected.
 # Anything else in ``extra`` goes to the JSON body (``extra_body``).
@@ -114,7 +124,11 @@ class OpenAILLM(LLM):
             e.g. ``{"top_k": 20}``. A ``None`` value removes a default parameter.
         headers: extra HTTP headers sent with every request.
         capabilities: override the declared :class:`~voice_agent_next.llm.LLMCapabilities`
-            (e.g. ``audio_input=True`` for audio-input models).
+            (e.g. ``audio_input=True`` for audio-input models). Audio-output models
+            (``gpt-audio*``, ``gpt-4o-audio*``, or ``modalities`` with ``"audio"`` in
+            ``extra``) declare ``audio_input`` and ``audio_output``.
+        voice: voice of an audio-output model (``gpt-audio*``: default ``"alloy"``); sets
+            ``audio={"voice": ..., "format": "pcm16"}`` and ``modalities`` for them.
         max_tokens_param: request field for ``max_tokens``. Default:
             ``"max_completion_tokens"`` for OpenAI (required by its reasoning models),
             ``"max_tokens"`` for every other server.
@@ -176,6 +190,7 @@ class OpenAILLM(LLM):
         extra: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
         capabilities: LLMCapabilities | None = None,
+        voice: str | None = None,
         max_tokens_param: MaxTokensParam | None = None,
         developer_role: DeveloperRole | None = None,
         system_message_policy: SystemMessagePolicy | None = None,
@@ -196,9 +211,23 @@ class OpenAILLM(LLM):
         official = _is_openai_platform(self.base_url)
         resolved_model = model or self.DEFAULT_MODEL
         self._discover_model = resolved_model is None
+        audio_defaults: dict[str, Any] = {}
+        if resolved_model is not None and resolved_model.startswith(_AUDIO_MODELS):
+            audio_defaults = {
+                "modalities": ["text", "audio"],
+                "audio": {"voice": voice or "alloy", "format": "pcm16"},
+            }
+        modalities = {**audio_defaults, **(extra or {})}.get("modalities") or ()
+        audio_output = "audio" in modalities
         super().__init__(
             model=resolved_model or "auto",
-            capabilities=capabilities or LLMCapabilities(image_input=official),
+            capabilities=capabilities
+            or LLMCapabilities(
+                image_input=official and not audio_output,
+                audio_input=audio_output,
+                audio_output=audio_output,
+                audio_sample_rate=_AUDIO_SAMPLE_RATE,
+            ),
             temperature=temperature,
             max_tokens=max_tokens,
         )
@@ -211,7 +240,7 @@ class OpenAILLM(LLM):
         self._max_tokens_param: MaxTokensParam = max_tokens_param or (
             "max_completion_tokens" if official else "max_tokens"
         )
-        self._extra: dict[str, Any] = dict(self.DEFAULT_EXTRA)
+        self._extra: dict[str, Any] = {**self.DEFAULT_EXTRA, **audio_defaults}
         if reasoning_effort is not None:
             self._extra["reasoning_effort"] = reasoning_effort
         if parallel_tool_calls is not None:
@@ -505,6 +534,8 @@ class _OpenAILLMStream(LLMStream):
                     # first fragment so ttft / tokens_per_second reflect the model
                     self._first_token = now()
                 self._forward(text, calls)
+                for frame in parser.take_audio():
+                    self._push(ChatChunk(self.request_id, audio=frame))
         except Exception as exc:
             raise llm._map_error(exc) from exc
         finally:
@@ -533,6 +564,7 @@ class _StreamParser:
         self.usage: CompletionUsage | None = None
         self.finish_reason: str | None = None
         self.tool_call_started = False
+        self._audio: list[AudioFrame] = []
 
     def feed(self, chunk: Any) -> tuple[str, list[FunctionCall]]:
         usage = _field(chunk, "usage")
@@ -548,6 +580,17 @@ class _StreamParser:
                 piece = _field(delta, key)
                 if isinstance(piece, str) and piece:
                     text.append(self._think.push(piece) if self._think else piece)
+            audio = _field(delta, "audio")  # audio-output models: speech + its transcript
+            if audio is not None:
+                transcript = _field(audio, "transcript")
+                if isinstance(transcript, str) and transcript:
+                    text.append(transcript)
+                data = _field(audio, "data")
+                if isinstance(data, str) and data:
+                    pcm = base64.b64decode(data)
+                    frame = AudioFrame(pcm[: len(pcm) // 2 * 2], _AUDIO_SAMPLE_RATE, 1)
+                    if frame:
+                        self._audio.append(frame)
             for tc in _field(delta, "tool_calls") or ():
                 fn = _field(tc, "function")
                 self.tool_call_started = True
@@ -562,6 +605,11 @@ class _StreamParser:
                 self.finish_reason = str(reason)
                 calls.extend(self._tools.take())
         return "".join(text), calls
+
+    def take_audio(self) -> list[AudioFrame]:
+        """Audio deltas parsed since the last call (audio-output models)."""
+        audio, self._audio = self._audio, []
+        return audio
 
     def finish(self) -> tuple[str, list[FunctionCall]]:
         """Flush what is left when the stream ends (servers that omit ``finish_reason``)."""

@@ -66,6 +66,16 @@ These runs use the same scenario (`latency-local*.yaml`) and the same LLM and TT
 
 Audio-streaming TTS removes the clause-rendering wait. It is the largest single CPU improvement measured so far.
 
+**Local TTS on the RTX 5070 Ti (#79):** full local pipeline with faster-whisper on CUDA + Ollama + each TTS. Other agents' workloads ran on the machine at the same time.
+
+| TTS | first audio / RTF | v2v p50 |
+|---|---:|---:|
+| **Qwen3-TTS 0.6B** (CUDA, audio streaming, CUDA-graph code predictor) | **~115 ms / 0.44** | **715 ms** |
+| Qwen3-TTS 1.7B (CUDA) | ~118 ms / 0.46 | 875 ms |
+| Chatterbox Nano (CUDA) | 466 ms / 0.15 | 1,053 ms |
+| Chatterbox Turbo (CUDA) | 980 ms / 0.29 | 1,436 ms (10 % dead air) |
+| Kokoro v1.0 (CPU) | 1,727 ms / 0.41 | 1,036 ms |
+
 **What this shows:** with a streaming or GPU recognizer, the end-of-turn delay reaches the cascade's fixed 0.4 s minimum endpointing delay. The next levers are:
 - a lower minimum delay for streaming STT;
 - speculative generation (#27, merged; it saves 190–290 ms on mock stacks with cloud-like LLM latencies, and is off by default);
@@ -84,6 +94,17 @@ Audio-streaming TTS removes the clause-rendering wait. It is the largest single 
 - **Premature replies: 33 %.** Moshi decides its own turn-taking and answers in the pause inside two-sentence questions ("Where is my order? · I placed it last week."). The cascade's turn detector waits in those pauses.
 - 0 % missed turns, 0 % dead air.
 - This is about 3× faster than the best cascade measured here (≈ 0.9 s with Pocket TTS on CPU). The cost: no tools, no user transcript, and turn-taking you can't control. See `docs/providers/moshi.md`.
+
+## T1 · Omni model on CPU: LFM2.5-Audio-1.5B (2026-09-25, #75)
+
+`liquid-audio/lfm2.5-audio-1.5b` (GGUF Q4_0 via `llama-liquid-audio-server`, Linux x64 CPU runner). One model replaces STT + LLM + TTS; the cascade provides endpointing.
+
+| run | turns | v2v p50 | v2v p90 |
+|---|---:|---:|---:|
+| quiet machine | 11 | 1,834 ms | 1,958 ms |
+| shared machine | 23 | 1,845 ms | 3,954 ms |
+
+On CPU the omni model is slower than the best CPU cascade (≈ 0.9 s with Pocket TTS). The runner has no GPU backend yet; a GPU build is the obvious follow-up.
 
 ## T2 · ASR on CPU (2026-09-24, `van bench asr`)
 

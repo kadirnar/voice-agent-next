@@ -71,7 +71,8 @@ One JSON object per line:
 * `source`:
   * `session`: every public session event (`agent_state_changed`,
     `user_state_changed`, `user_transcript`, `agent_transcript`, `conversation_item`,
-    `tool_call`, `tool_result`, `interrupted`, `agent_false_interruption`, `metrics`
+    `tool_call`, `tool_result`, `interrupted`, `agent_false_interruption`,
+    `agent_handoff`, `metrics`
     for every component and turn, `error`);
   * `engine`: every engine event (`input_speech_started`, `input_committed`,
     `response_started`, `response_done`...). Agent audio chunks (`response_audio`, with

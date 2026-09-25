@@ -42,7 +42,9 @@ The same in a config file: `stt:`, `llm:`, `tts:`, `vad:`, `turn_detector:` and 
 4. **Response.** The LLM streams text. A `SentenceSegmenter` releases complete sentences,
    with a short first chunk for fast first audio (`first_sentence_min_chars`,
    `first_sentence_max_chars`). Each sentence is cleaned (`text_filter`, markdown and emoji
-   removal by default) and pushed into the TTS stream.
+   removal by default) and pushed into the TTS stream. TTS engines that need it rewrite
+   numbers, amounts, dates and addresses into words
+   ([text normalization](text-normalization.md)); the transcript keeps the LLM's text.
 5. **Speech.** TTS audio becomes `ResponseAudio`; the text of each sentence is emitted with
    its audio offset, so an interruption knows exactly which words were heard.
 
@@ -73,6 +75,8 @@ AgentSession(llm="google/gemini-3.8-flash", tts="cartesia", vad="silero")
 |---|---|---|
 | `min_endpointing_delay` | 0.4 s with a turn detector, 0.6 s without | Silence (from the end of speech) before committing when the user seems done |
 | `max_endpointing_delay` | 2.5 s | Silence before committing when the turn detector says the user is probably not done |
+| `endpointing`, `pause_deviations`, `pause_alpha`, `false_commit_window` | `"fixed"`, 2.0, 0.25, 1.0 s | `"dynamic"` adapts the delay to the turn detector's confidence and the user's learned pauses ([endpointing](endpointing.md#dynamic-endpointing)) |
+| `dictation`, `dictation_min_delay`, `dictation_max_delay`, `dictation_threshold` | off, 1 s, 5 s, `None` | Long pauses expected; switch at runtime with `session.update_endpointing(dictation=True)` ([dictation mode](endpointing.md#dictation-mode)) |
 | `final_transcript_timeout` | 1.0 s | Max wait for the STT's final transcript after flushing (falls back to the interim text) |
 | `text_filter` | `tts_clean` | Applied to each sentence before TTS |
 | `first_sentence_min_chars` / `first_sentence_max_chars` | 4 / 40 | Shape the first spoken chunk for fast first audio |

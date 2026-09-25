@@ -5,6 +5,7 @@ from __future__ import annotations
 from .agent import DEFAULT_INSTRUCTIONS, Agent
 from .events import (
     AgentFalseInterruption,
+    AgentHandoff,
     AgentState,
     AgentStateChanged,
     AgentTranscript,
@@ -22,6 +23,8 @@ from .events import (
     UserStateChanged,
     UserTranscript,
 )
+from .flows import Flow, FlowAgent, FlowNode, Transition
+from .handoff import Handoff, HistoryFilter, HistoryMode, without_tool_items
 from .interruptions import InterruptionPolicy, backchannel_words_for
 from .recording import SessionRecorder
 from .session import DEFAULT_TOOL_FILLERS, AgentSession, SessionOptions
@@ -33,12 +36,19 @@ __all__ = [
     "DEFAULT_TOOL_FILLERS",
     "Agent",
     "AgentFalseInterruption",
+    "AgentHandoff",
     "AgentSession",
     "AgentState",
     "AgentStateChanged",
     "AgentTranscript",
     "ConversationItemAdded",
     "FalseInterruptionReason",
+    "Flow",
+    "FlowAgent",
+    "FlowNode",
+    "Handoff",
+    "HistoryFilter",
+    "HistoryMode",
     "Interrupted",
     "InterruptionPolicy",
     "SessionClosed",
@@ -52,8 +62,10 @@ __all__ = [
     "ToolFiller",
     "ToolProgress",
     "ToolResult",
+    "Transition",
     "UserState",
     "UserStateChanged",
     "UserTranscript",
     "backchannel_words_for",
+    "without_tool_items",
 ]

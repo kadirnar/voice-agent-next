@@ -11,7 +11,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -508,6 +508,89 @@ def test_session_providers() -> None:
     assert hardware.session_providers(object()) == []
 
 
+# ------------------------------------------------------------------------- PyTorch
+def fake_torch(
+    cuda: str | None = "13.0",
+    devices: int = 1,
+    arch: tuple[str, ...] = ("sm_80", "sm_90", "sm_120"),
+    capability: tuple[int, int] = (12, 0),
+    mps: bool = False,
+) -> ModuleType:
+    torch = ModuleType("torch")
+    torch.__version__ = "2.14.0"  # type: ignore[attr-defined]
+    torch.version = SimpleNamespace(cuda=cuda)  # type: ignore[attr-defined]
+    torch.cuda = SimpleNamespace(  # type: ignore[attr-defined]
+        is_available=lambda: devices > 0,
+        device_count=lambda: devices,
+        get_arch_list=lambda: list(arch),
+        get_device_capability=lambda i: capability,
+    )
+    torch.backends = SimpleNamespace(mps=SimpleNamespace(is_available=lambda: mps))  # type: ignore[attr-defined]
+    return torch
+
+
+def test_torch_info_and_arch_support() -> None:
+    info = hardware.torch_info(fake_torch())
+    assert info is not None
+    assert (info.version, info.cuda_version, info.cuda_devices) == ("2.14.0", "13.0", 1)
+    assert info.capabilities == ((12, 0),)
+    assert info.supports((12, 0)) and info.supports((8, 6))  # sm_80 runs on 8.6
+    old = hardware.TorchInfo("2.6.0", "12.4", 1, ("sm_50", "sm_80", "sm_90"))
+    assert not old.supports((12, 0))  # Blackwell needs torch >= 2.7
+    assert hardware.TorchInfo("x", "12.4", 1, ("sm_80", "compute_90")).supports((12, 0))  # PTX
+    assert hardware.TorchInfo("x", "12.4", 1, ()).supports((12, 0))  # unknown: assume yes
+
+
+def test_torch_auto_uses_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(hardware, "detect_nvidia", lambda: nvidia(RTX))
+    backend = hardware.select_torch_backend(torch=fake_torch())
+    assert (backend.device, backend.reason, backend.fix) == ("cuda", RTX.name, None)
+    explicit = hardware.select_torch_backend("cuda:0", torch=fake_torch())
+    assert explicit.device == "cuda:0" and explicit.reason.startswith("requested")
+    assert hardware.select_torch_backend("cpu", torch=fake_torch()).device == "cpu"
+
+
+def test_torch_auto_explains_a_build_without_kernels_for_the_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(hardware, "detect_nvidia", lambda: nvidia(RTX))
+    old = fake_torch(cuda="12.4", arch=("sm_50", "sm_80", "sm_90"))
+    backend = hardware.select_torch_backend(torch=old)
+    assert backend.device == "cpu"
+    assert "sm_120" in backend.reason and "not supported" in backend.reason
+    assert backend.fix == hardware.TORCH_CUDA_HINT
+    with pytest.raises(ConfigurationError, match="not supported"):
+        hardware.select_torch_backend("cuda", torch=old)
+
+
+def test_torch_auto_explains_a_cpu_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(hardware, "detect_nvidia", lambda: nvidia(RTX))
+    backend = hardware.select_torch_backend(torch=fake_torch(cuda=None, devices=0))
+    assert backend.device == "cpu" and "CPU build" in backend.reason
+    assert backend.fix == hardware.TORCH_CUDA_HINT
+    monkeypatch.setattr(hardware, "detect_nvidia", lambda: nvidia())
+    plain = hardware.select_torch_backend(torch=fake_torch(cuda=None, devices=0))
+    assert (plain.device, plain.fix) == ("cpu", None)
+
+
+def test_torch_auto_hidden_gpu_and_mps(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(hardware, "detect_nvidia", lambda: nvidia(RTX))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    hidden = hardware.select_torch_backend(torch=fake_torch(devices=0))
+    assert hidden.device == "cpu" and "CUDA_VISIBLE_DEVICES" in hidden.reason
+    monkeypatch.setattr(hardware, "detect_nvidia", lambda: nvidia())
+    mac = fake_torch(cuda=None, devices=0, mps=True)
+    assert hardware.select_torch_backend(torch=mac).device == "mps"
+    assert hardware.select_torch_backend(accelerators=("cuda",), torch=mac).device == "cpu"
+    assert hardware.select_torch_backend("mps", torch=mac).device == "mps"
+
+
+@pytest.mark.parametrize("device", ["gpu", "cuda:x", "mps:1"])
+def test_torch_rejects_unknown_devices(device: str) -> None:
+    with pytest.raises(ConfigurationError, match="device must be one of"):
+        hardware.select_torch_backend(device, torch=fake_torch())
+
+
 # ------------------------------------------------------------------------- reporting
 @pytest.fixture
 def fake_machine(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -533,6 +616,14 @@ def test_report_rows() -> None:
     assert rows["onnxruntime device=auto (Kokoro)"].endswith(
         f"to use the GPU: {hardware.ONNXRUNTIME_GPU_HINT}"
     )
+
+
+@pytest.mark.usefixtures("fake_machine")
+def test_report_torch_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "torch", fake_torch())
+    rows = dict(hardware.report())
+    assert rows["torch"] == "2.14.0 (CUDA 13.0, 1 CUDA device(s))"
+    assert rows["torch device=auto (Chatterbox, Qwen3-TTS)"] == f"cuda ({RTX.name})"
 
 
 def test_report_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:

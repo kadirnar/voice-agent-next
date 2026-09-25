@@ -10,7 +10,7 @@ local or cloud — that measures what the user *hears*. Design rationale:
 | **T1 latency** | voice-to-voice latency on the call recording, cold start, dead air | `van bench latency` |
 | **T2 ASR** | WER/CER, RTFx, final latency (TTFS), first partial, interim stability | `van bench asr` |
 | **T3 TTS** | TTFA (leading silence counts), RTF, underruns, round-trip WER/CER, hard-text accuracy, DNSMOS | `van bench tts` |
-| T4 VAD / turn-taking | eot-bench, barge-in battery | planned (#43) |
+| **T4 VAD / turn-taking** | VAD frame metrics and onset/offset lag; end-of-turn on eot-bench; turn-taking battery (premature replies, barge-in, false barge-ins) | `van bench vad`, `van bench turns`, `van bench turn-taking` |
 | T5 S2S quality | Big Bench Audio, VoiceBench | planned (#44) |
 | T6 tool use | scripted tool scenarios, τ-Voice | planned (#45) |
 | **T7 framework overhead** | `v2v − Σ injected delays`, flush, jitter, loop lag, capacity, hot paths; CI regression gate | `van bench overhead` |
@@ -39,6 +39,12 @@ van bench asr --stt sherpa-onnx/nemo-fastconformer-en-80ms --mode streaming
 
 # T3: any TTS on 20 pinned agent sentences, batch + LLM-paced streaming, round-trip WER
 van bench tts --tts kokoro --stt faster-whisper/small.en --mos dnsmos
+
+# T4: VADs on a labelled corpus (LibriSpeech smoke + noise), turn detectors on eot-bench,
+# and the turn-taking battery on any engine
+van bench vad --vad energy --vad silero --vad sherpa-onnx/ten-vad
+van bench turns --detector smart_turn
+van bench turn-taking -c agent.yaml -s benchmarks/scenarios/turn-taking-local.yaml
 
 # T7: what the runtime itself adds (mocks with known delays, offline, ~2 min)
 van bench overhead
@@ -135,6 +141,9 @@ Scenarios live in [`scenarios/`](scenarios):
 | `latency-smoke` (built-in default) | 10 short questions as synthetic speech, cycled; smoke tier / CI |
 | `latency-conversational` | 1–3.5 s turns; endpointing- and STT-sensitive engines |
 | `latency-tts` | stimuli synthesized with a TTS provider (swap `mock` for a real voice) |
+| `latency-local-omni` | six Kokoro-voiced questions for local omni models (LFM2.5-Audio via `liquid-audio`: no STT, no TTS) |
+| `turn-taking-smoke` (built-in) | T4 battery: questions, mid-turn pauses, backchannel, cough, interruption (synthetic) |
+| `turn-taking-local` | the T4 battery voiced by Kokoro |
 
 ```yaml
 name: my-scenario
@@ -152,7 +161,21 @@ turns:
   - {id: q2, text: "Book a table for two.", source: tts}     # synthesized once
   - {id: q3, wav: data/hello.wav, speech: [0.12, 0.98]}      # WAV + annotated span
   - {id: q4, text: "Mm-hmm.", duration: 0.4, expect_reply: false, pause: 1.0}
+  # turn-taking (T4): a turn with a mid-turn pause, and turns spoken over the agent
+  - id: q5
+    parts: [{text: "Where is my order?", pause: 0.8}, {text: "I placed it last week."}]
+  - {id: q6, text: "Uh-huh.", barge_in: 1.5, expect_reply: false, category: backchannel}
+  - {id: q7, source: noise, duration: 0.35, seed: 7, loudness_dbfs: -24, barge_in: 1.5,
+     expect_reply: false, category: noise}                   # a cough-like burst
 ```
+
+`parts` renders every part on its own (synthetic or TTS), trims it to its speech and joins
+the parts with exactly `pause` seconds of silence; the pauses are annotated. `barge_in: s`
+makes the caller speak the turn `s` seconds after the agent's reply to the previous turn
+started, over the agent (the reply to such a turn is the agent audio that starts after the
+user stopped). `category` labels turns for reports (inferred when omitted: `pause`,
+`interruption`, `backchannel`, `noise`, `question`) and `loudness_dbfs` overrides the
+scenario level for one turn.
 
 Stimuli are rendered once before a run (fixed resampler, loudness-normalized, padded to
 whole chunks) and hashed into the manifest. Without an explicit `speech: [start, end]`,
@@ -337,6 +360,116 @@ or a broken number reading, not to rank two good voices. Use `--repeats 3` or mo
 latency comparisons, run one system at a time on an otherwise idle machine, and state the
 hardware. Every clip is saved as `artifacts/<mode>/<text id>.wav` (`--no-audio` to skip)
 so you can listen to what was scored.
+
+## T4: VAD, end-of-turn and turn-taking
+
+Latency alone is misleading: a system that answers in the pause inside "Where is my
+order? · I placed it last week." is fast *and* rude. T4 measures turn-taking quality next
+to latency, at three levels.
+
+### VAD (`van bench vad`)
+
+```bash
+van bench vad --vad energy --vad silero --vad sherpa-onnx/ten-vad       # 50 utterances x 6 conditions
+van bench vad --vad silero --condition clean --condition pink@0 --limit 20
+```
+
+Every VAD runs over the same **deterministic, frame-labelled corpus**, built from the pinned
+LibriSpeech smoke subset (`-d` takes any ASR subset or manifest): utterances normalized to
+-20 dBFS, separated by seeded 0.8–2.5 s gaps, 2 s of noise before and 20 s after; one clip
+per **condition** with the same layout: `clean` (white noise at -70 dBFS), `pink@20/10/5`,
+`white@10` (noise RMS that many dB below the speech), `transient` (keyboard-like clicks up
+to -12 dBFS over a -60 dBFS floor). Labels come from the clean utterances: 10 ms frames
+within 40 dB of the loudest frame and 10 dB above the noise floor, dips < 150 ms bridged.
+The corpus SHA-256 (audio + labels + parameters) is in the manifest and the dataset id.
+Audio is streamed through `VAD.stream()` in 20 ms chunks, faster than real time.
+
+| Metric | Definition |
+| --- | --- |
+| `precision`, `recall`, `f1`, `false_alarm_rate`, `miss_rate` | 10 ms frames; a frame is speech when the (smoothed) probability of the VAD window containing its midpoint reaches the VAD's `activation_threshold` |
+| `roc_auc` | over the frame probabilities |
+| `onset_lag_ms` | `START_OF_SPEECH` fired − labelled start of the utterance (includes `min_speech_duration`) |
+| `offset_lag_ms` | the utterance's last `END_OF_SPEECH` fired − labelled end (includes `min_silence_duration`, the wait before a cascade considers the turn over); negative when the VAD drops the tail |
+| `missed_utterances` | utterances without any detected speech |
+| `false_alarms_per_min` | `START_OF_SPEECH` outside every utterance (± 100 ms), per minute of the remaining audio |
+| `rtf` | inference time / audio time |
+
+VADs that expose only a yes/no decision (the sherpa-onnx Silero and TEN VAD bindings return
+`is_speech()`, which already includes sherpa's own hangover) get probabilities of 0 or 1:
+their AUC is that of a single operating point, and their frame false alarms include the
+hangover after each utterance. Compare them with each other and on F1 / onset / offset.
+
+### End of turn (`van bench turns`)
+
+```bash
+van bench turns --detector smart_turn                                   # eot-bench English
+van bench turns --detector '{provider: smart_turn, model: v3.2-gpu}' -d eot-bench-es
+van bench turns --detector mock -d my-turns.jsonl
+```
+
+Follows LiveKit's [eot-bench](https://github.com/livekit/eot-bench) (Apache-2.0). Data:
+[`livekit/eot-bench-data`](https://huggingface.co/datasets/livekit/eot-bench-data)
+(CC BY 4.0) — real human-to-agent turns, ≤ 400 per language, 14 languages
+(`eot-bench-{en,ar,de,es,fr,hi,id,it,ja,ko,nl,pt,tr,zh}`). Each language's Parquet file is
+pinned (revision `ca9d98a9`, SHA-256 and size in `bench/eot_datasets.py`; 96–166 MB,
+English 162 MB), downloaded once, verified and unpacked into WAV files + `turns.jsonl`
+in the cache (unpacking needs `pyarrow`, in the `bench` extra; the Parquet file is then
+deleted). Custom data: a JSON Lines manifest with `audio`, `silence_spans` and optional
+`words`, `messages`, `language`.
+
+Every silence span ≥ 100 ms of a turn is a decision point: the last one is the end of the
+turn (`eot`), the others are mid-turn pauses (`hold`). The detector is asked once per span,
+`--score-point` (0.2 s) into the silence, with the causal inputs it would have live: the
+turn's audio up to that moment, the previous messages and the words that ended at least
+`--transcript-lag` (0.5 s) earlier. Then:
+
+| Metric | Definition |
+| --- | --- |
+| `false_cutoff_at_300ms`, `false_cutoff_at_600ms` | the lowest false-cutoff rate (hold spans ended by the policy) of any endpointing policy whose mean end-of-turn latency is ≤ 300 / 600 ms |
+| `latency_at_5pct_ms`, `latency_at_10pct_ms` (`extra.detector`) | the lowest mean latency (dead air after the user finished) of any policy with ≤ 5 / 10 % false cutoffs |
+| policies | `threshold` 0–1 (0.01 steps: fire when `p > threshold`), `action_delay` 0.2–1.0 s (the model fires at `max(action_delay, score time)`), `timeout` 1.0–3.5 s (end the turn anyway); hold spans of 0.2–5 s and all eot spans count |
+| `extra.vad_baseline` | the same four numbers for silence alone (answer after a fixed pause) |
+| `configured_cutoff_rate`, `extra.configured_policy` | what the cascade does by default: `p ≥ threshold` → answer after `min_endpointing_delay` (0.4 s), else after `max_endpointing_delay` (2.5 s) |
+| `accuracy`, `precision`, `recall`, `f1`, `false_positive_rate`, `roc_auc` | complete (eot, positive) vs incomplete (hold) at the detector's threshold |
+| `inference_ms` | decision latency: the detector's time per prediction |
+
+The report also lists the Pareto front (`extra.pareto_front`: cutoff rate, latency,
+threshold, action delay, timeout).
+
+### Turn-taking battery (`van bench turn-taking`)
+
+```bash
+van bench turn-taking                                  # mock engine, built-in smoke scenario
+van bench turn-taking -c agent.yaml -s benchmarks/scenarios/turn-taking-local.yaml
+van bench turn-taking --engine '{provider: moshi/moshika-q8, url: "ws://localhost:8998"}' \
+    -s benchmarks/scenarios/turn-taking-local.yaml
+```
+
+The full system — any engine, cascade, native or full-duplex — on the T1 harness (real-time
+caller, loopback, stereo recording, reference VAD), with a scenario that mixes plain
+questions, turns with **mid-turn pauses** (`parts`) and turns spoken **over the agent**
+(`barge_in`): a backchannel, a cough-like noise burst and a real interruption. Everything is
+read off the recording; the session's `interrupted` event tells a cut reply from a paused
+one.
+
+| Metric | Definition |
+| --- | --- |
+| `premature_rate` | pause turns in which the agent started before the user finished: its onset lies before the end of the last part, or ≥ 30 ms of agent speech fall between the first pause and that end (a reply cut short when the user went on can be too short for an onset) |
+| `premature_rate_questions` | the same on plain questions |
+| `missed_rate`, `dead_air_rate`, `v2v_ms` | as in T1 (`v2v_ms` over questions and pause turns that were not premature; an interruption without an answer counts as missed) |
+| `barge_in_stop_ms` | interruptions: start of the first ≥ 300 ms silence on the agent channel − the user's onset; `stop_within_500ms_rate` |
+| `interrupted_rate` | interruptions after which the session cut the reply for good |
+| `post_interrupt_response_ms` | next agent onset − end of the interruption |
+| `talk_over_ms` | agent speech while the user interrupts |
+| `backchannel_yield_rate`, `noise_yield_rate` | the agent went silent ≥ 300 ms within 1 s of the end of the backchannel / noise (a pause-and-resume policy yields briefly by design) |
+| `false_barge_in_rate` (`_backchannel`, `_noise`) | the reply was abandoned: the session interrupted it, or the agent stopped and did not speak again before the next user turn |
+| `resume_rate`, `resume_gap_ms` | of the yields, those after which the same reply continued, and the silence before it did |
+
+A barge-in turn is scored only if the agent was speaking when it started (`overlapped`);
+the report notes the others (make replies longer). The default system is the mock engine
+with ~4 s replies; the mock engine gets user transcripts only when it commits a turn, so it
+answers backchannels (100 % false barge-ins) — a real STT with the session's backchannel
+filter does better.
 
 ## T7: framework overhead (`van bench overhead`)
 

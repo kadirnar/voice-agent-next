@@ -526,7 +526,7 @@ def test_app_config_from_sources(tmp_path: Path) -> None:
     assert build_app_config(SourceOptions(config=str(path))).agent.instructions == "From file."
     assert build_app_config(SourceOptions(engines=[str(path)])).engine == "mock"
     for bad in (SourceOptions(engines=["mock", "mock"]), SourceOptions(config=str(path), llm="x"),
-                SourceOptions(engines=["a=mock"]), SourceOptions(llm="mock"),
+                SourceOptions(engines=["a=mock"]), SourceOptions(tts="mock"),  # (TTS optional: omni LLMs)
                 SourceOptions(vad="energy"), SourceOptions(config=str(tmp_path / "no.yaml"))):  # fmt: skip
         with pytest.raises(ConfigurationError):
             build_app_config(bad)

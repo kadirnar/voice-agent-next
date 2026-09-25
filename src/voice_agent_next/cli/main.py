@@ -6,8 +6,6 @@ import asyncio
 import dataclasses
 import importlib
 import json
-import os
-import platform
 import sys
 from pathlib import Path
 from typing import Annotated, Any
@@ -88,95 +86,74 @@ def providers(
 
 
 @app.command()
-def doctor() -> None:
-    """Check the environment: Python, audio, ML runtimes, GPUs, API keys."""
-    from ..utils.deps import is_installed
+def doctor(
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output")] = False,
+    strict: Annotated[
+        bool, typer.Option("--strict", help="Exit with 1 on warnings too, not only failures")
+    ] = False,
+    only: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--only",
+            help="Run only these sections (repeatable): system, audio, hardware, presets, "
+            "models, network, mic, echo, latency",
+        ),
+    ] = None,
+    network: Annotated[
+        bool,
+        typer.Option(
+            "--network",
+            help="Probe the cloud endpoints of the providers whose API key is set (DNS, "
+            "connect, TLS; no API call)",
+        ),
+    ] = False,
+    endpoint: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--endpoint", help="Extra URL or host to probe (repeatable; implies --network)"
+        ),
+    ] = None,
+    mic: Annotated[
+        bool, typer.Option("--mic", help="Record the microphone and judge its level")
+    ] = False,
+    echo: Annotated[
+        bool,
+        typer.Option("--echo", help="Play a chirp: measure echo delay and loss, recommend AEC"),
+    ] = False,
+    latency: Annotated[
+        bool, typer.Option("--latency", help="Play clicks: measure the loopback latency")
+    ] = False,
+    duration: Annotated[float, typer.Option(help="Seconds of the --mic recording")] = 5.0,
+    input_device: Annotated[
+        str | None, typer.Option(help="Microphone for --mic/--echo/--latency (index or name)")
+    ] = None,
+    output_device: Annotated[
+        str | None, typer.Option(help="Speakers for --echo/--latency (index or name)")
+    ] = None,
+    timeout: Annotated[float, typer.Option(help="Network probe timeout (seconds)")] = 5.0,
+) -> None:
+    """Diagnose the environment: Python, audio host APIs and devices, GPUs, presets, models.
 
-    table = Table(title="voice-agent-next doctor", show_header=False)
-    table.add_column("check")
-    table.add_column("result", overflow="fold")
-    table.add_row("voice-agent-next", __version__)
-    table.add_row("python", f"{platform.python_version()} ({sys.executable})")
-    table.add_row("platform", f"{platform.system()} {platform.release()} {platform.machine()}")
-    for mod in ("numpy", "soxr", "sounddevice", "onnxruntime", "torch", "mlx", "aiortc"):
-        if is_installed(mod):
-            try:
-                ver = getattr(__import__(mod), "__version__", "installed")
-            except Exception as exc:  # broken native libs (e.g. missing PortAudio)
-                ver = f"installed but failed to import: {exc}"
-            table.add_row(mod, str(ver))
-        else:
-            table.add_row(mod, "[dim]not installed[/dim]")
-    if is_installed("onnxruntime"):
-        try:
-            import onnxruntime as ort
+    Opt-in: --network (endpoint reachability), --mic (level meter), --echo (echo delay and
+    loss), --latency (loopback latency). Exit code 1 when a check fails (--strict: or warns).
+    """
+    from .doctor import run_doctor
 
-            table.add_row("onnxruntime providers", ", ".join(ort.get_available_providers()))
-        except Exception as exc:
-            table.add_row("onnxruntime providers", f"error: {exc}")
-    if is_installed("torch"):
-        try:
-            import torch
-
-            accel = []
-            if torch.cuda.is_available():
-                accel.append(f"cuda ({torch.cuda.get_device_name(0)})")
-            if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-                accel.append("mps")
-            table.add_row("torch accelerators", ", ".join(accel) or "cpu only")
-        except Exception as exc:
-            table.add_row("torch accelerators", f"error: {exc}")
-    _hardware_doctor_rows(table)
-    _audio_doctor_rows(table)
-    keys = [
-        "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
-        "DEEPGRAM_API_KEY", "ASSEMBLYAI_API_KEY", "CARTESIA_API_KEY", "ELEVENLABS_API_KEY",
-        "GROQ_API_KEY", "AWS_ACCESS_KEY_ID", "AZURE_OPENAI_API_KEY", "XAI_API_KEY",
-    ]  # fmt: skip
-    present = [k for k in keys if os.environ.get(k)]
-    table.add_row("API keys set", ", ".join(present) or "[dim]none[/dim]")
-    console.print(table)
-
-
-def _hardware_doctor_rows(table: Table) -> None:
-    """GPUs, CUDA libraries and where local models run on `device="auto"` (docs/hardware.md)."""
-    from .. import hardware
-
-    try:
-        rows = hardware.report()
-    except Exception as exc:  # report() does not raise; belt and braces for the doctor
-        rows = [("hardware", f"error: {exc}")]
-    for check, result in rows:
-        style = "yellow" if "to use the GPU:" in result or result.startswith("error") else ""
-        table.add_row(check, f"[{style}]{escape(result)}[/{style}]" if style else escape(result))
-
-
-def _audio_doctor_rows(table: Table) -> None:
-    """PortAudio version, host APIs, default devices and setup hints for `van doctor`."""
-    from ..errors import MissingDependencyError, VoiceAgentError
-    from ..transports.local import describe_audio_system
-
-    try:
-        info = describe_audio_system()
-    except MissingDependencyError as exc:  # no sounddevice, or no PortAudio library
-        table.add_row("audio", f"[yellow]{escape(str(exc))}[/yellow]")
-        return
-    except VoiceAgentError as exc:
-        table.add_row("audio", f"[red]error: {escape(str(exc))}[/red]")
-        return
-    table.add_row("portaudio", escape(info.portaudio_version))
-    table.add_row("audio host APIs", escape(", ".join(info.hostapis)) or "[dim]none[/dim]")
-    for label, device in (("default input", info.default_input),
-                          ("default output", info.default_output)):  # fmt: skip
-        if device is None:
-            table.add_row(label, "[yellow]none[/yellow]")
-        else:
-            table.add_row(label, escape(f"{device}, {device.default_samplerate:g} Hz"))
-    n_in = sum(1 for d in info.devices if d.max_input_channels > 0)
-    n_out = sum(1 for d in info.devices if d.max_output_channels > 0)
-    table.add_row("audio devices", f"{n_in} input, {n_out} output (details: `van devices`)")
-    for hint in info.hints():
-        table.add_row("audio hint", f"[yellow]{escape(hint)}[/yellow]")
+    run_doctor(
+        console=console,
+        as_json=as_json,
+        strict=strict,
+        only=only or [],
+        network=network,
+        endpoints=endpoint or [],
+        mic=mic,
+        echo=echo,
+        latency=latency,
+        duration=duration,
+        input_device=input_device,
+        output_device=output_device,
+        timeout=timeout,
+    )
 
 
 @app.command()

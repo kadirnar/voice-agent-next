@@ -8,8 +8,10 @@ Pipeline per user turn:
 1. user audio is streamed continuously into the STT stream and the VAD;
 2. VAD ``START_OF_SPEECH`` -> ``InputSpeechStarted`` (the session may barge in);
 3. VAD ``END_OF_SPEECH`` -> the STT is flushed, the (optional) turn detector scores the
-   utterance, and the turn is committed after ``min_endpointing_delay`` (confident) or
-   ``max_endpointing_delay`` (user probably not done) unless speech resumes;
+   utterance, and the turn is committed after the endpointing delay unless speech
+   resumes: ``min_endpointing_delay`` (confident) or ``max_endpointing_delay`` (user
+   probably not done), or — ``endpointing="dynamic"`` / ``dictation`` — a delay chosen
+   from the detector's confidence and the user's learned pauses (``endpointing.py``);
 4. the LLM streams text; complete sentences are cleaned and pushed into a TTS stream,
    whose audio is emitted as ``ResponseAudio`` with text aligned per sentence.
 
@@ -22,6 +24,12 @@ or discarded when the user resumes (see ``docs/concepts/preemptive-generation.md
 Half-cascade: with ``stt=None`` and an LLM whose ``capabilities.audio_input`` is True
 (Ultravox, Qwen-Omni, Gemini, gpt-4o-audio...), the user's audio is passed to the LLM
 directly as :class:`~voice_agent_next.chat.AudioContent`.
+
+Omni models: an LLM whose ``capabilities.audio_output`` is True (LFM2.5-Audio, gpt-audio,
+Qwen-Omni...) speaks for itself. Without a TTS (or with ``CascadeOptions.use_llm_audio``)
+its audio deltas are played as ``ResponseAudio`` and its text becomes the ``ResponseText``
+transcript; with ``stt=None`` too, VAD + turn detection is all that is left of the
+cascade (see ``docs/concepts/omni-models.md``).
 """
 
 from __future__ import annotations
@@ -59,7 +67,13 @@ from ..events import (
     ResponseToolCall,
 )
 from ..llm import LLM, ChatChunk, CompletionUsage, LLMStream
-from ..metrics import EngineMetrics, Metrics, SpeculationMetrics, SpeculationReason
+from ..metrics import (
+    EndpointingMetrics,
+    EngineMetrics,
+    Metrics,
+    SpeculationMetrics,
+    SpeculationReason,
+)
 from ..registry import create
 from ..stt import STT, StreamAdapter, STTEventType, WordTiming
 from ..text.filters import tts_clean
@@ -72,6 +86,7 @@ from ..utils.clock import now
 from ..utils.ids import new_id
 from ..utils.log import logger
 from ..vad import VAD, VADEventType
+from .endpointing import Endpointer, EndpointingDecision, EndpointingMode
 
 __all__ = ["CascadeConnection", "CascadeEngine", "CascadeOptions"]
 
@@ -80,10 +95,35 @@ __all__ = ["CascadeConnection", "CascadeEngine", "CascadeOptions"]
 class CascadeOptions:
     min_endpointing_delay: float | None = None
     """Silence (from the end of speech) before committing when the user seems done.
-    ``None`` = 0.4 s with a turn detector, 0.6 s with VAD only."""
+    ``None`` = 0.4 s with a turn detector, 0.6 s with VAD only. With
+    ``endpointing="dynamic"``: the lower bound (``None`` = 0.25 s / 0.3 s)."""
     max_endpointing_delay: float = 2.5
     """Silence (from the end of speech) before committing when the turn detector says the
-    user is probably not done."""
+    user is probably not done (the upper bound of the dynamic policy)."""
+    endpointing: EndpointingMode = "fixed"
+    """``"fixed"``: ``min_endpointing_delay`` or ``max_endpointing_delay``. ``"dynamic"``:
+    the delay follows the turn detector's confidence (short when it is sure the user is
+    done, long when it is sure they are not) and the user's own mid-turn pauses, learned
+    during the session. See ``docs/concepts/endpointing.md``."""
+    pause_deviations: float = 2.0
+    """Dynamic policy: the undecided-pause delay is the user's mean mid-turn pause plus
+    this many mean deviations."""
+    pause_alpha: float = 0.25
+    """Dynamic policy: weight of each new pause in the running mean and deviation."""
+    false_commit_window: float = 1.0
+    """A commit counts as false (the user was cut off) when they speak again within this
+    many seconds; the pause is then learned as a mid-turn pause."""
+    dictation: bool = False
+    """Dictation mode (numbers, addresses, notes): only a confident turn detector commits
+    before ``dictation_max_delay``, never before ``dictation_min_delay``. Switch at runtime
+    with ``AgentSession.update_endpointing(dictation=...)``."""
+    dictation_min_delay: float = 1.0
+    """Dictation: silence before committing when the turn detector says the user is done."""
+    dictation_max_delay: float = 5.0
+    """Dictation: silence before committing otherwise (or without a turn detector)."""
+    dictation_threshold: float | None = None
+    """Dictation: turn-detector probability needed to commit at ``dictation_min_delay``
+    (``None`` = the detector's own ``threshold``)."""
     final_transcript_timeout: float = 1.0
     """Max wait for the STT's final transcript after flushing."""
     text_filter: Callable[[str], str] | None = tts_clean
@@ -117,6 +157,17 @@ class CascadeOptions:
     """No speculation on user turns longer than this (seconds)."""
     preemptive_max_attempts: int = 3
     """Maximum speculative LLM calls per user turn."""
+    use_llm_audio: bool | None = None
+    """Play the LLM's own speech (audio-output "omni" models,
+    ``LLMCapabilities.audio_output``) instead of synthesizing its text with the TTS.
+    ``None``: yes when the LLM outputs audio and no TTS is configured. With a TTS as well,
+    the TTS still speaks verbatim text (``say()``, greetings). An audio LLM generates its
+    speech with the reply, so in this mode preemptive generation only runs with
+    ``preemptive_tts`` (speculative speech is allowed)."""
+    speech_rate: float = 14.0
+    """Initial estimate of an audio LLM's speaking rate (characters per second, refined from
+    its completed replies): truncation uses it to place a barge-in in a reply whose text
+    runs ahead of its audio. 14 is LFM2.5-Audio's measured rate."""
 
 
 @dataclass
@@ -127,6 +178,22 @@ class _Spoken:
     """Word timings reported by the TTS (relative to the start of the item's audio)."""
     audio_duration: float = 0.0
     text: list[str] = field(default_factory=list)
+    llm_audio: bool = False
+    """Spoken by an audio-output LLM: ``text`` holds its raw text deltas and ``segments``
+    the ones whose audio position the model reported."""
+    complete: bool = True
+    """All of the reply's text and audio has been generated."""
+
+
+@dataclass(eq=False)
+class _Pause:
+    """An endpointing decision for one pause of the user turn ``item_id``."""
+
+    decision: EndpointingDecision
+    item_id: str
+    speech_end: float
+    """When the user stopped speaking (``now()`` clock)."""
+    timer: asyncio.TimerHandle | None = None
 
 
 class _Output:
@@ -285,13 +352,26 @@ class CascadeEngine(S2SEngine):
         *,
         stt: Any = None,
         llm: Any,
-        tts: Any,
+        tts: Any = None,
         vad: Any = None,
         turn_detector: Any = None,
         options: CascadeOptions | None = None,
     ) -> None:
         self.llm: LLM = create("llm", llm)
-        self.tts: TTS = create("tts", tts)
+        self.tts: TTS | None = create("tts", tts) if tts is not None else None
+        self.options = options or CascadeOptions()
+        llm_caps = self.llm.capabilities
+        use_llm_audio = self.options.use_llm_audio
+        if use_llm_audio is None:
+            use_llm_audio = llm_caps.audio_output and self.tts is None
+        if use_llm_audio and not llm_caps.audio_output:
+            raise ConfigurationError(
+                "use_llm_audio needs an LLM that outputs audio (LLMCapabilities.audio_output)"
+            )
+        if not use_llm_audio and self.tts is None:
+            raise ConfigurationError("cascade needs tts=... unless the LLM outputs audio")
+        self.llm_audio: bool = use_llm_audio
+        """The LLM's own speech is played (no TTS for its replies)."""
         self.vad: VAD | None = create("vad", vad) if vad is not None else None
         self.turn_detector: TurnDetector | None = (
             create("turn", turn_detector) if turn_detector is not None else None
@@ -308,7 +388,6 @@ class CascadeEngine(S2SEngine):
                 )
             stt_obj = StreamAdapter(stt_obj, self.vad)
         self.stt: STT | None = stt_obj
-        self.options = options or CascadeOptions()
         input_rate = (
             stt_obj.sample_rate if stt_obj else (self.vad.sample_rate if self.vad else 16_000)
         )
@@ -326,7 +405,11 @@ class CascadeEngine(S2SEngine):
                 text_input=True,
             ),
             input_sample_rate=input_rate,
-            output_sample_rate=self.tts.sample_rate,
+            output_sample_rate=(
+                llm_caps.audio_sample_rate
+                if use_llm_audio or self.tts is None
+                else self.tts.sample_rate
+            ),
         )
         for comp in self.components:
             comp.on("metrics", self._forward_metrics)
@@ -371,6 +454,11 @@ class CascadeConnection(EngineConnection):
         self._final_event = asyncio.Event()
         self._endpoint_task: asyncio.Task[None] | None = None
         self._speech_end_wall: float | None = None
+        self._endpointer = Endpointer(self._opts, has_detector=engine.turn_detector is not None)
+        self._pause: _Pause | None = None
+        """The endpointing decision of the pending pause (until resumed or committed)."""
+        self._commit_watch: _Pause | None = None
+        """The last committed pause, while a resumption would make it a false commit."""
         # STTs with built-in turn detection (Flux, Ink, AssemblyAI...) own the end of turn:
         # the VAD then only drives speech start/stop (barge-in), never commits.
         self._stt_turns = bool(engine.stt is not None and engine.stt.capabilities.end_of_turn)
@@ -380,6 +468,8 @@ class CascadeConnection(EngineConnection):
         self._spec: _Speculation | None = None
         self._agent_audio_end = 0.0
         """When the audio delivered so far (probably) stops playing."""
+        self._speech_rate = engine.options.speech_rate
+        """Characters per second of the audio LLM's speech (see ``_heard_llm_audio``)."""
 
     # ---------------------------------------------------------------- user turn
     def _reset_turn(self) -> None:
@@ -414,8 +504,14 @@ class CascadeConnection(EngineConnection):
                 self._on_speech_stopped(self.input_audio_time - ev.silence_duration)
 
     def _on_speech_started(self, audio_time: float | None) -> None:
+        onset = self.audio_time_to_wall(audio_time) if audio_time is not None else None
+        onset = now() if onset is None else onset
+        pause, self._pause = self._pause, None
         if self._endpoint_task is not None and not self._endpoint_task.done():
             self._endpoint_task.cancel()  # the user kept talking: same turn continues
+            self._on_resumed(pause, onset)
+        elif self._commit_watch is not None:
+            self._resolve_commit(self._commit_watch, onset)
         self._discard_speculation("resumed")
         if not self._user_speaking:
             self._user_speaking = True
@@ -450,10 +546,77 @@ class CascadeConnection(EngineConnection):
                 self._turn_finals.append(self._turn_interim)  # fall back to the interim text
                 self._turn_interim = ""
 
-    def _min_delay(self) -> float:
-        if self._opts.min_endpointing_delay is not None:
-            return self._opts.min_endpointing_delay
-        return 0.4 if self._e.turn_detector is not None else 0.6
+    # ------------------------------------------------------------- endpointing
+    def update_endpointing(
+        self, *, mode: EndpointingMode | None = None, dictation: bool | None = None
+    ) -> None:
+        """Switch the endpointing policy (``"fixed"``/``"dynamic"``) and/or dictation mode
+        from the next pause on. Learned pauses are kept."""
+        if mode is not None:
+            if mode not in ("fixed", "dynamic"):
+                raise ValueError(f"unknown endpointing mode {mode!r}")
+            self._endpointer.mode = mode
+        if dictation is not None:
+            self._endpointer.dictation = dictation
+
+    @property
+    def endpointer(self) -> Endpointer:
+        """This connection's endpointing state (policy, learned pauses)."""
+        return self._endpointer
+
+    def _on_resumed(self, pause: _Pause | None, onset: float) -> None:
+        """The user spoke again before the pending pause was committed."""
+        if self._speech_end_wall is None:
+            return
+        length = max(0.0, onset - self._speech_end_wall)
+        self._endpointer.observe_pause(length)
+        if pause is not None:
+            self._emit_endpointing(pause, committed=False, length=length)
+
+    def _watch_commit(self, pause: _Pause) -> None:
+        """``pause`` is being committed: a resumption within ``false_commit_window`` makes
+        it a false commit."""
+        if self._commit_watch is not None:
+            self._resolve_commit(self._commit_watch, None)
+        self._commit_watch = pause
+        loop = asyncio.get_running_loop()
+        window = max(0.0, self._opts.false_commit_window)
+        pause.timer = loop.call_later(window, self._resolve_commit, pause, None)
+
+    def _resolve_commit(self, pause: _Pause, onset: float | None) -> None:
+        if self._commit_watch is pause:
+            self._commit_watch = None
+        if pause.timer is not None:
+            pause.timer.cancel()
+        if self.chat_ctx.get(pause.item_id) is None:
+            return  # nothing was committed (no transcript)
+        length = None if onset is None else max(0.0, onset - pause.speech_end)
+        if length is not None:
+            self._endpointer.observe_pause(length)
+        self._emit_endpointing(
+            pause, committed=True, length=length, false_commit=length is not None
+        )
+
+    def _emit_endpointing(
+        self, pause: _Pause, *, committed: bool, length: float | None, false_commit: bool = False
+    ) -> None:
+        d, engine = pause.decision, self._e
+        engine.emit(
+            "metrics",
+            EndpointingMetrics(
+                provider=engine.provider,
+                model=engine.model,
+                item_id=pause.item_id,
+                policy=d.policy,
+                delay=d.delay,
+                probability=d.probability,
+                threshold=d.threshold,
+                hold=d.hold,
+                committed=committed,
+                pause=length,
+                false_commit=false_commit,
+            ),
+        )
 
     async def _endpoint(self) -> None:
         t_end = self._speech_end_wall if self._speech_end_wall is not None else now()
@@ -466,7 +629,6 @@ class CascadeConnection(EngineConnection):
             )
         try:
             await self._wait_final_transcript()
-            delay = self._min_delay()
             prob: float | None = None
             if detector is not None:
                 if early is not None:
@@ -480,9 +642,11 @@ class CascadeConnection(EngineConnection):
                     )
                 else:
                     prob = 1.0
-                if prob < detector.threshold:
-                    delay = self._opts.max_endpointing_delay
-            remaining = delay - (now() - t_end)
+            decision = self._endpointer.decide(
+                prob, detector.threshold if detector is not None else None
+            )
+            pause = self._pause = _Pause(decision, self._turn_item_id, t_end)
+            remaining = decision.delay - (now() - t_end)
             if remaining > 0:
                 # only the silence is left to wait for: the reply can start meanwhile
                 self._speculate(prob)
@@ -490,6 +654,8 @@ class CascadeConnection(EngineConnection):
         finally:
             if early is not None and not early.done():
                 early.cancel()
+        self._pause = None
+        self._watch_commit(pause)
         await self._commit_turn()
 
     async def _stt_loop(self) -> None:
@@ -570,6 +736,8 @@ class CascadeConnection(EngineConnection):
         opts, engine = self._opts, self._e
         if not opts.preemptive_generation or engine.stt is None or not self.options.turn_detection:
             return
+        if engine.llm_audio and not opts.preemptive_tts:
+            return  # an audio LLM's reply *is* speech: speculate only when that is allowed
         text = self._turn_text() if text is None else text.strip()
         if not text:
             return
@@ -665,6 +833,7 @@ class CascadeConnection(EngineConnection):
     async def commit_input(self) -> None:
         if self._endpoint_task is not None and not self._endpoint_task.done():
             self._endpoint_task.cancel()
+        self._pause = None
         self._user_speaking = False
         if self._vad is not None:
             self._vad.reset()
@@ -674,6 +843,7 @@ class CascadeConnection(EngineConnection):
     async def clear_input(self) -> None:
         if self._endpoint_task is not None and not self._endpoint_task.done():
             self._endpoint_task.cancel()
+        self._pause = None
         self._discard_speculation("cleared")
         self._user_speaking = False
         if self._vad is not None:
@@ -707,7 +877,9 @@ class CascadeConnection(EngineConnection):
         if not isinstance(msg, ChatMessage) or msg.role != "assistant":
             return None
         end = audio_end_ms / 1000.0
-        if spoken is not None and spoken.words:  # word-exact: TTS reported word timings
+        if spoken is not None and spoken.llm_audio:
+            heard = self._heard_llm_audio(spoken, end)
+        elif spoken is not None and spoken.words:  # word-exact: TTS reported word timings
             heard = " ".join(w.word for w in spoken.words if w.start < end)
         elif spoken is not None and spoken.segments:
             heard = " ".join(t for t, start in spoken.segments if start < end)
@@ -720,6 +892,26 @@ class CascadeConnection(EngineConnection):
         msg.interrupted = True
         self._check_speculation()
         return heard.strip()
+
+    def _heard_llm_audio(self, spoken: _Spoken, end: float) -> str:
+        """What was heard of an audio LLM's reply after ``end`` seconds of its audio.
+
+        Exact when the model reported where its text is spoken (``ChatChunk.audio_offset``).
+        Otherwise proportional: the text's share of the audio, cut after the word being
+        spoken. Omni models generate text ahead of the audio (LFM2.5-Audio: 6 text tokens
+        per 0.96 s of audio, so its text is complete when ~40 % of the audio exists), so
+        while a reply is still being generated its length is estimated from the speaking
+        rate.
+        """
+        if spoken.segments:
+            return "".join(t for t, start in spoken.segments if start < end)
+        full = "".join(spoken.text)
+        total = spoken.audio_duration
+        if not spoken.complete:
+            total = max(total, len(full) / self._speech_rate)
+        if total <= 0 or not full:
+            return ""
+        return _cut_after_word(full, round(len(full) * min(1.0, end / total)))
 
     async def send_tool_output(self, output: FunctionCallOutput, *, respond: bool = True) -> None:
         self.chat_ctx.append(output)
@@ -736,7 +928,18 @@ class CascadeConnection(EngineConnection):
             self.tools = list(tools)
         self._check_speculation()
 
+    async def update_voice(self, voice: str) -> bool:
+        self.options.voice = voice  # every reply opens its own TTS stream
+        return True
+
+    async def update_chat_ctx(self, chat_ctx: ChatContext) -> bool:
+        self.chat_ctx = ChatContext(chat_ctx.items)
+        self._check_speculation()
+        return True
+
     async def aclose(self) -> None:
+        if self._commit_watch is not None:
+            self._resolve_commit(self._commit_watch, None)
         self._discard_speculation("closed")
         await self.cancel_response()
         await self._tasks.cancel_all()
@@ -808,7 +1011,11 @@ class CascadeConnection(EngineConnection):
             output.on_release(lambda: self.chat_ctx.append(msg))
             if verbatim is not None:
                 msg.content = [verbatim]
-                await self._speak(rid, item_id, _once(verbatim), output)
+                if engine.tts is not None:
+                    await self._speak(rid, item_id, _once(verbatim), output)
+                else:
+                    logger.warning("say(): no TTS to speak verbatim text; sending the text only")
+                    output.emit(ResponseText(response_id=rid, item_id=item_id, delta=verbatim))
             else:
                 if reply is not None:
                     stream = reply
@@ -831,9 +1038,23 @@ class CascadeConnection(EngineConnection):
                     finally:
                         await source.aclose()
 
+                async def chunk_source() -> AsyncIterator[ChatChunk]:
+                    try:
+                        async for chunk in source:
+                            if chunk.delta:
+                                text_parts.append(chunk.delta)
+                                msg.content = ["".join(text_parts)]
+                            calls.extend(chunk.tool_calls)
+                            yield chunk
+                    finally:
+                        await source.aclose()
+
                 if not self._opts.preemptive_tts:
                     await output.wait_released()  # nothing speculative reaches the TTS
-                await self._speak(rid, item_id, text_source(), output)
+                if engine.llm_audio:
+                    await self._relay(rid, item_id, chunk_source(), output)
+                else:
+                    await self._speak(rid, item_id, text_source(), output)
                 await output.wait_released()  # the turn is committed: history and tools
                 if not "".join(text_parts).strip():
                     self.chat_ctx.remove(item_id)
@@ -868,11 +1089,34 @@ class CascadeConnection(EngineConnection):
             else:  # a discarded speculation: as far as anyone knows, it never existed
                 self._spoken.pop(item_id, None)
 
+    async def _relay(
+        self, rid: str, item_id: str, chunks: AsyncIterator[ChatChunk], output: _Output
+    ) -> None:
+        """Play an audio-output LLM's own speech: its audio deltas become ``ResponseAudio``
+        and its text deltas the ``ResponseText`` transcript (no text filter: the model
+        has already said it)."""
+        spoken = self._spoken[item_id] = _Spoken(llm_audio=True, complete=False)
+        async for chunk in chunks:
+            if chunk.delta:
+                spoken.text.append(chunk.delta)
+                if chunk.audio_offset is not None:
+                    spoken.segments.append((chunk.delta, chunk.audio_offset))
+                output.emit(ResponseText(response_id=rid, item_id=item_id, delta=chunk.delta))
+            if chunk.audio:
+                spoken.audio_duration += chunk.audio.duration
+                output.emit(ResponseAudio(response_id=rid, item_id=item_id, frame=chunk.audio))
+        spoken.complete = True
+        chars = len("".join(spoken.text).strip())
+        if spoken.audio_duration >= 2.0 and chars >= 20:  # refine the speaking rate
+            rate = min(25.0, max(6.0, chars / spoken.audio_duration))
+            self._speech_rate = 0.7 * self._speech_rate + 0.3 * rate
+
     async def _speak(
         self, rid: str, item_id: str, text: AsyncIterator[str], output: _Output
     ) -> None:
         """Stream ``text`` through the TTS, emitting aligned text and audio events."""
         engine = self._e
+        assert engine.tts is not None
         tts_stream = engine.tts.stream(voice=self.options.voice)
         aligned = not engine.tts.capabilities.streaming  # sentence adapter reports segment text
         segmenter = SentenceSegmenter(
@@ -931,6 +1175,16 @@ async def _once(text: str) -> AsyncIterator[str]:
 
 def _normalize(text: str) -> str:
     return " ".join(text.split())
+
+
+def _cut_after_word(text: str, n: int) -> str:
+    """``text[:n]``, extended to the end of the word it cuts (that word was being said)."""
+    if n <= 0:
+        return ""
+    end = min(n, len(text))
+    while end < len(text) and not text[end - 1].isspace() and not text[end].isspace():
+        end += 1
+    return text[:end]
 
 
 def _item_key(item: ChatItem) -> tuple[Any, ...]:

@@ -8,9 +8,9 @@
 * ``VAN_OFFLINE=1`` forbids network access (missing files raise).
 * Hugging Face files use ``huggingface_hub`` when installed (shared HF cache, auth),
   otherwise the public ``resolve`` URL.
-* Archives (``.tar.bz2``, ``.tar.gz``, ``.tar.xz``, ``.tar``) are verified, extracted with
-  path-traversal protection into a temporary directory and moved into place atomically
-  (:func:`download_archive`, :func:`extract_archive`).
+* Archives (``.tar.bz2``, ``.tar.gz``, ``.tar.xz``, ``.tar``, ``.zip``) are verified,
+  extracted with path-traversal protection into a temporary directory and moved into place
+  atomically (:func:`download_archive`, :func:`extract_archive`).
 """
 
 from __future__ import annotations
@@ -21,8 +21,10 @@ import json
 import os
 import posixpath
 import shutil
+import stat
 import tarfile
 import tempfile
+import zipfile
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -44,7 +46,7 @@ __all__ = [
     "hf_file",
 ]
 
-_ARCHIVE_SUFFIXES = (".tar.bz2", ".tbz2", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar")
+_ARCHIVE_SUFFIXES = (".tar.bz2", ".tbz2", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar", ".zip")
 _ARCHIVE_MARKER = ".van-archive.json"
 """Written into an extracted archive directory once extraction completed."""
 
@@ -175,7 +177,7 @@ def download_archive(
     client: httpx.Client | None = None,
     progress: ProgressCallback | None = None,
 ) -> Path:
-    """Download a tar archive, extract it into the cache and return the extracted directory.
+    """Download an archive, extract it into the cache and return the extracted directory.
 
     The archive is verified against ``sha256``, extracted safely (:func:`extract_archive`)
     into ``<cache>/<subdir>/<name>`` and then deleted. ``name`` defaults to the archive file
@@ -186,7 +188,8 @@ def download_archive(
     changed ``sha256`` triggers a new download.
 
     Args:
-        url: http(s) URL of a ``.tar.bz2``, ``.tar.gz``, ``.tar.xz`` or ``.tar`` file.
+        url: http(s) URL of a ``.tar.bz2``, ``.tar.gz``, ``.tar.xz``, ``.tar`` or ``.zip``
+            file.
         sha256: expected hex digest of the archive.
         subdir: sub-directory of the cache, e.g. ``"sherpa-onnx"``.
         name: directory name in the cache (default: the archive name without extension).
@@ -230,7 +233,7 @@ def download_archive(
             # another process may have finished the same extraction first
             if _read_marker(target) is None:
                 raise
-    except (OSError, tarfile.TarError) as exc:
+    except (OSError, tarfile.TarError, zipfile.BadZipFile) as exc:
         raise DownloadError(f"cannot extract {archive} into {target}: {exc}") from exc
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -266,7 +269,8 @@ def _check_member(member: tarfile.TarInfo) -> None:
 
 
 def extract_archive(archive: str | os.PathLike[str], destination: str | os.PathLike[str]) -> None:
-    """Extract a tar archive (any compression) into ``destination``, refusing unsafe members.
+    """Extract a tar archive (any compression) or a zip file into ``destination``, refusing
+    unsafe members.
 
     Absolute paths, ``..`` components, Windows drive letters, links pointing outside the
     archive and device files raise :class:`DownloadError` (on top of Python's ``"data"``
@@ -276,6 +280,9 @@ def extract_archive(archive: str | os.PathLike[str], destination: str | os.PathL
     """
     dest = Path(destination)
     dest.mkdir(parents=True, exist_ok=True)
+    if zipfile.is_zipfile(archive):
+        _extract_zip(Path(archive), dest)
+        return
     with tarfile.open(archive, "r:*") as tar:
         for member in tar:
             _check_member(member)
@@ -314,3 +321,18 @@ def hf_file(
     return download(
         url, filename=filename.split("/")[-1], subdir=f"hf/{repo_id}/{revision}", sha256=sha256
     )
+
+
+def _extract_zip(archive: Path, dest: Path) -> None:
+    """Extract a zip file; Unix permission bits are kept for executables (zipfile drops
+    them), and symlinks, absolute paths and ``..`` components are refused."""
+    with zipfile.ZipFile(archive) as zf:
+        for info in zf.infolist():
+            if _unsafe_path(info.filename):
+                raise DownloadError(f"unsafe path in archive: {info.filename!r}")
+            mode = info.external_attr >> 16
+            if stat.S_ISLNK(mode):
+                raise DownloadError(f"unsupported symlink in archive: {info.filename!r}")
+            path = Path(zf.extract(info, dest))
+            if not info.is_dir() and mode & 0o111:
+                path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)

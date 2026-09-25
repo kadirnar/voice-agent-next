@@ -38,12 +38,18 @@ class Agent:
                 \"\"\"Book a restaurant table.\"\"\"
                 return "booked"
 
+    A tool that returns another ``Agent`` hands the conversation over to it (see
+    :mod:`~voice_agent_next.session.handoff`).
+
     Args:
         instructions: system prompt.
         tools: function tools (plain callables are wrapped with ``function_tool``).
-        greeting: text spoken verbatim when the session starts (optional).
+        greeting: text spoken verbatim when the session starts, or when the conversation
+            is handed over to this agent (optional).
+        name: identifies the agent in events, metrics and traces (handoffs).
         voice / language: forwarded to the engine.
-        chat_ctx: initial conversation history.
+        chat_ctx: initial conversation history (on a handoff: put before the carried-over
+            history).
     """
 
     def __init__(
@@ -83,10 +89,14 @@ class Agent:
 
     # ------------------------------------------------------------------- hooks
     async def on_enter(self, session: AgentSession) -> None:
-        """Called once the session is connected (before the greeting)."""
+        """Called when this agent becomes active: once the session is connected, or when
+        the conversation is handed over to it (before its greeting). Speaking here
+        (``session.say`` / ``session.generate_reply``) replaces the automatic reply of a
+        handoff."""
 
     async def on_exit(self, session: AgentSession) -> None:
-        """Called when the session closes."""
+        """Called when this agent stops being active: it hands the conversation over to
+        another agent, or the session closes."""
 
     async def on_user_turn_completed(self, session: AgentSession, message: ChatMessage) -> None:
         """Called with the final transcript of each user turn."""
