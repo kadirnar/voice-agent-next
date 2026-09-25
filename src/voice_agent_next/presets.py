@@ -103,12 +103,14 @@ class Preset:
         return AppConfig.model_validate({**copy.deepcopy(dict(self.config)), "extends": self.name})
 
     def components(self) -> list[tuple[str, Any]]:
-        """``(config key, provider spec)`` of every component, failover members included."""
+        """``(config key, provider spec)`` of every component, failover members and the
+        halves of a ``fused`` turn detector included."""
         return [
-            (key, member)
+            (key, part)
             for key in _KINDS
             if self.config.get(key) is not None
             for member in _members(self.config[key])
+            for part in (member, *_fused_parts(key, member))
         ]
 
     def stack(self) -> str:
@@ -585,6 +587,20 @@ def _lookup(kind: ComponentKind, spec: Any) -> Any:
         return None
 
 
+def _fused_parts(key: str, spec: Any) -> list[Any]:
+    """The audio and text detectors of a ``fused`` turn detector (``[]`` for anything else).
+
+    They are created by :class:`~voice_agent_next.turn.FusedTurnDetector` itself, so the
+    registry entry of ``fused`` knows nothing of their extras: the checks look at them.
+    """
+    if key != "turn_detector" or not isinstance(spec, (str, Mapping)):
+        return []
+    name, _, options = _split(spec)
+    if name != "fused":
+        return []
+    return [options.get("audio", "smart_turn"), options.get("text", "lm_turn")]
+
+
 def _describe(spec: Any) -> str:
     if isinstance(spec, Mapping):
         return str(spec.get("provider") or spec.get("use") or spec)
@@ -636,6 +652,8 @@ def _member_problems(key: str, spec: Any, env: Environment) -> list[Problem]:
                 f"set {provider.env[0]} (e.g. `export {provider.env[0]}=...`)",
             )
         )
+    for part in _fused_parts(key, spec):
+        problems += _member_problems(key, part, env)
     if provider.name == "ollama":
         problems += _ollama_problems(key, model or provider.default_model or "", options, env)
     if provider.name == "mlx_lm":
