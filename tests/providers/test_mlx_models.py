@@ -107,6 +107,36 @@ async def test_whisper_tiny_transcribes_a_public_domain_clip() -> None:
     )
 
 
+async def _stream_in_real_time(stt: STT, clip: AudioFrame) -> tuple[str, float, int]:
+    """Stream ``clip`` like a microphone; ``(final text, final latency, interim count)``."""
+    metrics: list[STTMetrics] = []
+    stt.on("metrics", metrics.append)
+    stream = stt.stream()
+    finals: list[str] = []
+    interims = 0
+
+    async def consume() -> None:
+        nonlocal interims
+        async for ev in stream:
+            if ev.type == STTEventType.INTERIM_TRANSCRIPT:
+                interims += 1
+            elif ev.type == STTEventType.FINAL_TRANSCRIPT:
+                finals.append(ev.text)
+
+    reader = asyncio.create_task(consume())
+    start = now()
+    for i, frame in enumerate(_chunks(clip)):
+        stream.push_audio(frame)
+        await asyncio.sleep(max(0.0, start + (i + 1) * 0.02 - now()))
+    stream.end_input()
+    await reader
+    await stream.aclose()
+    stt.off("metrics", metrics.append)
+    [m] = [m for m in metrics if m.streamed]
+    assert m.latency is not None
+    return " ".join(finals), m.latency, interims
+
+
 @pytest.mark.timeout(900)
 async def test_parakeet_streams_a_clip() -> None:
     model = os.environ.get("VAN_TEST_MLX_PARAKEET")
@@ -122,37 +152,29 @@ async def test_parakeet_streams_a_clip() -> None:
     load = now() - t0
     batch = await stt.transcribe(clip)
     assert "your country can do for you" in _normalize(batch.text)
-
-    metrics: list[STTMetrics] = []
-    stt.on("metrics", metrics.append)
-    stream = stt.stream()
-    interims: list[float] = []
-    finals: list[str] = []
-
-    async def consume() -> None:
-        async for ev in stream:
-            if ev.type == STTEventType.INTERIM_TRANSCRIPT:
-                interims.append(now())
-            elif ev.type == STTEventType.FINAL_TRANSCRIPT:
-                finals.append(ev.text)
-
-    reader = asyncio.create_task(consume())
-    start = now()
-    for i, frame in enumerate(_chunks(clip)):  # real time, like a microphone
-        stream.push_audio(frame)
-        await asyncio.sleep(max(0.0, start + (i + 1) * 0.02 - now()))
-    stream.end_input()
-    await reader
-    await stream.aclose()
-    await stt.aclose()
-    assert "your country can do for you" in _normalize(" ".join(finals))
-    [m] = [m for m in metrics if m.streamed]
-    assert m.latency is not None and m.latency < 1.0
+    turn = clip.slice(0.0, 3.0)
+    times = []
+    for _ in range(3):
+        t0 = now()
+        await stt.transcribe(turn)
+        times.append(now() - t0)
     print(
-        f"\nparakeet-mlx {model}: load+warm-up {load:.2f} s; streaming {clip.duration:.1f} s "
-        f"in real time: {len(interims)} interim results, final {m.latency * 1000:.0f} ms "
-        "after the flush"
+        f"\nparakeet-mlx {model}: load+warm-up {load:.2f} s; batch final for a 3 s turn "
+        f"{min(times) * 1000:.0f} ms (best of 3)"
     )
+    default = stt.context_size
+    for context in (default, (256, 32), (128, 16)):
+        stt.context_size = context
+        text, latency, interims = await _stream_in_real_time(stt, clip)
+        print(
+            f"  streaming {clip.duration:.1f} s in real time, context {context}: "
+            f"{interims} interim results, final {latency * 1000:.0f} ms after the flush: "
+            f"{text!r}"
+        )
+        if context == default:
+            assert "your country can do for you" in _normalize(text)
+            assert latency < 1.0
+    await stt.aclose()
 
 
 # ------------------------------------------------------------------------ TTS
