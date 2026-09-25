@@ -136,7 +136,8 @@ jobs:
       - name: "Smoke: baked models are complete and load offline"
         run: |
           docker image ls van:baked --format '{{.Repository}}:{{.Tag}} {{.Size}}'
-          docker run --rm -e NO_COLOR=1 van:baked models verify
+          docker run --rm -e NO_COLOR=1 van:baked models verify sherpa-onnx/zipformer-en-kroko \
+            kokoro/v1.0-fp16 silero/v6.2 smart-turn/smart-turn-v3.2-cpu
           docker run --rm -e VAN_OFFLINE=1 van:baked python -c "
           import asyncio
           from voice_agent_next.registry import create

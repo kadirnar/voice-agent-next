@@ -86,7 +86,7 @@ ENV PATH=/opt/venv/bin:${PATH} \
     VAN_CACHE_DIR=/models \
     HF_HOME=/models/hf
 
-USER van
+USER 1000:1000
 WORKDIR /home/van
 # openai-realtime, webrtc, websocket / telephony
 EXPOSE 8000 8080 8765
