@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: "17 4 * * 1"  # Mondays 04:17 UTC
   workflow_dispatch:
+    inputs:
+      mlx-large:
+        description: "Only the MLX job, with the opt-in larger models too (Parakeet 110M, Kokoro, mlx-lm with Qwen3 1.7B; ~1.8 GB more)"
+        type: boolean
+        default: false
   pull_request:
     types: [labeled, synchronize]
 
@@ -16,7 +21,9 @@ concurrency:
 
 jobs:
   models:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:models')
+    if: >-
+      (github.event_name != 'pull_request' && !inputs.mlx-large) ||
+      contains(github.event.pull_request.labels.*.name, 'ci:models')
     name: models (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
@@ -51,3 +58,42 @@ jobs:
           restore-keys: models-${{ runner.os }}-
       - run: uv sync --extra silero --extra smart-turn --extra faster-whisper --extra kokoro --extra aec --extra moonshine
       - run: uv run pytest -q -m model --durations=15
+
+  # MLX providers (extras `mlx`, `mlx-whisper`) on an Apple silicon runner: Whisper tiny
+  # (74 MB) and Pocket TTS (240 MB) always; the larger models on a manual run with
+  # `mlx-large` (see tests/providers/test_mlx_models.py).
+  mlx:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:models')
+    name: models (macos-latest, MLX)
+    runs-on: macos-latest
+    timeout-minutes: 40
+    env:
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      VAN_TEST_MLX_PARAKEET: ${{ inputs.mlx-large && 'parakeet-tdt_ctc-110m' || '' }}
+      VAN_TEST_MLX_KOKORO: ${{ inputs.mlx-large && '1' || '' }}
+      VAN_TEST_MLX_LM_MODEL: ${{ inputs.mlx-large && 'mlx-community/Qwen3-1.7B-4bit' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: model cache locations
+        shell: bash
+        run: |
+          echo "VAN_CACHE_DIR=${RUNNER_TEMP}/van" >> "$GITHUB_ENV"
+          echo "HF_HOME=${RUNNER_TEMP}/hf" >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: model cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/van
+            ${{ runner.temp }}/hf
+          key: models-mlx-${{ inputs.mlx-large && 'large' || 'small' }}-${{ hashFiles('tests/providers/test_mlx_models.py') }}
+          restore-keys: models-mlx-${{ inputs.mlx-large && 'large' || 'small' }}-
+      - run: uv sync --extra mlx --extra mlx-whisper
+      # Kokoro's English G2P: misaki would pip-install spaCy's model, but a uv venv has no pip
+      - if: inputs.mlx-large
+        run: uv pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+      - run: uv run --no-sync van providers --json > /dev/null
+      - run: uv run --no-sync pytest -s -q -m model tests/providers/test_mlx_models.py --durations=10

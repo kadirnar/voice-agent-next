@@ -23,9 +23,10 @@ research note 03 (§9.2); each preset's ``rationale`` says which. See ``docs/pre
 
 Readiness (:func:`check_preset`) is computed from the provider registry (dependencies,
 credentials, platforms) plus what the registry cannot know: whether the machine has the
-GPU a preset is built for, whether the Ollama server runs and has the model, and whether
-the local audio transport is installed. Failover lists are pruned to their ready members,
-so a cloud preset still runs with only one of its LLM vendors' keys set.
+GPU a preset is built for, whether the Ollama server runs and has the model, whether the
+mlx-lm server runs, and whether the local audio transport is installed. Failover lists are
+pruned to their ready members, so a cloud preset still runs with only one of its LLM
+vendors' keys set.
 """
 
 from __future__ import annotations
@@ -77,6 +78,7 @@ _KINDS: dict[str, ComponentKind] = {
 }
 _PLATFORM_NAMES = {"linux": "Linux", "darwin": "macOS", "win32": "Windows"}
 OLLAMA_DEFAULT_URL = "http://127.0.0.1:11434/v1"
+MLX_LM_DEFAULT_URL = "http://127.0.0.1:8080/v1"
 
 
 @dataclass(frozen=True)
@@ -197,21 +199,26 @@ _PRESETS: tuple[Preset, ...] = (
     ),
     Preset(
         name="apple",
-        summary="Apple silicon: sherpa-onnx streaming STT, Ollama on Metal, Kokoro on CoreML",
+        summary="Apple silicon on MLX: Parakeet streaming STT, mlx-lm (or Ollama), Kokoro",
         config={
-            "stt": "sherpa-onnx/zipformer-en-kroko",
-            "llm": "ollama/qwen3.5:4b",
-            "tts": "kokoro/v1.0-fp16",
+            "stt": "mlx/parakeet-tdt-0.6b-v3",
+            "llm": ["mlx_lm/mlx-community/Qwen3.5-4B-4bit", "ollama/qwen3.5:4b"],
+            "tts": "mlx_audio/kokoro",
             "vad": "silero",
             "turn_detector": "smart_turn",
         },
         rationale=(
-            "The streaming Kroko recognizer of local-cpu (arm64 wheels, ~100 ms final); "
-            "Ollama runs Qwen3.5-4B on the Metal GPU, which leaves room for a larger model "
-            "than on a laptop CPU (note 03 §9.2 recommends Qwen3.5 / Gemma 4 E4B at 4-bit; "
-            "use `--llm ollama/qwen3.5:9b` with 16 GB or more); Kokoro's device='auto' picks "
-            "CoreML on Apple silicon (docs/hardware.md). MLX runtimes (parakeet-mlx, "
-            "mlx-audio) are not integrated yet."
+            "Note 03 §9.2's Apple silicon stack, all on the GPU through MLX: parakeet-mlx "
+            "streams Parakeet TDT 0.6B v3 (25 European languages), idle once the user stops "
+            "talking, so the final transcript is one pass (on a GitHub M1 runner the 110M "
+            "Parakeet finalized a 3 s turn 127 ms after the flush); mlx_lm.server runs "
+            "Qwen3.5-4B at 4-bit (Qwen3-1.7B 4-bit there: 211 ms TTFT and a correct tool "
+            "call; note 03 recommends Qwen3.5 / Gemma 4 E4B at 4-bit; use "
+            "`--llm mlx_lm/mlx-community/Qwen3.5-9B-4bit` with 16 GB or more), with Ollama "
+            "as the failover when no mlx-lm server runs; Kokoro-82M through mlx-audio "
+            "(`--tts mlx_audio/pocket-tts` streams audio: 140 ms to first audio against "
+            "Kokoro's 542 ms per segment; docs/providers/mlx.md). "
+            f"{_TURN_TAKING})."
         ),
         where="local",
         platforms=("darwin",),
@@ -378,6 +385,23 @@ def _ollama_models(base_url: str) -> list[str] | None:
         return None
 
 
+def _openai_models(base_url: str) -> list[str] | None:
+    """Model ids of an OpenAI-compatible server (``GET /models``), ``None`` if it does not
+    answer (the mlx-lm server's list is the MLX models in the Hugging Face cache)."""
+    import json
+    import urllib.request
+
+    root = base_url.rstrip("/")
+    if not root.startswith(("http://", "https://")):
+        return None
+    try:
+        with urllib.request.urlopen(f"{root}/models", timeout=1.5) as response:
+            models = json.loads(response.read()).get("data", [])
+        return [str(m.get("id")) for m in models]
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 @dataclass
 class Environment:
     """What readiness checks look at; every probe can be replaced (tests fake them)."""
@@ -392,6 +416,9 @@ class Environment:
     ollama_models: Callable[[str], Sequence[str] | None] = _ollama_models
     """Models of the Ollama server at a ``/v1`` base URL, ``None`` if unreachable."""
     _ollama_cache: dict[str, Sequence[str] | None] = field(default_factory=dict, repr=False)
+    mlx_lm_models: Callable[[str], Sequence[str] | None] = _openai_models
+    """Models of the mlx-lm server at a ``/v1`` base URL, ``None`` if unreachable."""
+    _mlx_lm_cache: dict[str, Sequence[str] | None] = field(default_factory=dict, repr=False)
 
     def ollama(self, base_url: str) -> Sequence[str] | None:
         if base_url not in self._ollama_cache:
@@ -408,6 +435,17 @@ class Environment:
             return self.environ["OLLAMA_BASE_URL"]
         host = self.environ.get("OLLAMA_HOST", "").strip()
         return ollama_base_url(host) if host else OLLAMA_DEFAULT_URL
+
+    def mlx_lm(self, base_url: str) -> Sequence[str] | None:
+        if base_url not in self._mlx_lm_cache:
+            self._mlx_lm_cache[base_url] = self.mlx_lm_models(base_url)
+        return self._mlx_lm_cache[base_url]
+
+    def mlx_lm_url(self, options: Mapping[str, Any]) -> str:
+        """The ``/v1`` URL :class:`~voice_agent_next.providers.mlx_lm.MLXLMServerLLM` uses."""
+        if options.get("base_url"):
+            return str(options["base_url"])
+        return self.environ.get("MLX_LM_BASE_URL") or MLX_LM_DEFAULT_URL
 
 
 def current_environment() -> Environment:
@@ -559,6 +597,8 @@ def _member_problems(key: str, spec: Any, env: Environment) -> list[Problem]:
         )
     if provider.name == "ollama":
         problems += _ollama_problems(key, model or provider.default_model or "", options, env)
+    if provider.name == "mlx_lm":
+        problems += _mlx_lm_problems(key, model, options, env)
     return problems
 
 
@@ -579,6 +619,23 @@ def _ollama_problems(
     if _normalize_ollama(model) not in {_normalize_ollama(m) for m in models}:
         return [Problem(key, f"Ollama has no model {model}", f"ollama pull {model}")]
     return []
+
+
+def _mlx_lm_problems(
+    key: str, model: str | None, options: Mapping[str, Any], env: Environment
+) -> list[Problem]:
+    """The server must run; it downloads and loads the requested model by itself."""
+    url = env.mlx_lm_url(options)
+    if env.mlx_lm(url) is not None:
+        return []
+    name = model if model and model != "default_model" else "<mlx-community model>"
+    return [
+        Problem(
+            key,
+            f"no mlx-lm server at {url}",
+            f"start it (Apple silicon, extra `mlx`): python -m mlx_lm.server --model {name}",
+        )
+    ]
 
 
 def _check_components(
