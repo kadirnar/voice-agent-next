@@ -180,6 +180,19 @@ _TURN_TAKING_NOTE = (
 )
 
 
+FUSED_TURN_DETECTOR: Mapping[str, Any] = {
+    "provider": "fused",
+    "audio": "smart_turn",
+    "text": "lm_turn",
+}
+"""Smart Turn v3.2 fused with the ``lm_turn`` text model (SmolLM2-135M int8, 137 MB,
+extra ``text-turn``), the turn detector of ``local-cpu`` (issue #155). With a streaming
+STT the transcript is already there at the pause, so the text half costs ~30 ms of
+end-of-turn delay; behind a batch STT (faster-whisper in ``local-gpu``) it waits for the
+final transcript and cost 100-230 ms, with no fewer premature replies: see
+``docs/benchmarks/results.md``."""
+
+
 def _local_turn_taking(*, preemptive: bool = True) -> dict[str, Any]:
     cascade = dict(LOCAL_TURN_TAKING["cascade"])
     if not preemptive:  # speculative calls to a paid LLM cost money when discarded
@@ -196,7 +209,7 @@ _PRESETS: tuple[Preset, ...] = (
             "llm": "ollama/LiquidAI/lfm2.5-1.2b-instruct",
             "tts": "kokoro/v1.0-fp16",
             "vad": "silero",
-            "turn_detector": "smart_turn",
+            "turn_detector": dict(FUSED_TURN_DETECTOR),
             **_local_turn_taking(),
         },
         rationale=(
