@@ -178,3 +178,16 @@ async def test_kokoro_uses_the_snapshot_voices(
     assert call["voice"] == str(voices / "af_heart.safetensors") and call["lang_code"] == "a"
     await tts.synthesize("Hi.", voice="bf_emma").collect()  # not in the snapshot: by name
     assert mlx_fakes.tts_calls[-1]["voice"] == "bf_emma"
+
+
+@pytest.mark.usefixtures("g2p")
+async def test_kokoro_language_option(mlx_fakes: MLXFakes) -> None:
+    tts = create("tts", "mlx_audio/kokoro", voice="af_heart", language="en-GB")
+    await tts.synthesize("Hello.").collect()
+    assert mlx_fakes.tts_calls[-1]["lang_code"] == "b"  # a language tag, mapped
+    tts = create("tts", "mlx_audio/kokoro", voice="af_heart", language="j")
+    await tts.synthesize("Hello.").collect()
+    assert mlx_fakes.tts_calls[-1]["lang_code"] == "j"  # a Kokoro code, as is
+    with pytest.warns(DeprecationWarning, match=r"MLXAudioTTS\(lang_code=\.\.\.\)"):
+        old = create("tts", "mlx_audio/kokoro", voice="af_heart", lang_code="e")
+    assert old.language == old.lang_code == "e"

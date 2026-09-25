@@ -529,8 +529,8 @@ async def test_cumulative_usage_from_message_delta_wins(api: FakeAnthropicAPI) -
         (403, "permission_error", AuthenticationError, False),
         (404, "not_found_error", ProviderError, False),
         (429, "rate_limit_error", RateLimitError, True),
-        (500, "api_error", ProviderError, True),
-        (529, "overloaded_error", ProviderError, True),
+        (500, "api_error", ProviderConnectionError, True),
+        (529, "overloaded_error", ProviderConnectionError, True),
     ],
 )
 async def test_http_errors_are_mapped(
@@ -595,7 +595,7 @@ async def test_error_event_mid_stream_is_mapped_after_the_text_so_far(
         await consume()
 
     assert received == ["Hel"]
-    assert type(info.value) is ProviderError
+    assert type(info.value) is ProviderConnectionError
     assert (info.value.status_code, info.value.retryable) == (529, True)
     assert "overloaded_error" in str(info.value) and "Overloaded" in str(info.value)
 
@@ -712,8 +712,8 @@ async def test_request_options_and_extra_body(api: FakeAnthropicAPI) -> None:
         api,
         model="claude-sonnet-4-6",
         temperature=0.2,
-        extra_params={"metadata": {"user_id": "caller-42"}, "top_k": 5},
-        extra_headers={"anthropic-beta": "some-beta-2026-01-01"},
+        extra={"metadata": {"user_id": "caller-42"}, "top_k": 5},
+        headers={"anthropic-beta": "some-beta-2026-01-01"},
     )
 
     await run(

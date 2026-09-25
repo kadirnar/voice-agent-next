@@ -27,12 +27,12 @@ from urllib.parse import urlsplit
 import httpx
 
 from ...errors import (
-    AuthenticationError,
     ConfigurationError,
+    MissingAPIKeyError,
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
-    RateLimitError,
+    for_status,
 )
 from ...utils.log import logger
 
@@ -138,7 +138,7 @@ class APIEndpoint:
         required = api_key_required and (not guard_openai_key or is_openai_host(resolved))
         if required and not key and not has_auth:
             names = " or ".join(api_key_env) or "api_key=..."
-            raise ConfigurationError(f"{owner} needs an API key: pass api_key=... or set {names}")
+            raise MissingAPIKeyError(f"{owner} needs an API key: pass api_key=... or set {names}")
         return cls(resolved, key, auth_header, extra)
 
     def url(self, path: str) -> str:
@@ -201,19 +201,12 @@ def http_error(
     """Map an HTTP error response to :mod:`voice_agent_next.errors`."""
     detail, code = _error_fields(body)
     message = f"{provider}: HTTP {status}" + (f": {detail}" if detail else "")
-    if status in (401, 403):
-        return AuthenticationError(message, provider=provider, status_code=status)
-    if status == 429:
+    if status == 429 and code == "insufficient_quota":
         # an exhausted quota does not recover by retrying
-        return RateLimitError(
-            message, provider=provider, status_code=status, retryable=code != "insufficient_quota"
-        )
-    if status in (408, 504):
-        return ProviderTimeoutError(message, provider=provider, status_code=status)
+        return for_status(status, message, provider=provider, retryable=False)
     if status == 404 and hint:
         message = f"{message} ({hint})"
-    retryable = status >= 500 or status == 409
-    return ProviderError(message, provider=provider, status_code=status, retryable=retryable)
+    return for_status(status, message, provider=provider)
 
 
 def transport_error(provider: str, exc: httpx.HTTPError, url: str) -> ProviderError:

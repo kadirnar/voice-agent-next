@@ -72,7 +72,7 @@ $0.018/min; see the [pricing page](https://ai.google.dev/gemini-api/docs/pricing
 | `carry_over` | `TruncateHistory()` | how the conversation is fitted into a *fresh* session when resumption is impossible (`SummarizeHistory(llm)` summarizes older turns); see `docs/concepts/session-rotation.md` |
 | `local_vad` | `True` | cheap energy VAD on the sent audio: speech-end estimates, idle detection and the start of manual turns (never automatic end of turn) |
 | `base_url`, `api_version` | Google, `v1beta` | endpoint (proxies, tests) |
-| `extra_setup` | `{}` | extra `setup` fields in API camel case, deep-merged last (`EngineOptions.extra` too) |
+| `extra_config` | `{}` | extra `setup` fields in API camel case, deep-merged last (`EngineOptions.extra` too); `extra_setup` is a deprecated alias |
 
 The language (`Agent(language="de-DE")`) is passed to the input transcriber as a hint; native
 audio models choose the spoken language themselves (steer it in the instructions).

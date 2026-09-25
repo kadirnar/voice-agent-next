@@ -47,10 +47,12 @@ from ..audio.wav import wav_bytes
 from ..errors import (
     AuthenticationError,
     ConfigurationError,
+    MissingAPIKeyError,
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
     RateLimitError,
+    for_status,
 )
 from ..metrics import STTMetrics
 from ..registry import register_provider
@@ -67,6 +69,8 @@ from ..utils.aio import Chan, ChanClosed, cancel_and_wait
 from ..utils.clock import now
 from ..utils.ids import new_id
 from ..utils.log import logger
+from ._options import deprecated
+from ._ws import body_text, close_ws, raise_reader_error, ws_connect
 
 if TYPE_CHECKING:
     import httpx
@@ -123,7 +127,7 @@ def _resolve_api_key(api_key: str | None) -> str:
     for candidate in (api_key, *(os.environ.get(name) for name in API_KEY_ENV)):
         if candidate and candidate.strip():
             return candidate.strip()
-    raise ConfigurationError(
+    raise MissingAPIKeyError(
         "ElevenLabs needs an API key: pass api_key=... or set ELEVEN_API_KEY "
         "(or ELEVENLABS_API_KEY)"
     )
@@ -215,14 +219,7 @@ def _error_for_status(status: int | None, message: str, *, code: str = "") -> Pr
     if code.lower() in ("quota_exceeded", "insufficient_credits"):
         # not a transient rate limit: retrying does not help until the quota is raised
         return RateLimitError(message, provider=_PROVIDER, status_code=status, retryable=False)
-    if status in (401, 403):
-        return AuthenticationError(message, provider=_PROVIDER, status_code=status)
-    if status == 429:
-        return RateLimitError(message, provider=_PROVIDER, status_code=status)
-    if status in (408, 504):
-        return ProviderTimeoutError(message, provider=_PROVIDER, status_code=status)
-    retryable = status is not None and status >= 500
-    return ProviderError(message, provider=_PROVIDER, retryable=retryable, status_code=status)
+    return for_status(status, message, provider=_PROVIDER)
 
 
 def _describe(data: Any) -> tuple[str, str]:
@@ -315,36 +312,16 @@ def _closed(exc: ConnectionClosed, what: str) -> ProviderError:
 async def _ws_connect(
     url: str, headers: Mapping[str, str], *, open_timeout: float, what: str
 ) -> ClientConnection:
-    from websockets.asyncio.client import connect
-    from websockets.exceptions import InvalidHandshake, InvalidStatus, InvalidURI
-
-    try:
-        return await connect(
-            url,
-            additional_headers=dict(headers),
-            open_timeout=open_timeout,
-            max_size=_MAX_MESSAGE_BYTES,
-            close_timeout=2.0,
-        )
-    except InvalidStatus as exc:
-        body = exc.response.body or b""
-        raise _http_error(exc.response.status_code, body.decode("utf-8", "replace")) from exc
-    except InvalidURI as exc:
-        raise ConfigurationError(f"invalid ElevenLabs URL: {exc}") from exc
-    except TimeoutError as exc:
-        raise ProviderTimeoutError(
-            f"timed out connecting to the ElevenLabs {what} API", provider=_PROVIDER
-        ) from exc
-    except (OSError, InvalidHandshake) as exc:
-        raise ProviderConnectionError(
-            f"cannot connect to the ElevenLabs {what} API: {exc}", provider=_PROVIDER
-        ) from exc
-
-
-async def _close_ws(ws: ClientConnection) -> None:
-    with contextlib.suppress(Exception):
-        async with asyncio.timeout(2.0):
-            await ws.close()
+    return await ws_connect(
+        url,
+        provider=_PROVIDER,
+        target=f"the ElevenLabs {what} API",
+        name="ElevenLabs",
+        http_error=lambda r: _http_error(r.status_code, body_text(r)),
+        headers=headers,
+        open_timeout=open_timeout,
+        max_size=_MAX_MESSAGE_BYTES,
+    )
 
 
 def _parse(raw: str | bytes, what: str) -> dict[str, Any] | None:
@@ -357,26 +334,6 @@ def _parse(raw: str | bytes, what: str) -> dict[str, Any] | None:
         logger.warning("ElevenLabs %s: ignoring invalid JSON: %.200s", what, raw)
         return None
     return msg if isinstance(msg, dict) else None
-
-
-def _task_error(task: asyncio.Task[Any]) -> BaseException | None:
-    return task.exception() if task.done() and not task.cancelled() else None
-
-
-async def _raise_task_error(
-    reader: asyncio.Task[Any], writer: asyncio.Task[Any], *, grace: float = 0.5
-) -> None:
-    """Raise the error of ``reader`` or else ``writer``, preferring the server's reason.
-
-    A writer failing because the server hung up is usually followed by the server's
-    explanation on the reader side: wait ``grace`` seconds for it.
-    """
-    if _task_error(writer) is not None and not reader.done():
-        await asyncio.wait((reader,), timeout=grace)
-    for task in (reader, writer):
-        error = _task_error(task)
-        if error is not None:
-            raise error
 
 
 # ------------------------------------------------------------------ TTS: server messages
@@ -1106,7 +1063,7 @@ class _Connection:
 
     async def aclose(self) -> None:
         self.closed = True
-        await _close_ws(self.ws)
+        await close_ws(self.ws)
         await cancel_and_wait(self._reader, self._keeper)
 
 
@@ -1174,7 +1131,7 @@ class _ElevenLabsSynthesizeStream(SynthesizeStream):
         player = asyncio.create_task(self._play(segments), name="elevenlabs-tts-play")
         try:
             await asyncio.wait((feeder, player), return_when=asyncio.FIRST_EXCEPTION)
-            await _raise_task_error(player, feeder)
+            await raise_reader_error(player, feeder)
         finally:
             segments.close()
             await cancel_and_wait(feeder, player)
@@ -1486,10 +1443,15 @@ class ElevenLabsSTT(STT):
         connect_timeout: connection / handshake timeout in seconds.
         close_timeout: how long to wait for the last commit's transcript after the input
             ends.
-        request_timeout: HTTP timeout of :meth:`transcribe`.
+        timeout: HTTP timeout of :meth:`transcribe`. (``request_timeout`` is a deprecated alias.)
     """
 
     provider = "elevenlabs"
+
+    @property
+    def request_timeout(self) -> float:
+        """Deprecated alias of :attr:`timeout`."""
+        return self.timeout
 
     def __init__(
         self,
@@ -1520,8 +1482,11 @@ class ElevenLabsSTT(STT):
         http_client: httpx.AsyncClient | None = None,
         connect_timeout: float = 10.0,
         close_timeout: float = 5.0,
-        request_timeout: float = 60.0,
+        timeout: float = 60.0,
+        request_timeout: float | None = None,
     ) -> None:
+        if request_timeout is not None:
+            timeout = deprecated("ElevenLabsSTT", "timeout", "request_timeout", request_timeout)
         realtime = "realtime" in model
         if realtime and sample_rate not in STT_SAMPLE_RATES:
             raise ConfigurationError(
@@ -1576,7 +1541,7 @@ class ElevenLabsSTT(STT):
         self.keepalive_interval = keepalive_interval
         self.connect_timeout = connect_timeout
         self.close_timeout = close_timeout
-        self.request_timeout = request_timeout
+        self.timeout = timeout
         self._http = http_client
         self._owns_http = http_client is None
 
@@ -1620,7 +1585,7 @@ class ElevenLabsSTT(STT):
 
         if self._http is None:
             self._http = httpx.AsyncClient(
-                timeout=httpx.Timeout(self.request_timeout, connect=self.connect_timeout)
+                timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout)
             )
             self._owns_http = True
         return self._http
@@ -1729,7 +1694,7 @@ class _ScribeStream(STTStream):
         receiver = asyncio.create_task(self._recv_loop(ws), name="elevenlabs-stt-recv")
         try:
             await asyncio.wait((sender, receiver), return_when=asyncio.FIRST_COMPLETED)
-            await _raise_task_error(receiver, sender)
+            await raise_reader_error(receiver, sender)
             if not sender.done():  # the server ended the session while audio was flowing
                 raise self._server_error or ProviderConnectionError(
                     "ElevenLabs STT WebSocket closed unexpectedly", provider=_PROVIDER
@@ -1742,7 +1707,7 @@ class _ScribeStream(STTStream):
                                    return_when=asyncio.FIRST_COMPLETED)  # fmt: skip
             finally:
                 settled.cancel()
-            await _raise_task_error(receiver, sender)
+            await raise_reader_error(receiver, sender)
             if self._pending_commits:
                 logger.warning(
                     "ElevenLabs STT: no transcript for the last commit %.1fs after the end "
@@ -1755,7 +1720,7 @@ class _ScribeStream(STTStream):
         finally:
             self._closing = True
             await cancel_and_wait(sender, receiver)
-            await _close_ws(ws)
+            await close_ws(ws)
 
     # ---------------------------------------------------------------- sending
     def _chunk(self, pcm: bytes, *, commit: bool) -> str:

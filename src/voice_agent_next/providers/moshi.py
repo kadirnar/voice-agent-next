@@ -78,7 +78,7 @@ from ..errors import (
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
-    RateLimitError,
+    for_status,
 )
 from ..events import (
     EngineErrorEvent,
@@ -101,6 +101,7 @@ from ..utils.deps import require
 from ..utils.ids import new_id
 from ..utils.log import logger
 from ..vad import VADEventType, VADOptions, VADStream
+from ._options import renamed
 from .energy import EnergyVAD
 
 if TYPE_CHECKING:
@@ -201,13 +202,7 @@ class OpusDecoder:
 # ----------------------------------------------------------------------------- helpers
 def _http_error(status: int, body: str, provider: str) -> ProviderError:
     msg = f"{provider} server rejected the connection (HTTP {status}): {body.strip()[:300]}"
-    if status in (401, 403):
-        return AuthenticationError(msg, provider=provider, status_code=status)
-    if status == 429:
-        return RateLimitError(msg, provider=provider, status_code=status)
-    if status >= 500:
-        return ProviderConnectionError(msg, provider=provider, status_code=status)
-    return ProviderError(msg, provider=provider, status_code=status)
+    return for_status(status, msg, provider=provider)
 
 
 async def _close_quietly(ws: ClientConnection, timeout: float = 2.0) -> None:
@@ -244,8 +239,9 @@ class MoshiEngine(S2SEngine):
     Args:
         model: label of the model the server runs (``moshiko``, ``moshika``...). The
             server loads one model at start-up; this is informational (metrics).
-        url: server origin, e.g. ``"ws://localhost:8998"`` (``http(s)://`` works too); the
-            ``/api/chat`` path is added unless the URL has a path.
+        base_url: server origin, e.g. ``"ws://localhost:8998"`` (``http(s)://`` works
+            too); the ``/api/chat`` path is added unless the URL has a path. (``url`` is a
+            deprecated alias.)
         ssl_verify: verify the TLS certificate of a ``wss://`` server. Default: not for
             ``localhost`` (the Rust backend and PersonaPlex serve self-signed certificates),
             yes for any other host.
@@ -280,11 +276,20 @@ class MoshiEngine(S2SEngine):
     provider = "moshi"
     handshake_timeout_hint = "is the Moshi server running? `python -m moshi.server`"
 
+    @property
+    def url(self) -> str:
+        """Deprecated alias of :attr:`base_url`."""
+        return self.base_url
+
+    @url.setter
+    def url(self, value: str) -> None:
+        self.base_url = value
+
     def __init__(
         self,
         *,
         model: str | None = None,
-        url: str | None = None,
+        base_url: str | None = None,
         ssl_verify: bool | None = None,
         text_temperature: float | None = None,
         text_topk: int | None = None,
@@ -308,7 +313,9 @@ class MoshiEngine(S2SEngine):
         connect_timeout: float = 30.0,
         reconnect: bool = True,
         max_reconnect_attempts: int = 5,
+        url: str | None = None,
     ) -> None:
+        base_url = renamed(type(self).__name__, "base_url", base_url, "url", url)
         frame_samples = round(frame_duration * SAMPLE_RATE)
         if frame_samples not in (480, 960, 1440, 1920):
             raise ConfigurationError("frame_duration must be 0.02, 0.04, 0.06 or 0.08 seconds")
@@ -332,7 +339,7 @@ class MoshiEngine(S2SEngine):
             input_sample_rate=SAMPLE_RATE,
             output_sample_rate=SAMPLE_RATE,
         )
-        self.url = url or DEFAULT_URL
+        self.base_url = base_url or DEFAULT_URL
         self.ssl_verify = ssl_verify
         params: dict[str, Any] = {
             "text_temperature": text_temperature,
@@ -368,10 +375,10 @@ class MoshiEngine(S2SEngine):
 
     def endpoint(self, options: EngineOptions) -> str:
         """The WebSocket URL for a connection with ``options``."""
-        parts = urlsplit(self.url if "://" in self.url else f"ws://{self.url}")
+        parts = urlsplit(self.base_url if "://" in self.base_url else f"ws://{self.base_url}")
         scheme = {"http": "ws", "https": "wss"}.get(parts.scheme, parts.scheme)
         if scheme not in ("ws", "wss"):
-            raise ConfigurationError(f"unsupported Moshi server URL {self.url!r}")
+            raise ConfigurationError(f"unsupported Moshi server URL {self.base_url!r}")
         path = parts.path.rstrip("/") or CHAT_PATH
         query = self._query(options)
         extra = parts.query
@@ -557,7 +564,7 @@ class MoshiConnection(EngineConnection):
             raise ConfigurationError(f"invalid {e.provider} server URL: {exc}") from exc
         except (OSError, WebSocketException, TimeoutError) as exc:
             msg = (
-                f"cannot connect to the {e.provider} server at {e.url}: "
+                f"cannot connect to the {e.provider} server at {e.base_url}: "
                 f"{type(exc).__name__}: {exc} ({e.handshake_timeout_hint})"
             )
             raise ProviderConnectionError(msg, provider=e.provider) from exc
@@ -878,6 +885,7 @@ class MoshiConnection(EngineConnection):
                 output_text_tokens=resp.text_tokens,
                 output_audio_tokens=round(duration * FRAME_RATE),
                 cancelled=cancelled,
+                tokens_estimated=True,  # Mimi frames from durations, not server counts
             ),
         )
 

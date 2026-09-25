@@ -48,13 +48,14 @@ from urllib.parse import urlsplit
 from ...audio.frame import AudioFrame
 from ...chat import AudioContent, ChatContext, FunctionCall
 from ...errors import (
-    AuthenticationError,
     ConfigurationError,
+    MissingAPIKeyError,
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
     RateLimitError,
     VoiceAgentError,
+    for_status,
 )
 from ...llm import LLM, ChatChunk, CompletionUsage, LLMCapabilities, LLMStream, ToolChoice
 from ...registry import register_provider
@@ -311,7 +312,7 @@ class OpenAILLM(LLM):
         key = api_key or self._default_api_key(custom_base_url=base_url is not None)
         if not key:
             if self._api_key_required():
-                raise ConfigurationError(
+                raise MissingAPIKeyError(
                     f"{type(self).__name__} needs an API key: pass api_key=... or set "
                     f"{' or '.join(self.API_KEY_ENV)}"
                 )
@@ -546,25 +547,12 @@ class OpenAILLM(LLM):
         if isinstance(exc, oa.APIStatusError):
             status = int(exc.status_code)
             message = f"{who}: HTTP {status}: {_error_detail(exc)}"
-            if status in (401, 403):
-                return AuthenticationError(message, provider=provider, status_code=status)
-            if status == 429:
+            if status == 429 and getattr(exc, "code", None) == "insufficient_quota":
                 # an exhausted quota does not recover by retrying
-                retryable = getattr(exc, "code", None) != "insufficient_quota"
-                return RateLimitError(
-                    message, provider=provider, status_code=status, retryable=retryable
-                )
-            if status == 408:
-                return ProviderTimeoutError(message, provider=provider, status_code=status)
+                return for_status(status, message, provider=provider, retryable=False)
             if status == 404:
-                hint = self.NOT_FOUND_HINT.format(model=self.model)
-                return ProviderError(f"{message} ({hint})", provider=provider, status_code=404)
-            return ProviderError(
-                message,
-                provider=provider,
-                status_code=status,
-                retryable=status >= 500 or status == 409,
-            )
+                message += f" ({self.NOT_FOUND_HINT.format(model=self.model)})"
+            return for_status(status, message, provider=provider)
         if isinstance(exc, oa.APIError):  # an error event inside the stream
             kind = f"{getattr(exc, 'type', '') or ''} {getattr(exc, 'code', '') or ''}".lower()
             message = f"{who}: stream error: {_error_detail(exc)}"

@@ -119,9 +119,10 @@ Both output 24 kHz mono. Other mlx-audio TTS models load by repository id
 (`mlx_audio/mlx-community/<model>`); pass `sample_rate=` for their output rate if it is not
 24 kHz (mlx-audio's output is resampled to the declared rate otherwise).
 
-Options: `voice`, `speed`, `lang_code` (Kokoro; default from the voice's first letter:
-`a` American and `b` British English, `e` Spanish, `f` French, `h` Hindi, `i` Italian,
-`j` Japanese, `p` Portuguese, `z` Mandarin), `streaming_interval` (Pocket TTS, default
+Options: `voice`, `speed`, `language` (Kokoro: a tag such as `en-us`, `en-gb`, `es`, `ja`
+or a Kokoro code; default from the voice's first letter: `a` American and `b` British
+English, `e` Spanish, `f` French, `h` Hindi, `i` Italian, `j` Japanese, `p` Portuguese, `z`
+Mandarin; `lang_code` is a deprecated alias), `streaming_interval` (Pocket TTS, default
 0.4 s), `generate_options` (extra keywords for the model's `generate()`),
 `local_files_only`.
 

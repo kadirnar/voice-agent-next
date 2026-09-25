@@ -57,7 +57,7 @@ Files come from the Hugging Face repo [`pipecat-ai/smart-turn-v3`](https://huggi
 
 The accuracy figures are from the upstream benchmark reports: 31,527 samples in 23 languages.
 
-The `-gpu` file is simply the fp32 export, and it runs on the CPU too. It is about 1 point more accurate and roughly 30 % slower there. To run it on a GPU, install `onnxruntime-gpu` and pass `providers=["CUDAExecutionProvider", "CPUExecutionProvider"]`.
+The `-gpu` file is simply the fp32 export, and it runs on the CPU too. It is about 1 point more accurate and roughly 30 % slower there. To run it on a GPU, install `onnxruntime-gpu` and pass `device="cuda"` (or `device=["CUDAExecutionProvider", "CPUExecutionProvider"]`).
 
 ## Options
 
@@ -67,7 +67,7 @@ The `-gpu` file is simply the fp32 export, and it runs on the CPU too. It is abo
 | `model_path` | `None` | Local `.onnx` file to use instead of the download, e.g. a fine-tuned model. Its file name becomes the model name in metrics. |
 | `threshold` | `0.5` | Probability at or above which the turn counts as complete. This is the upstream default. Raise it to cut the user off less often, at the cost of slower replies. |
 | `revision` | pinned commit | Hugging Face revision to download from. Checksums are only verified for the pinned revision. |
-| `providers` | `["CPUExecutionProvider"]` | ONNX Runtime execution providers. |
+| `device` | `"cpu"` | `"cpu"`, `"auto"`, `"cuda"`... or a list of ONNX Runtime execution providers (`providers` is a deprecated alias). |
 | `num_threads` | `1` | ONNX Runtime intra-op threads. One thread with spin-waiting disabled keeps CPU usage predictable next to STT and TTS. Raise it on dedicated machines to cut latency (see below). |
 
 ## How it works
