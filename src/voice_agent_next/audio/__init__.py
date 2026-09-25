@@ -12,6 +12,7 @@ from .codecs import (
     pcm16_to_float32,
 )
 from .frame import SAMPLE_WIDTH, AudioFormat, AudioFrame
+from .pcm import PCM16Reassembler
 from .processing import AudioProcessor, ProcessorChain
 from .resample import Resampler, StreamResampler, resample
 from .wav import WavWriter, read_wav, wav_bytes, write_wav
@@ -23,6 +24,7 @@ __all__ = [
     "AudioFrame",
     "AudioProcessor",
     "FrameChunker",
+    "PCM16Reassembler",
     "ProcessorChain",
     "Resampler",
     "StreamResampler",
