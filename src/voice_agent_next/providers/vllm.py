@@ -6,11 +6,20 @@ needs ``--enable-auto-tool-choice --tool-call-parser <parser>`` on the server. S
 address: ``base_url=``, else ``VLLM_BASE_URL``, else ``http://127.0.0.1:8000/v1``.
 When the server runs with ``--api-key``, pass ``api_key=`` or set ``VLLM_API_KEY`` (the
 server's own variable).
+
+Audio input (half-cascade): vLLM serves audio-in / text-out models (Qwen2-Audio,
+Qwen2.5-Omni and Qwen3-Omni's thinker, Ultravox, Voxtral, Gemma 3n, Phi-4-multimodal...)
+and takes ``input_audio`` parts in WAV. Known model ids turn ``audio_input`` on; with a
+discovered model pass ``audio_input=True``. For Qwen-Omni's own voice use vLLM-Omni
+(``llm="vllm_omni"``).
 """
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ..registry import register_provider
+from .openai._format import AudioInputFormat
 from .openai.llm import OpenAICompatibleLLM
 
 __all__ = ["VllmLLM"]
@@ -34,3 +43,5 @@ class VllmLLM(OpenAICompatibleLLM):
     BASE_URL_ENV = ("VLLM_BASE_URL",)
     API_KEY_ENV = ("VLLM_API_KEY",)
     API_KEY_REQUIRED = False
+    # vLLM resamples to the processor's rate; the audio encoders it serves run at 16 kHz
+    AUDIO_INPUT_FORMAT: ClassVar[AudioInputFormat] = AudioInputFormat("wav", 16_000)

@@ -19,6 +19,12 @@ What the stream does:
   24 kHz) becomes :attr:`~voice_agent_next.llm.ChatChunk.audio` and its ``transcript``
   the text, so the cascade can play the model's own voice
   (``LLMCapabilities.audio_output``, see ``docs/concepts/omni-models.md``);
+* audio-input models (the half-cascade: ``stt=None``) get the user's
+  :class:`~voice_agent_next.chat.AudioContent` as ``input_audio`` parts, encoded as the
+  host wants it (``AUDIO_INPUT_FORMAT``: WAV or raw PCM, sample rate, ``data:`` URL).
+  ``LLMCapabilities.audio_input`` comes from ``audio_input=``, else from the known-model
+  table (:mod:`~voice_agent_next.providers.openai._models`). :meth:`OpenAILLM.transcribe`
+  asks the same model for a transcript of a clip (the user's words for the history);
 * token usage comes from ``stream_options={"include_usage": True}``. Cached prompt
   tokens are read from ``prompt_tokens_details.cached_tokens`` or DeepSeek's
   ``prompt_cache_hit_tokens``;
@@ -35,12 +41,12 @@ import base64
 import inspect
 import os
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, Literal, TypeAlias
 from urllib.parse import urlsplit
 
 from ...audio.frame import AudioFrame
-from ...chat import ChatContext, FunctionCall
+from ...chat import AudioContent, ChatContext, FunctionCall
 from ...errors import (
     AuthenticationError,
     ConfigurationError,
@@ -57,7 +63,14 @@ from ...utils.clock import now
 from ...utils.deps import require
 from ...utils.ids import new_id
 from ...utils.log import logger
-from ._format import SystemMessagePolicy, to_chat_messages, to_chat_tools, to_tool_choice
+from ._format import (
+    AudioInputFormat,
+    SystemMessagePolicy,
+    to_chat_messages,
+    to_chat_tools,
+    to_tool_choice,
+)
+from ._models import is_audio_input_model
 
 __all__ = ["OpenAICompatibleLLM", "OpenAILLM"]
 
@@ -68,6 +81,11 @@ _PLACEHOLDER_API_KEY = "no-key"  # the SDK needs a key; servers without auth ign
 _AUDIO_MODELS = ("gpt-audio", "gpt-4o-audio", "gpt-4o-mini-audio")
 """Model id prefixes of OpenAI's audio-output chat models (speech in and out)."""
 _AUDIO_SAMPLE_RATE = 24_000  # Chat Completions streams pcm16 at 24 kHz
+TRANSCRIBE_PROMPT = (
+    "Transcribe the user's audio verbatim, in the language spoken. Reply with the "
+    "transcript only: no quotes, no comments, no answer to what is said."
+)
+"""System prompt of :meth:`OpenAILLM.transcribe`."""
 
 # ``chat.completions.create`` parameters, used when the SDK signature can't be inspected.
 # Anything else in ``extra`` goes to the JSON body (``extra_body``).
@@ -123,12 +141,23 @@ class OpenAILLM(LLM):
             wins). Keys the SDK does not know are sent in the JSON body (``extra_body``),
             e.g. ``{"top_k": 20}``. A ``None`` value removes a default parameter.
         headers: extra HTTP headers sent with every request.
-        capabilities: override the declared :class:`~voice_agent_next.llm.LLMCapabilities`
-            (e.g. ``audio_input=True`` for audio-input models). Audio-output models
-            (``gpt-audio*``, ``gpt-4o-audio*``, or ``modalities`` with ``"audio"`` in
-            ``extra``) declare ``audio_input`` and ``audio_output``.
-        voice: voice of an audio-output model (``gpt-audio*``: default ``"alloy"``); sets
-            ``audio={"voice": ..., "format": "pcm16"}`` and ``modalities`` for them.
+        capabilities: override the declared :class:`~voice_agent_next.llm.LLMCapabilities`.
+            Audio-output models (``gpt-audio*``, ``gpt-4o-audio*``, a ``voice``, or
+            ``modalities`` with ``"audio"`` in ``extra``) declare ``audio_input`` and
+            ``audio_output``.
+        audio_input: the model accepts user audio (``input_audio`` parts), so it can run
+            in a half-cascade without an STT. ``None``: the host's ``AUDIO_INPUT``
+            default, else the known-model table (``Qwen*-Omni``, ``Qwen2-Audio``,
+            ``Ultravox``, ``Voxtral``, ``Gemma 3n/4 E2B-E4B``, ``gpt-audio``...). Set it
+            explicitly when the model is discovered from the server (no ``model``).
+        audio_format: how user audio is encoded (:class:`AudioInputFormat` or a mapping of
+            its fields). Default: the host's ``AUDIO_INPUT_FORMAT``.
+        audio_history: send only the last ``audio_history`` user audio clips as audio and
+            older ones as their transcripts (when they have one, see
+            ``CascadeOptions.input_transcriber``). ``None``: every clip as audio.
+        voice: voice of an audio-output model (``gpt-audio*``: default ``"alloy"``;
+            Qwen-Omni on DashScope: ``"Tina"``...). Sets ``modalities=["text", "audio"]``
+            and ``audio={"voice": ..., "format": AUDIO_OUTPUT_FORMAT}``.
         max_tokens_param: request field for ``max_tokens``. Default:
             ``"max_completion_tokens"`` for OpenAI (required by its reasoning models),
             ``"max_tokens"`` for every other server.
@@ -176,6 +205,13 @@ class OpenAILLM(LLM):
     (often strict) chat template."""
     NOT_FOUND_HINT: ClassVar[str] = "check the model id and base_url"
     """Appended to HTTP 404 errors; ``{model}`` is replaced by the model id."""
+    AUDIO_INPUT: ClassVar[bool | None] = None
+    """Default ``audio_input``: ``None`` = the known-model table decides."""
+    AUDIO_INPUT_FORMAT: ClassVar[AudioInputFormat] = AudioInputFormat()
+    """How this host wants user audio (default ``audio_format``)."""
+    AUDIO_OUTPUT_FORMAT: ClassVar[str] = "pcm16"
+    """``audio.format`` requested from audio-output models (the stream is pcm16 either
+    way; DashScope only accepts ``"wav"``)."""
 
     def __init__(
         self,
@@ -190,6 +226,9 @@ class OpenAILLM(LLM):
         extra: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
         capabilities: LLMCapabilities | None = None,
+        audio_input: bool | None = None,
+        audio_format: AudioInputFormat | Mapping[str, Any] | None = None,
+        audio_history: int | None = None,
         voice: str | None = None,
         max_tokens_param: MaxTokensParam | None = None,
         developer_role: DeveloperRole | None = None,
@@ -212,22 +251,39 @@ class OpenAILLM(LLM):
         resolved_model = model or self.DEFAULT_MODEL
         self._discover_model = resolved_model is None
         audio_defaults: dict[str, Any] = {}
-        if resolved_model is not None and resolved_model.startswith(_AUDIO_MODELS):
+        gpt_audio = resolved_model is not None and resolved_model.startswith(_AUDIO_MODELS)
+        if gpt_audio or voice is not None:
             audio_defaults = {
                 "modalities": ["text", "audio"],
-                "audio": {"voice": voice or "alloy", "format": "pcm16"},
+                "audio": {"voice": voice or "alloy", "format": self.AUDIO_OUTPUT_FORMAT},
             }
-        modalities = {**audio_defaults, **(extra or {})}.get("modalities") or ()
-        audio_output = "audio" in modalities
-        super().__init__(
-            model=resolved_model or "auto",
-            capabilities=capabilities
-            or LLMCapabilities(
+        modalities = {**self.DEFAULT_EXTRA, **audio_defaults, **(extra or {})}.get(
+            "modalities"
+        )
+        audio_output = "audio" in (modalities or ())
+        if audio_input is None:
+            audio_input = self.AUDIO_INPUT
+        hears = (
+            audio_input
+            if audio_input is not None
+            else audio_output or is_audio_input_model(resolved_model)
+        )
+        if capabilities is None:
+            capabilities = LLMCapabilities(
                 image_input=official and not audio_output,
-                audio_input=audio_output,
+                audio_input=hears,
                 audio_output=audio_output,
                 audio_sample_rate=_AUDIO_SAMPLE_RATE,
-            ),
+            )
+        elif audio_input is not None:
+            capabilities = replace(capabilities, audio_input=audio_input)
+        if isinstance(audio_format, Mapping):
+            audio_format = AudioInputFormat(**audio_format)
+        self.audio_format: AudioInputFormat = audio_format or self.AUDIO_INPUT_FORMAT
+        self.audio_history = audio_history
+        super().__init__(
+            model=resolved_model or "auto",
+            capabilities=capabilities,
             temperature=temperature,
             max_tokens=max_tokens,
         )
@@ -335,6 +391,8 @@ class OpenAILLM(LLM):
                 developer_role=self._developer_role,
                 audio_input=self.capabilities.audio_input,
                 system_messages=self.system_message_policy,
+                audio_format=self.audio_format,
+                audio_history=self.audio_history,
             ),
             "stream": True,
         }
@@ -402,6 +460,40 @@ class OpenAILLM(LLM):
                 self._discover_model = False
                 logger.info("%s: using model %r from %s", self.provider, self.model, self.base_url)
         return self.model
+
+    async def transcribe(self, audio: AudioFrame, *, prompt: str = TRANSCRIBE_PROMPT) -> str:
+        """Ask this (audio-input) model for a verbatim transcript of ``audio``.
+
+        Used by the half-cascade for the user's words in the history
+        (``CascadeOptions(input_transcriber="llm")``). The request is text-only (no speech
+        from audio-output models), streamed (DashScope requires it) and not reported in
+        the LLM metrics.
+        """
+        if not self.capabilities.audio_input:
+            raise ConfigurationError(f"{self.provider} ({self.model}) does not accept audio")
+        ctx = ChatContext()
+        ctx.add_message("system", prompt)
+        ctx.add_message("user", AudioContent(audio))
+        extra: dict[str, Any] = {"parallel_tool_calls": None}
+        if self.capabilities.audio_output:
+            extra.update(modalities=["text"], audio=None)
+        request = self.build_request(
+            ctx, model=await self._ensure_model(), temperature=0.0, extra=extra
+        )
+        request.pop("stream_options", None)
+        parser = _StreamParser(strip_thinking=True)
+        text: list[str] = []
+        try:
+            stream = await self._client.chat.completions.create(**request)
+            try:
+                async for chunk in stream:
+                    text.append(parser.feed(chunk)[0])
+            finally:
+                await stream.close()
+        except Exception as exc:
+            raise self._map_error(exc) from exc
+        text.append(parser.finish()[0])
+        return "".join(text).strip()
 
     # -------------------------------------------------------------------- lifecycle
     async def warmup(self) -> None:
