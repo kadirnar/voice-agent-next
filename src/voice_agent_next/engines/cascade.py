@@ -736,6 +736,15 @@ class CascadeConnection(EngineConnection):
             self.tools = list(tools)
         self._check_speculation()
 
+    async def update_voice(self, voice: str) -> bool:
+        self.options.voice = voice  # every reply opens its own TTS stream
+        return True
+
+    async def update_chat_ctx(self, chat_ctx: ChatContext) -> bool:
+        self.chat_ctx = ChatContext(chat_ctx.items)
+        self._check_speculation()
+        return True
+
     async def aclose(self) -> None:
         self._discard_speculation("closed")
         await self.cancel_response()

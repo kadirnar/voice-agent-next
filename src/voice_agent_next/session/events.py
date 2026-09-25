@@ -15,6 +15,7 @@ event name                    payload
 ``tool_cancelled``            :class:`ToolCancelled`
 ``interrupted``               :class:`Interrupted`
 ``agent_false_interruption``  :class:`AgentFalseInterruption`
+``agent_handoff``             :class:`AgentHandoff`
 ``metrics``                   any :data:`~voice_agent_next.metrics.Metrics`
 ``error``                     :class:`SessionError`
 ``close``                     :class:`SessionClosed`
@@ -32,6 +33,7 @@ from ..utils.clock import now
 
 __all__ = [
     "AgentFalseInterruption",
+    "AgentHandoff",
     "AgentState",
     "AgentStateChanged",
     "AgentTranscript",
@@ -186,6 +188,28 @@ class AgentFalseInterruption:
     """Seconds of user speech."""
     paused: float
     """Seconds the agent's audio was paused before it resumed (0.0 if it did not resume)."""
+    timestamp: float = field(default_factory=now)
+
+
+@dataclass(slots=True)
+class AgentHandoff:
+    """The session handed the conversation to another agent (see
+    ``docs/concepts/handoffs.md``). The new agent is ``session.agent``."""
+
+    from_agent: str
+    to_agent: str
+    """Names of the previous and the new agent."""
+    history: str
+    """Carry-over used: ``"full"``, ``"summary"``, ``"none"`` or ``"custom"``."""
+    call: FunctionCall | None
+    """The tool call that requested the handoff (``None``: ``AgentSession.handoff()``)."""
+    voice_changed: bool
+    """The engine switched to the new agent's voice."""
+    unsupported: list[str]
+    """What the engine could not apply mid-session: ``"voice"`` (the previous voice goes
+    on) and/or ``"chat_ctx"`` (the model keeps the full history)."""
+    duration: float
+    """Seconds the switch took (hooks, history carry-over and engine updates)."""
     timestamp: float = field(default_factory=now)
 
 

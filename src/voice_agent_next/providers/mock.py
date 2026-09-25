@@ -472,6 +472,8 @@ class MockEngine(S2SEngine):
         vad_options: server-side VAD settings (a :class:`VADOptions` or a mapping of its
             fields, e.g. ``{min_silence_duration: 0.25}`` to end turns sooner).
         realtime_factor: 0 = audio produced instantly; 1.0 = at real-time speed.
+        voice_updates / chat_ctx_updates: whether connections accept ``update_voice`` /
+            ``update_chat_ctx`` (``False`` simulates a native model that cannot).
     """
 
     provider = "mock"
@@ -491,6 +493,8 @@ class MockEngine(S2SEngine):
         chars_per_second: float = 15.0,
         chunk_duration: float = 0.04,
         realtime_factor: float = 0.0,
+        voice_updates: bool = True,
+        chat_ctx_updates: bool = True,
     ) -> None:
         super().__init__(
             model=model,
@@ -525,6 +529,8 @@ class MockEngine(S2SEngine):
         self.vad_options = vad_options or VADOptions(
             min_speech_duration=0.1, min_silence_duration=0.4
         )
+        self.voice_updates = voice_updates
+        self.chat_ctx_updates = chat_ctx_updates
         self.connections: list[MockEngineConnection] = []
 
     async def connect(self, options: EngineOptions) -> EngineConnection:
@@ -624,6 +630,18 @@ class MockEngineConnection(EngineConnection):
             self.instructions = instructions
         if tools is not None:
             self.tools = list(tools)
+
+    async def update_voice(self, voice: str) -> bool:
+        if not self._engine.voice_updates:
+            return False
+        self.options.voice = voice
+        return True
+
+    async def update_chat_ctx(self, chat_ctx: ChatContext) -> bool:
+        if not self._engine.chat_ctx_updates:
+            return False
+        self.chat_ctx = ChatContext(chat_ctx.items)
+        return True
 
     async def aclose(self) -> None:
         await self.cancel_response()
