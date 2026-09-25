@@ -72,6 +72,7 @@ from ...errors import (
     ProviderError,
     ProviderTimeoutError,
     RateLimitError,
+    for_status,
 )
 from ...events import (
     EngineErrorEvent,
@@ -408,13 +409,7 @@ def _handshake_error(exc: BaseException, provider: str, url: str) -> Exception:
         msg = f"{provider}: realtime handshake rejected with HTTP {status}" + (
             f": {body}" if body else ""
         )
-        if status in (401, 403):
-            return AuthenticationError(msg, provider=provider, status_code=status)
-        if status == 429:
-            return RateLimitError(msg, provider=provider, status_code=status)
-        if status >= 500:
-            return ProviderConnectionError(msg, provider=provider, status_code=status)
-        return ProviderError(msg, provider=provider, status_code=status)
+        return for_status(status, msg, provider=provider)
     if isinstance(exc, InvalidURI):
         return ConfigurationError(f"{provider}: invalid realtime URL {url!r}: {exc}")
     if isinstance(exc, TimeoutError):

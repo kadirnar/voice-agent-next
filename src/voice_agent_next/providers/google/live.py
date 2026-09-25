@@ -66,6 +66,7 @@ from ...errors import (
     ProviderError,
     ProviderTimeoutError,
     RateLimitError,
+    for_status,
 )
 from ...events import (
     EngineErrorEvent,
@@ -255,13 +256,7 @@ def _close_error(code: int | None, reason: str) -> ProviderError:
 def _http_error(status: int, body: str) -> ProviderError:
     """Map a rejected WebSocket handshake to a library error."""
     msg = f"Gemini Live rejected the connection (HTTP {status}): {body.strip()[:300]}"
-    if status in (401, 403):
-        return AuthenticationError(msg, provider="google", status_code=status)
-    if status == 429:
-        return RateLimitError(msg, provider="google", status_code=status)
-    if status >= 500:
-        return ProviderConnectionError(msg, provider="google", status_code=status)
-    return ProviderError(msg, provider="google", status_code=status)
+    return for_status(status, msg, provider="google")
 
 
 def _close_info(exc: Exception) -> tuple[int | None, str]:

@@ -78,7 +78,7 @@ from ..errors import (
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
-    RateLimitError,
+    for_status,
 )
 from ..events import (
     EngineErrorEvent,
@@ -201,13 +201,7 @@ class OpusDecoder:
 # ----------------------------------------------------------------------------- helpers
 def _http_error(status: int, body: str, provider: str) -> ProviderError:
     msg = f"{provider} server rejected the connection (HTTP {status}): {body.strip()[:300]}"
-    if status in (401, 403):
-        return AuthenticationError(msg, provider=provider, status_code=status)
-    if status == 429:
-        return RateLimitError(msg, provider=provider, status_code=status)
-    if status >= 500:
-        return ProviderConnectionError(msg, provider=provider, status_code=status)
-    return ProviderError(msg, provider=provider, status_code=status)
+    return for_status(status, msg, provider=provider)
 
 
 async def _close_quietly(ws: ClientConnection, timeout: float = 2.0) -> None:
