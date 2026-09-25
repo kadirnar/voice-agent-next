@@ -783,7 +783,10 @@ own OS. Without an entry, the job reports and does not gate.
 | Rule | Metrics (statistic) | A metric fails when it got worse by |
 | --- | --- | --- |
 | `overhead` | `e2e.overhead_ms`, `e2e.<condition>.overhead_ms` (p50; values below 0 read as 0) | more than **50 %** and more than an absolute floor of **5 ms** (**20 ms** on Windows, an entry override), with non-overlapping 95 % CIs |
-| `latency` | `e2e.<condition>.v2v_ms`, `e2e.frame_jitter_ms`, `flush.flush_ms` (p50); `e2e.loop_lag_ms` (p99) | more than **10 %** and more than **30 ms**, with non-overlapping 95 % CIs |
+| `latency` | `e2e.<condition>.v2v_ms` (p50) | more than **10 %** and more than **30 ms**, with non-overlapping 95 % CIs |
+| `loop_lag` | `e2e.loop_lag_ms` (p99) | more than **50 %** and more than **5 ms** (**10 ms** on Windows, an entry override), with non-overlapping 95 % CIs |
+| `flush` | `flush.flush_ms` (p50; values below 0 read as 0) | more than **50 %** and more than **5 ms**, with non-overlapping 95 % CIs |
+| `gap` | `e2e.frame_gap_max_ms` (p90: the largest playout gap of a reply) | more than **20 ms** (0 on a healthy run: fails when one reply in ten stutters) |
 | `micro` | `micro.*_us` (median) | more than **200 %** (3×) and more than **5 µs**: runner hardware varies |
 
 Everything else (CPU, memory, capacity, spans) is reported but not gated. A gated metric
@@ -799,6 +802,16 @@ regression through (2.7 → 32 ms). Against 45 CI runs per OS, the `overhead` ru
 none of them (every run judged against every other as the baseline), and caught a
 +30 ms regression of every condition on Linux (a +8 ms one on four of five) and on
 Windows in 96–100 % of the pairs.
+
+The event-loop lag p99 (1.2–1.6 ms on Linux, 12.7–15.1 ms on Windows, where it is one
+~15.6 ms timer tick) and the flush (0 ms on Linux, 0.02–0.12 ms on Windows) had the same
+blind spot, so they got their own floors, calibrated the same way on the last 50 CI
+runs per OS (2,450 pairs each): no false failure, and a +30 ms regression caught in every
+pair (+8 ms on Linux and for the flush, +15 ms for the Windows loop lag). The frame-jitter
+p50 was 0 on every run (the loopback transport never starved), so it could not move; the
+gate now watches the p90 of the largest playout gap per reply (`e2e.frame_gap_max_ms`)
+instead, which also stays at 0 until replies start to stutter. `frame_jitter_ms` is still
+reported.
 
 **Reading the result.** The job summary shows the verdict and a table (baseline, this
 run, change, threshold, status: `regressed`, `missing`, `improved`, `new` or `ok`),

@@ -21,298 +21,327 @@
       "max_increase_abs": 5.0,
       "require_ci_separation": true,
       "min_value": 0.0
+    },
+    "loop_lag": {
+      "max_increase_pct": 50.0,
+      "max_increase_abs": 5.0,
+      "require_ci_separation": true,
+      "min_value": null
+    },
+    "flush": {
+      "max_increase_pct": 50.0,
+      "max_increase_abs": 5.0,
+      "require_ci_separation": true,
+      "min_value": 0.0
+    },
+    "gap": {
+      "max_increase_pct": 50.0,
+      "max_increase_abs": 20.0,
+      "require_ci_separation": false,
+      "min_value": 0.0
     }
   },
   "entries": {
     "linux": {
       "tier": "smoke",
       "run_id": "overhead-Linux",
-      "created": "2026-09-25T10:26:00+00:00",
+      "created": "2026-09-25T13:57:52+00:00",
       "config_sha256": "a1ecfb4d3ae05747a9c30180f91c167a83b7f56800013015fae0ae3ceb70fc4c",
-      "git_sha": "0381a9c14bbe68899517dadbdd89ffff69c8af53",
-      "machine": "AMD EPYC 7763 64-Core Processor · 4 threads · Linux 6.17.0-1022-azure · Python 3.12.3",
+      "git_sha": "1b702ac719a0f25a97b974f668f7109723ca820c",
+      "machine": "AMD EPYC 9V74 80-Core Processor · 4 threads · Linux 6.17.0-1022-azure · Python 3.12.3",
       "rules": {},
       "metrics": {
         "micro.resample_16k_to_24k_us": {
-          "value": 8.9338,
+          "value": 8.366,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            8.918,
-            9.0127
+            8.1439,
+            8.6423
           ],
           "n": 9
         },
         "micro.resample_16k_to_24k_numpy_us": {
-          "value": 77.0565,
+          "value": 52.7971,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            76.8302,
-            77.6467
+            52.7019,
+            55.76
           ],
           "n": 9
         },
         "micro.resample_48k_to_16k_us": {
-          "value": 8.9019,
+          "value": 8.5859,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            8.8678,
-            8.9128
+            8.1897,
+            8.9328
           ],
           "n": 9
         },
         "micro.frame_rms_us": {
-          "value": 6.6701,
+          "value": 4.8035,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            6.6389,
-            6.8192
+            4.7294,
+            4.9163
           ],
           "n": 9
         },
         "micro.frame_concat_us": {
-          "value": 1.2143,
+          "value": 0.9351,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            1.2085,
-            1.2185
+            0.9287,
+            0.9516
           ],
           "n": 9
         },
         "micro.frame_slice_us": {
-          "value": 1.0531,
+          "value": 0.7881,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            1.0295,
-            1.0639
+            0.7787,
+            0.8033
           ],
           "n": 9
         },
         "micro.energy_vad_us": {
-          "value": 14.1013,
+          "value": 8.9147,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            13.9788,
-            14.2056
+            8.9051,
+            8.9272
           ],
           "n": 9
         },
         "micro.silence_trimmer_us": {
-          "value": 20.2717,
+          "value": 13.7215,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            20.1828,
-            20.4557
+            13.6743,
+            13.7501
           ],
           "n": 9
         },
         "micro.g711_ulaw_encode_us": {
-          "value": 20.1428,
+          "value": 14.1937,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            20.0381,
-            20.3154
+            14.1766,
+            14.374
           ],
           "n": 9
         },
         "micro.g711_ulaw_decode_us": {
-          "value": 2.4197,
+          "value": 1.874,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            2.4146,
-            2.4272
+            1.8718,
+            1.88
           ],
           "n": 9
         },
         "micro.g711_alaw_encode_us": {
-          "value": 22.63,
+          "value": 16.0199,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            22.5441,
-            22.802
+            16.0146,
+            16.0581
           ],
           "n": 9
         },
         "micro.g711_alaw_decode_us": {
-          "value": 2.4414,
+          "value": 1.8989,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            2.4375,
-            2.4691
+            1.8977,
+            1.9029
           ],
           "n": 9
         },
         "micro.sentence_segmenter_us": {
-          "value": 4.3171,
+          "value": 3.2224,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            4.3009,
-            4.3266
+            3.2049,
+            3.2349
           ],
           "n": 9
         },
         "micro.tts_text_filter_us": {
-          "value": 12.7613,
+          "value": 10.3859,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            12.7253,
-            12.7875
+            10.339,
+            10.4088
+          ],
+          "n": 9
+        },
+        "micro.agent_transcript_us": {
+          "value": 0.8489,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            0.847,
+            0.8655
           ],
           "n": 9
         },
         "micro.event_emit_us": {
-          "value": 1.1336,
+          "value": 0.8251,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            1.1321,
-            1.139
+            0.8233,
+            0.828
           ],
           "n": 9
         },
         "micro.chan_roundtrip_us": {
-          "value": 0.176,
+          "value": 0.1381,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            0.1758,
-            0.1765
+            0.1379,
+            0.1382
           ],
           "n": 9
         },
         "e2e.engine.v2v_ms": {
-          "value": 401.583,
+          "value": 401.332,
           "stat": "p50",
           "unit": "ms",
           "rule": "latency",
           "ci95": [
-            401.312,
-            401.667
+            401.144,
+            401.749
           ],
           "n": 6
         },
         "e2e.engine.overhead_ms": {
-          "value": 1.583,
+          "value": 1.333,
           "stat": "p50",
           "unit": "ms",
           "rule": "overhead",
           "ci95": [
-            1.312,
-            1.667
+            1.145,
+            1.749
           ],
           "n": 6
         },
         "e2e.engine-delay.v2v_ms": {
-          "value": 652.131,
+          "value": 652.627,
           "stat": "p50",
           "unit": "ms",
           "rule": "latency",
           "ci95": [
-            651.985,
-            652.673
+            652.106,
+            654.043
           ],
           "n": 6
         },
         "e2e.engine-delay.overhead_ms": {
-          "value": 2.131,
+          "value": 2.627,
           "stat": "p50",
           "unit": "ms",
           "rule": "overhead",
           "ci95": [
-            1.985,
-            2.673
+            2.106,
+            4.043
           ],
           "n": 6
         },
         "e2e.cascade.v2v_ms": {
-          "value": 602.488,
+          "value": 602.068,
           "stat": "p50",
           "unit": "ms",
           "rule": "latency",
           "ci95": [
-            601.905,
-            610.551
+            601.693,
+            602.651
           ],
           "n": 6
         },
         "e2e.cascade.overhead_ms": {
-          "value": 2.489,
+          "value": 2.068,
           "stat": "p50",
           "unit": "ms",
           "rule": "overhead",
           "ci95": [
-            1.905,
-            10.551
+            1.693,
+            2.651
           ],
           "n": 6
         },
         "e2e.cascade-delay.v2v_ms": {
-          "value": 615.457,
+          "value": 614.413,
           "stat": "p50",
           "unit": "ms",
           "rule": "latency",
           "ci95": [
-            614.269,
-            615.936
+            613.747,
+            614.934
           ],
           "n": 6
         },
         "e2e.cascade-delay.overhead_ms": {
-          "value": 5.457,
+          "value": 4.413,
           "stat": "p50",
           "unit": "ms",
           "rule": "overhead",
           "ci95": [
-            4.269,
-            5.936
+            3.747,
+            4.934
           ],
           "n": 6
         },
         "e2e.overhead_ms": {
-          "value": 2.218,
+          "value": 2.359,
           "stat": "p50",
           "unit": "ms",
           "rule": "overhead",
           "ci95": [
-            1.902,
-            3.474
+            1.86,
+            3.497
           ],
           "n": 24
         },
-        "e2e.frame_jitter_ms": {
+        "e2e.frame_gap_max_ms": {
           "value": 0.0,
-          "stat": "p50",
+          "stat": "p90",
           "unit": "ms",
-          "rule": "latency",
+          "rule": "gap",
           "ci95": [
             0.0,
             0.0
@@ -320,21 +349,21 @@
           "n": 24
         },
         "e2e.loop_lag_ms": {
-          "value": 1.397,
+          "value": 1.384,
           "stat": "p99",
           "unit": "ms",
-          "rule": "latency",
+          "rule": "loop_lag",
           "ci95": [
-            1.391,
-            1.414
+            1.373,
+            1.391
           ],
-          "n": 4396
+          "n": 4404
         },
         "flush.flush_ms": {
           "value": 0.0,
           "stat": "p50",
           "unit": "ms",
-          "rule": "latency",
+          "rule": "flush",
           "ci95": [
             0.0,
             0.0
@@ -346,247 +375,264 @@
     "windows": {
       "tier": "smoke",
       "run_id": "overhead-Windows",
-      "created": "2026-09-25T10:26:21+00:00",
+      "created": "2026-09-25T13:57:56+00:00",
       "config_sha256": "a1ecfb4d3ae05747a9c30180f91c167a83b7f56800013015fae0ae3ceb70fc4c",
-      "git_sha": "0381a9c14bbe68899517dadbdd89ffff69c8af53",
-      "machine": "Intel64 Family 6 Model 173 Stepping 1, GenuineIntel · 4 threads · Windows 2025Server · Python 3.12.10",
+      "git_sha": "1b702ac719a0f25a97b974f668f7109723ca820c",
+      "machine": "AMD64 Family 25 Model 17 Stepping 1, AuthenticAMD · 4 threads · Windows 2025Server · Python 3.12.10",
       "rules": {
         "overhead": {
           "max_increase_pct": 50.0,
           "max_increase_abs": 20.0,
           "require_ci_separation": true,
           "min_value": 0.0
+        },
+        "loop_lag": {
+          "max_increase_pct": 50.0,
+          "max_increase_abs": 10.0,
+          "require_ci_separation": true,
+          "min_value": null
         }
       },
       "metrics": {
         "micro.resample_16k_to_24k_us": {
-          "value": 6.3294,
+          "value": 9.4404,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            6.2583,
-            6.366
+            9.4019,
+            9.7339
           ],
           "n": 9
         },
         "micro.resample_16k_to_24k_numpy_us": {
-          "value": 60.0812,
+          "value": 66.8688,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            59.8892,
-            60.7308
+            66.315,
+            71.0418
           ],
           "n": 9
         },
         "micro.resample_48k_to_16k_us": {
-          "value": 6.2818,
+          "value": 9.6246,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            6.2526,
-            6.2931
+            9.5755,
+            9.6876
           ],
           "n": 9
         },
         "micro.frame_rms_us": {
-          "value": 4.4084,
+          "value": 5.7562,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            4.4044,
-            4.4251
+            5.7254,
+            5.785
           ],
           "n": 9
         },
         "micro.frame_concat_us": {
-          "value": 0.7605,
+          "value": 1.0575,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            0.7586,
-            0.7614
+            1.0548,
+            1.0613
           ],
           "n": 9
         },
         "micro.frame_slice_us": {
-          "value": 0.7048,
+          "value": 0.8852,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            0.701,
-            0.7076
+            0.8813,
+            0.8876
           ],
           "n": 9
         },
         "micro.energy_vad_us": {
-          "value": 8.1865,
+          "value": 10.7033,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            8.0767,
-            8.2723
+            10.5819,
+            11.0182
           ],
           "n": 9
         },
         "micro.silence_trimmer_us": {
-          "value": 12.9475,
+          "value": 16.6269,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            12.8231,
-            13.3593
+            16.5215,
+            16.6501
           ],
           "n": 9
         },
         "micro.g711_ulaw_encode_us": {
-          "value": 15.465,
+          "value": 19.8967,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            15.4013,
-            15.4937
+            19.8645,
+            19.9592
           ],
           "n": 9
         },
         "micro.g711_ulaw_decode_us": {
-          "value": 1.7689,
+          "value": 2.4081,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            1.7672,
-            1.7919
+            2.403,
+            2.4337
           ],
           "n": 9
         },
         "micro.g711_alaw_encode_us": {
-          "value": 16.5028,
+          "value": 22.2591,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            16.4468,
-            16.6141
+            21.9518,
+            23.6527
           ],
           "n": 9
         },
         "micro.g711_alaw_decode_us": {
-          "value": 1.7458,
+          "value": 2.4142,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            1.7345,
-            1.7512
+            2.4029,
+            2.424
           ],
           "n": 9
         },
         "micro.sentence_segmenter_us": {
-          "value": 3.115,
+          "value": 3.7746,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            3.0897,
-            3.2002
+            3.7562,
+            3.7917
           ],
           "n": 9
         },
         "micro.tts_text_filter_us": {
-          "value": 10.5189,
+          "value": 11.8886,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            10.3347,
-            10.5959
+            11.8466,
+            11.9191
+          ],
+          "n": 9
+        },
+        "micro.agent_transcript_us": {
+          "value": 0.9287,
+          "stat": "p50",
+          "unit": "µs",
+          "rule": "micro",
+          "ci95": [
+            0.9212,
+            0.9335
           ],
           "n": 9
         },
         "micro.event_emit_us": {
-          "value": 0.7277,
+          "value": 0.9066,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            0.7237,
-            0.7445
+            0.8985,
+            0.9127
           ],
           "n": 9
         },
         "micro.chan_roundtrip_us": {
-          "value": 0.123,
+          "value": 0.178,
           "stat": "p50",
           "unit": "µs",
           "rule": "micro",
           "ci95": [
-            0.1226,
-            0.1234
+            0.1725,
+            0.2192
           ],
           "n": 9
         },
         "e2e.engine.v2v_ms": {
-          "value": 401.613,
+          "value": 404.359,
           "stat": "p50",
           "unit": "ms",
           "rule": "latency",
           "ci95": [
-            401.509,
-            404.946
+            401.526,
+            412.962
           ],
           "n": 6
         },
         "e2e.engine.overhead_ms": {
-          "value": 1.612,
+          "value": 4.358,
           "stat": "p50",
           "unit": "ms",
           "rule": "overhead",
           "ci95": [
-            1.508,
-            4.946
+            1.526,
+            12.962
           ],
           "n": 6
         },
         "e2e.engine-delay.v2v_ms": {
-          "value": 652.613,
+          "value": 653.154,
           "stat": "p50",
           "unit": "ms",
           "rule": "latency",
           "ci95": [
-            652.343,
-            655.592
+            652.05,
+            655.571
           ],
           "n": 6
         },
         "e2e.engine-delay.overhead_ms": {
-          "value": 2.614,
+          "value": 3.154,
           "stat": "p50",
           "unit": "ms",
           "rule": "overhead",
           "ci95": [
-            2.343,
-            5.593
+            2.05,
+            5.571
           ],
           "n": 6
         },
         "e2e.cascade.v2v_ms": {
-          "value": 584.618,
+          "value": 595.867,
           "stat": "p50",
           "unit": "ms",
           "rule": "latency",
           "ci95": [
-            581.992,
-            597.763
+            587.179,
+            603.159
           ],
           "n": 6
         },
@@ -597,48 +643,48 @@
           "rule": "overhead",
           "ci95": [
             0.0,
-            0.0
+            3.159
           ],
           "n": 6
         },
         "e2e.cascade-delay.v2v_ms": {
-          "value": 614.875,
+          "value": 614.636,
           "stat": "p50",
           "unit": "ms",
           "rule": "latency",
           "ci95": [
-            614.728,
-            628.499
+            614.302,
+            629.719
           ],
           "n": 6
         },
         "e2e.cascade-delay.overhead_ms": {
-          "value": 4.875,
+          "value": 4.636,
           "stat": "p50",
           "unit": "ms",
           "rule": "overhead",
           "ci95": [
-            4.729,
-            18.499
+            4.302,
+            19.719
           ],
           "n": 6
         },
         "e2e.overhead_ms": {
-          "value": 2.614,
+          "value": 4.144,
           "stat": "p50",
           "unit": "ms",
           "rule": "overhead",
           "ci95": [
-            1.529,
-            4.75
+            1.588,
+            4.844
           ],
           "n": 24
         },
-        "e2e.frame_jitter_ms": {
+        "e2e.frame_gap_max_ms": {
           "value": 0.0,
-          "stat": "p50",
+          "stat": "p90",
           "unit": "ms",
-          "rule": "latency",
+          "rule": "gap",
           "ci95": [
             0.0,
             0.0
@@ -646,24 +692,24 @@
           "n": 24
         },
         "e2e.loop_lag_ms": {
-          "value": 14.474,
+          "value": 14.513,
           "stat": "p99",
           "unit": "ms",
-          "rule": "latency",
+          "rule": "loop_lag",
           "ci95": [
-            13.924,
-            14.784
+            14.218,
+            14.643
           ],
-          "n": 12701
+          "n": 11801
         },
         "flush.flush_ms": {
-          "value": 0.075,
+          "value": 0.065,
           "stat": "p50",
           "unit": "ms",
-          "rule": "latency",
+          "rule": "flush",
           "ci95": [
-            0.066,
-            0.078
+            0.062,
+            0.084
           ],
           "n": 10
         }
