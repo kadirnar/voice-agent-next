@@ -676,7 +676,8 @@ class PlivoSerializer(TelephonySerializer):
 
     Args:
         auth_id / auth_token: REST credentials for :meth:`hangup_request` (default:
-            ``PLIVO_AUTH_ID`` / ``PLIVO_AUTH_TOKEN``).
+            ``PLIVO_AUTH_ID`` / ``PLIVO_AUTH_TOKEN``). A stream whose ``accountId`` is not
+            the configured Auth ID is rejected.
         l16_byteorder: byte order of ``audio/x-l16`` samples (default little-endian).
     """
 
@@ -732,12 +733,17 @@ class PlivoSerializer(TelephonySerializer):
             rate = _rate(match.group(1) if match else None, 8_000)
         name = _codec_name(encoding)
         codec = AudioCodec(name, rate, self.l16_byteorder)
+        account = _str(start.get("accountId"))
+        if self.auth_id and account is not None and account != self.auth_id:
+            raise TelephonyProtocolError(
+                f"stream of account {account[:40]!r}, not the configured PLIVO_AUTH_ID"
+            )
         self._content_type = "audio/x-l16" if name == "l16" else f"audio/x-{name}"
         call = CallInfo(
             provider=self.provider,
             call_id=_str(start.get("callId")),
             stream_id=_str(start.get("streamId") or data.get("streamId")),
-            account_id=_str(start.get("accountId")),
+            account_id=account,
             custom_parameters=_parse_extra_headers(
                 data.get("extra_headers", start.get("extra_headers"))
             ),
@@ -781,13 +787,14 @@ class PlivoSerializer(TelephonySerializer):
 
 
 def _parse_extra_headers(value: Any) -> dict[str, Any]:
-    """Plivo ``extraHeaders``: ``"key1=value1;key2=value2"`` (or already a dict)."""
+    """Plivo ``extraHeaders``: ``"key1=value1;key2=value2"`` (the start message) or
+    ``"key1=value1,key2=value2"`` (the XML attribute), or already a dict."""
     if isinstance(value, dict):
         return dict(value)
     if not isinstance(value, str) or not value.strip():
         return {}
     out: dict[str, Any] = {}
-    for part in value.split(";"):
+    for part in re.split(r"[;,]", value):
         key, sep, val = part.partition("=")
         if key.strip():
             out[key.strip()] = val.strip() if sep else ""
