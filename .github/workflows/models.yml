@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       mlx-large:
-        description: "MLX job: also run the opt-in larger models (Parakeet 110M, Kokoro, mlx-lm with Qwen3 0.6B; ~1.2 GB more)"
+        description: "Only the MLX job, with the opt-in larger models too (Parakeet 110M, Kokoro, mlx-lm with Qwen3 0.6B; ~1.2 GB more)"
         type: boolean
         default: false
   pull_request:
@@ -21,7 +21,9 @@ concurrency:
 
 jobs:
   models:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:models')
+    if: >-
+      (github.event_name != 'pull_request' && !inputs.mlx-large) ||
+      contains(github.event.pull_request.labels.*.name, 'ci:models')
     name: models (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
