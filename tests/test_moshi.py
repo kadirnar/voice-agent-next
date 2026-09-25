@@ -448,8 +448,11 @@ async def test_session_full_duplex_conversation(fake: Callable[..., Any]) -> Non
     await wait_for(lambda: len(history(session)) == 1 and session.agent_state == AgentState.LISTENING)  # fmt: skip
 
     async def say(seconds: float) -> None:  # the caller: real-time microphone audio
-        for i in range(round(seconds / 0.02)):
-            await transport.play_user_audio(synth_speech(0.02, 16_000, offset=i * 320), realtime=True)  # fmt: skip
+        # one paced stream: pacing 20 ms pieces one call at a time adds every late wake-up
+        # up, and the engine's keep-alive fills the lag with silence that Moshi steps on
+        # (a loaded macOS runner lost the overlap the fake yields after)
+        pieces = [synth_speech(0.02, 16_000, offset=i * 320) for i in range(round(seconds / 0.02))]
+        await transport.play_user_audio(AudioFrame.concat(pieces), realtime=True)
 
     async def quiet(seconds: float) -> None:
         await transport.play_user_audio(AudioFrame.silence(seconds, 16_000), realtime=True)

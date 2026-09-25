@@ -117,6 +117,7 @@ nav:
       - The cascade: concepts/cascade.md
       - Turn-taking: concepts/turn-taking.md
       - Endpointing: concepts/endpointing.md
+      - Session rotation: concepts/session-rotation.md
       - Interruptions: concepts/interruptions.md
       - Preemptive generation: concepts/preemptive-generation.md
       - Tools: concepts/tools.md
@@ -153,6 +154,7 @@ nav:
   - Deploy:
       - deploy/index.md
       - Realtime server: deploy/realtime-server.md
+      - Serving (van serve): deploy/serving.md
       - Telephony: transports/telephony.md
       - WebRTC: transports/webrtc.md
   - Benchmarks:
