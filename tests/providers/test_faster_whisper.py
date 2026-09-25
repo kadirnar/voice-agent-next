@@ -932,3 +932,22 @@ async def test_tiny_en_streams_on_the_auto_device() -> None:
     finals = [e.text async for e in stream if e.type == STTEventType.FINAL_TRANSCRIPT]
     assert "your country" in _normalize(" ".join(finals))
     await adapter.aclose()
+
+
+@pytest.mark.model
+async def test_tiny_en_interim_transcripts_and_guard() -> None:
+    clip = _jfk_clip()
+    stt = await _loaded(FasterWhisperSTT(model="tiny.en", interim_results=True))
+    adapter = StreamAdapter(stt, EnergyVAD())
+    stream = adapter.stream()
+    audio = AudioFrame.concat([clip, AudioFrame.silence(1.0, 16_000)])
+    events = await stream_paced(stream, audio, speed=4.0)
+    interims = [ev.text for _, ev in events if ev.type == STTEventType.INTERIM_TRANSCRIPT]
+    finals = [ev.text for _, ev in events if ev.type == STTEventType.FINAL_TRANSCRIPT]
+    assert interims  # at 4x real time even a CPU fits a few decodes
+    assert "your country" in _normalize(" ".join(finals))
+    # silence and quiet noise decode to nothing (or are dropped by the guard)
+    rng = np.random.default_rng(0)
+    noise = AudioFrame.from_numpy((rng.standard_normal(16_000) * 0.003).astype(np.float32), 16_000)
+    assert (await stt.transcribe(noise)).text == ""
+    await adapter.aclose()
