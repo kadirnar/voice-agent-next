@@ -11,8 +11,9 @@ NVIDIA's speech models (CPU, CUDA, Metal, Vulkan; Linux, macOS and Windows). Its
     ``/v1/audio/transcriptions/realtime``: an optional ``session.update`` JSON event, then
     binary little-endian PCM16 frames; ``input_audio_buffer.commit`` finalizes. The server
     answers with ``conversation.item.input_audio_transcription.delta`` (a text *suffix* per
-    audio frame, often empty), ``...completed`` (the final ``transcript``, with ``words``
-    when asked) and ``input_audio_buffer.committed``. With server endpointing on
+    audio frame, often empty, or the whole partial when it was rewritten),
+    ``...completed`` (the final ``transcript``, with ``words`` when asked) and
+    ``input_audio_buffer.committed``. With server endpointing on
     (``asr.endpointing.enable``) finals also arrive mid-stream after a pause. A commit
     ends the server's recognition stream: the next audio starts a fresh one.
   - **Batch** (:meth:`STT.transcribe`) through ``POST /v1/audio/transcriptions`` (the
@@ -635,6 +636,7 @@ class NeMoSpeechCppSTT(_ManagedServer, OpenAICompatibleSTT):
             interim_results=streaming,
             word_timestamps=word_timestamps,
             language_detection=language == "auto",
+            reconnect=streaming,  # each stream opens its own WebSocket
         )
         self.automatic_punctuation = automatic_punctuation
         self.verbatim = verbatim
@@ -901,7 +903,10 @@ class NeMoSpeechCppStream(STTStream):
         delta = event.get("delta")
         if not isinstance(delta, str) or not delta:
             return  # one (mostly empty) delta arrives per audio frame
-        self._partial += delta
+        if _rewrites(self._partial, delta):
+            self._partial = delta  # the server rewrote the partial: this is the whole text
+        else:
+            self._partial += delta
         text = self._partial.strip()
         if not text:
             return
@@ -976,6 +981,33 @@ class NeMoSpeechCppStream(STTStream):
 
     def _event(self, kind: STTEventType, transcript: Transcript | None = None) -> None:
         self._emit(STTEvent(kind, transcript, self._segment_id))
+
+
+def _words_only(text: str) -> str:
+    """Lower-case letters/digits and single spaces: what a rewrite keeps of a partial."""
+    return " ".join("".join(c if c.isalnum() else " " for c in text.lower()).split())
+
+
+def _rewrites(partial: str, delta: str) -> bool:
+    """Is ``delta`` a whole rewritten partial rather than a suffix of ``partial``?
+
+    The server sends the suffix when the new partial extends the previous one, else the
+    full new partial, with nothing telling the two apart. A full partial starts with a
+    word (the server's transcripts never start with a space), while a suffix starts with
+    a space (a new word), punctuation or the rest of an unfinished word. So ``delta`` is
+    taken as a rewrite when it does not start with a space and either repeats the start
+    of the previous partial (the usual case: re-capitalized, re-punctuated or a changed
+    word further on) or has at least as many words as a partial of two words or more.
+    """
+    if not partial.strip() or not delta or delta[0].isspace():
+        return False
+    old, new = _words_only(partial), _words_only(delta)
+    if not old or not new:
+        return False  # e.g. punctuation only: an extension
+    if len(os.path.commonprefix([old, new])) >= min(len(old), 3):
+        return True
+    old_words, new_words = len(old.split()), len(new.split())
+    return old_words >= 2 and new_words >= old_words
 
 
 def _mean(values: Sequence[float | None]) -> float | None:

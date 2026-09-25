@@ -102,6 +102,7 @@ from ..utils.ids import new_id
 from ..utils.log import logger
 from ..vad import VADEventType, VADOptions, VADStream
 from ._options import renamed
+from ._ws import body_text, close_ws, ws_connect
 from .energy import EnergyVAD
 
 if TYPE_CHECKING:
@@ -203,11 +204,6 @@ class OpusDecoder:
 def _http_error(status: int, body: str, provider: str) -> ProviderError:
     msg = f"{provider} server rejected the connection (HTTP {status}): {body.strip()[:300]}"
     return for_status(status, msg, provider=provider)
-
-
-async def _close_quietly(ws: ClientConnection, timeout: float = 2.0) -> None:
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(ws.close(), timeout)
 
 
 @functools.cache
@@ -532,42 +528,33 @@ class MoshiConnection(EngineConnection):
         self._outbox.close()
         ws, self._ws = self._ws, None
         if ws is not None:
-            await _close_quietly(ws)
+            await close_ws(ws)
         self._vad.close()
         self._end_response("incomplete")
         await super().aclose()
 
     async def _open(self) -> ClientConnection:
         """Connect and wait for the server's handshake."""
-        from websockets.asyncio.client import connect
-        from websockets.exceptions import (
-            ConnectionClosed,
-            InvalidStatus,
-            InvalidURI,
-            WebSocketException,
-        )
+        from websockets.exceptions import ConnectionClosed
 
         e = self._e
         url = e.endpoint(self.options)
-        try:
-            ws = await connect(
-                url,
-                open_timeout=e.connect_timeout,
-                max_size=_MAX_MESSAGE,
-                compression=None,
-                **e._connect_kwargs(url),
-            )
-        except InvalidStatus as exc:
-            body = exc.response.body.decode("utf-8", "replace") if exc.response.body else ""
-            raise _http_error(exc.response.status_code, body, e.provider) from exc
-        except InvalidURI as exc:
-            raise ConfigurationError(f"invalid {e.provider} server URL: {exc}") from exc
-        except (OSError, WebSocketException, TimeoutError) as exc:
-            msg = (
-                f"cannot connect to the {e.provider} server at {e.base_url}: "
-                f"{type(exc).__name__}: {exc} ({e.handshake_timeout_hint})"
-            )
-            raise ProviderConnectionError(msg, provider=e.provider) from exc
+        ws = await ws_connect(
+            url,
+            provider=e.provider,
+            target=f"the {e.provider} server at {e.base_url}",
+            name=f"{e.provider} server",
+            http_error=lambda r: _http_error(r.status_code, body_text(r), e.provider),
+            open_timeout=e.connect_timeout,
+            close_timeout=10.0,  # the websockets default, as before
+            hint=e.handshake_timeout_hint,
+            # an unreachable server can look like a handshake timeout (Windows retries
+            # the SYN for ~2 s): report both as "cannot connect", with the hint
+            timeout_error=ProviderConnectionError,
+            max_size=_MAX_MESSAGE,
+            compression=None,
+            **e._connect_kwargs(url),
+        )
         self.connections += 1
         try:
             async with asyncio.timeout(e.connect_timeout):
@@ -589,7 +576,7 @@ class MoshiConnection(EngineConnection):
                         )
                     self._dispatch(raw)  # metadata before the handshake (Rust backend)
         except TimeoutError as exc:
-            await _close_quietly(ws)
+            await close_ws(ws)
             msg = (
                 f"no handshake from the {e.provider} server within {e.connect_timeout:.0f}s "
                 "(moshi.server serves one conversation at a time: is another client connected?)"
@@ -599,7 +586,7 @@ class MoshiConnection(EngineConnection):
             msg = f"the {e.provider} server closed the connection during the handshake: {exc}"
             raise ProviderConnectionError(msg, provider=e.provider) from exc
         except BaseException:
-            await _close_quietly(ws)
+            await close_ws(ws)
             raise
         return ws
 
@@ -629,7 +616,7 @@ class MoshiConnection(EngineConnection):
         except Exception as exc:
             logger.exception("moshi: receiving failed")
             reason = f"receive failed: {exc}"
-            await _close_quietly(ws)
+            await close_ws(ws)
         if self._closed or epoch != self._epoch:
             return
         self._on_disconnect(reason)
@@ -660,7 +647,7 @@ class MoshiConnection(EngineConnection):
                     break
                 continue
             if self._closed:
-                await _close_quietly(ws)
+                await close_ws(ws)
                 return
             self._install(ws)
             self._reconnecting = False

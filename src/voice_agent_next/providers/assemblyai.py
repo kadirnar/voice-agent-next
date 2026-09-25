@@ -402,6 +402,7 @@ class AssemblyAISTT(STT):
                 word_timestamps=True,
                 end_of_turn=end_of_turn,
                 language_detection=bool(language_detection),
+                reconnect=True,  # each stream opens its own WebSocket
             ),
             sample_rate=sample_rate,
             language=language,

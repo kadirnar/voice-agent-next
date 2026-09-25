@@ -785,6 +785,7 @@ class CartesiaSTT(STT):
                 word_timestamps=not turns,
                 end_of_turn=turns,
                 language_detection=not turns,
+                reconnect=True,  # each stream opens its own WebSocket
             ),
             sample_rate=sample_rate,
             language=language,

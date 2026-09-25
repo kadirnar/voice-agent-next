@@ -377,6 +377,7 @@ class SpeechmaticsSTT(STT):
                 interim_results=enable_partials,
                 word_timestamps=not agent,
                 end_of_turn=end_of_turn,
+                reconnect=True,  # each stream opens its own WebSocket
             ),
             sample_rate=sample_rate,
             language=language,

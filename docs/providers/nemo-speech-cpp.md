@@ -190,7 +190,7 @@ PCM16 frames. The server's events map to STT events like this:
 
 | Server event | STT event |
 |---|---|
-| `conversation.item.input_audio_transcription.delta` (`delta` = new text suffix, usually `""`) | `INTERIM_TRANSCRIPT` with the accumulated text; `START_OF_SPEECH` before the first one |
+| `conversation.item.input_audio_transcription.delta` (`delta` = new text suffix, usually `""`, or the whole rewritten partial) | `INTERIM_TRANSCRIPT` with the accumulated (or replaced) text; `START_OF_SPEECH` before the first one |
 | `conversation.item.input_audio_transcription.completed` (`transcript`, `words`) | `FINAL_TRANSCRIPT`, then `END_OF_SPEECH` |
 | `input_audio_buffer.committed` | acknowledges a flush |
 | `error` | the stream fails with `ProviderError` |
@@ -264,10 +264,13 @@ so the v2v confidence intervals overlap.
 
 - One model per capability per server. To switch models, restart the server (or run
   several on different ports).
-- The partials only append text: the server sends the new suffix, or the whole text when
-  its hypothesis changed in a way that is not a pure extension. The protocol cannot tell
-  these two cases apart, so a rewritten partial shows up appended. Finals are always
-  exact.
+- The server sends the new suffix of a partial, or the whole text when its hypothesis
+  changed in a way that is not a pure extension, and the protocol does not say which.
+  The client tells them apart: a suffix starts with a space, punctuation or the rest of a
+  word, while a rewrite starts with a word and repeats the start of the previous partial
+  (or has at least as many words as it). A rewrite then replaces the interim. A rewrite
+  that changes the very first word of a one-word partial can still show up appended
+  until the next rewrite. Finals are always exact.
 - There is no reconnect. A server that goes away fails the stream with
   `ProviderConnectionError`, and the session's error handling or failover takes over.
 - Magpie is not a streaming TTS here: the HTTP subset returns the whole utterance. It was

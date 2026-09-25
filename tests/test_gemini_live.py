@@ -1219,3 +1219,39 @@ async def test_audio_split_mid_sample_is_reassembled(fake: Callable[..., Any]) -
     await conn.aclose()
     got = b"".join(a.frame.data for a in events.of(ResponseAudio))
     np.testing.assert_array_equal(np.frombuffer(got, dtype=np.int16), samples)
+
+
+async def test_resampled_output_is_drained_at_the_end_of_each_generation(
+    fake: Callable[..., Any],
+) -> None:
+    """Audio at another rate is resampled; each generation's filter tail is emitted
+    before its ``ResponseDone`` (#157), and a cancelled one's tail never leaks into the
+    next generation."""
+    import base64
+
+    server = await fake()
+    conn, events = await connect(server)
+    clip = synth_speech(0.2, 16_000)
+    inline = {"mimeType": "audio/pcm;rate=16000", "data": base64.b64encode(clip.data).decode()}
+    await server.send({"serverContent": {"modelTurn": {"parts": [{"inlineData": inline}]}}})
+    await server.send({"serverContent": {"generationComplete": True}})
+    await events.wait(lambda: bool(events.of(ResponseDone)))
+    done = events.of(ResponseDone)[0]
+    first = [a for a in events.of(ResponseAudio) if a.response_id == done.response_id]
+    # every output sample owed for the input: 0.2 s at 24 kHz, nothing held back
+    assert sum(len(a.frame.data) for a in first) == round(0.2 * 24_000) * 2
+    assert events.items.index(first[-1]) < events.items.index(done)
+    await server.send({"serverContent": {"turnComplete": True}})
+
+    # a cancelled generation's tail is discarded, not emitted with the next one
+    await server.send({"serverContent": {"modelTurn": {"parts": [{"inlineData": inline}]}}})
+    await server.send({"serverContent": {"interrupted": True}})
+    await events.wait(lambda: len(events.of(ResponseDone)) == 2)
+    await server.send({"serverContent": {"turnComplete": True}})
+    await server.send({"serverContent": {"modelTurn": {"parts": [{"inlineData": inline}]}}})
+    await server.send({"serverContent": {"turnComplete": True}})
+    await events.wait(lambda: len(events.of(ResponseDone)) == 3)
+    await conn.aclose()
+    third = events.of(ResponseDone)[2]
+    audio = [a for a in events.of(ResponseAudio) if a.response_id == third.response_id]
+    assert sum(len(a.frame.data) for a in audio) == round(0.2 * 24_000) * 2

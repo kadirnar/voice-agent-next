@@ -1514,6 +1514,7 @@ class ElevenLabsSTT(STT):
                 language_detection=(
                     (include_language_detection or include_timestamps) if realtime else True
                 ),
+                reconnect=realtime,  # each stream opens its own WebSocket
             ),
             sample_rate=sample_rate,
             language=language,

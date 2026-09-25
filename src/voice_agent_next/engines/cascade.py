@@ -54,10 +54,11 @@ from ..chat import (
     FunctionCallOutput,
 )
 from ..engine import EngineCapabilities, EngineConnection, EngineOptions, S2SEngine
-from ..errors import ConfigurationError, ProviderConnectionError
+from ..errors import ConfigurationError, ProviderConnectionError, ProviderError, VoiceAgentError
 from ..events import (
     EngineErrorEvent,
     EngineEvent,
+    EngineStatus,
     InputCommitted,
     InputSpeechStarted,
     InputSpeechStopped,
@@ -78,14 +79,14 @@ from ..metrics import (
     SpeculationReason,
 )
 from ..registry import create
-from ..stt import STT, StreamAdapter, STTEventType, WordTiming
+from ..stt import STT, StreamAdapter, STTEvent, STTEventType, STTStream, WordTiming
 from ..text.filters import tts_clean
 from ..text.sentences import SentenceSegmenter
 from ..tools import FunctionTool
 from ..tts import TTS
 from ..turn import FusedTurnDetector, TurnDetector
 from ..utils.aio import BackgroundTasks, Chan, ChanClosed, cancel_and_wait
-from ..utils.clock import now
+from ..utils.clock import now, sleep_for
 from ..utils.ids import new_id
 from ..utils.log import logger
 from ..vad import VAD, VADEventType
@@ -129,6 +130,17 @@ class CascadeOptions:
     (``None`` = the detector's own ``threshold``)."""
     final_transcript_timeout: float = 1.0
     """Max wait for the STT's final transcript after flushing."""
+    stt_reconnect: bool | None = None
+    """Reopen the STT stream when it ends or fails with a retryable error, instead of a
+    fatal error. ``None``: when the STT declares it can (``STTCapabilities.reconnect``)."""
+    stt_reconnect_attempts: int = 3
+    """Reopen attempts in a row (a stream that worked for a while resets the count);
+    after the last one the STT failure is fatal, as without reconnects."""
+    stt_reconnect_backoff: float = 0.25
+    """Delay before the first reopen attempt, doubled for each further one (max 5 s)."""
+    stt_reconnect_buffer: float = 10.0
+    """Seconds of user audio kept while the STT stream is down and sent to the new stream
+    (the newest audio; older audio of a longer gap is dropped)."""
     text_filter: Callable[[str], str] | None = tts_clean
     """Applied to each sentence before TTS (markdown/emoji removal by default)."""
     first_sentence_min_chars: int = 4
@@ -222,6 +234,10 @@ class _LateFlush:
 
 _LATE_FINAL_EXPIRY = 10.0
 """Seconds after which an unanswered flush no longer claims the next final transcript."""
+_STT_STABLE_AFTER = 10.0
+"""An STT stream that lived this long worked: its end starts a new series of reopen
+attempts (a stream that keeps dying early exhausts ``stt_reconnect_attempts``)."""
+_STT_MAX_BACKOFF = 5.0
 
 
 class _Output:
@@ -532,6 +548,16 @@ class CascadeConnection(EngineConnection):
         """Flushes that timed out, oldest first (their finals may still arrive)."""
         self._stt_ended = False
         """The STT stream is gone (ended or failed): no audio is pushed to it any more."""
+        self._stt_down = False
+        """The STT stream ended and a new one is being opened: audio is buffered."""
+        self._stt_gap: deque[tuple[float, AudioFrame]] = deque()
+        """(input-stream position, frame) of the audio sent while the STT is down."""
+        self._stt_gap_duration = 0.0
+        self._stt_epoch = 0
+        """Incremented whenever a stream goes down (its pending flush is lost)."""
+        self._stt_offset = 0.0
+        """Input-stream position of the current STT stream's first sample (its timestamps
+        are relative to it)."""
         self._closing = False
 
     # ---------------------------------------------------------------- user turn
@@ -548,7 +574,10 @@ class CascadeConnection(EngineConnection):
 
     async def _send_audio(self, frame: AudioFrame) -> None:
         if self._stt is not None and not self._stt_ended:
-            self._stt.push_audio(frame)
+            if self._stt_down:
+                self._buffer_stt_gap(frame)
+            else:
+                self._stt.push_audio(frame)
         self._recent.append(frame)
         self._recent_duration += frame.duration
         while (
@@ -601,16 +630,17 @@ class CascadeConnection(EngineConnection):
     async def _wait_final_transcript(self) -> None:
         if self._stt is None:
             return
-        if self._stt_ended:
+        if self._stt_ended or self._stt_down:
             self._use_interim()
             return
         self._final_event.clear()
         self._stt.flush()
         audio_time = self.input_audio_time
+        epoch = self._stt_epoch
         try:
             await asyncio.wait_for(self._final_event.wait(), self._opts.final_transcript_timeout)
-            if self._stt_ended:  # woken by the end of the STT stream, not by a final
-                self._use_interim()
+            if self._stt_ended or self._stt_epoch != epoch:
+                self._use_interim()  # woken by the end of the STT stream, not by a final
         except TimeoutError:
             # the final may still come: it then belongs to this turn only (see _late_final)
             fallback = self._use_interim()
@@ -906,65 +936,145 @@ class CascadeConnection(EngineConnection):
     async def _stt_loop(self) -> None:
         stt = self._stt
         assert stt is not None
+        attempts = 0
         try:
-            async for ev in stt:
-                if ev.type == STTEventType.INTERIM_TRANSCRIPT:
-                    self._turn_interim = ev.text
-                    partial = " ".join(p for p in (self._turn_text(), ev.text) if p)
-                    self._emit(
-                        InputTranscript(item_id=self._turn_item_id, text=partial, is_final=False)
+            while True:
+                opened = now()
+                error: Exception | None = None
+                try:
+                    async for ev in stt:
+                        self._on_stt_event(ev)
+                except Exception as exc:
+                    error = exc
+                if self._closing:
+                    return
+                if now() - opened >= _STT_STABLE_AFTER:
+                    attempts = 0  # that stream worked: a new failure starts a new series
+                ended = error is None
+                if error is None:
+                    # the provider closed the stream: without it the cascade is deaf
+                    error = ProviderConnectionError(
+                        "the STT stream ended", provider=getattr(self._e.stt, "provider", None)
                     )
-                elif ev.type == STTEventType.FINAL_TRANSCRIPT:
-                    end_time = ev.transcript.end_time if ev.transcript is not None else None
-                    if end_time is not None:
-                        self._last_final_end = end_time
-                    if self._late_final(end_time):
-                        continue  # the late answer to a flush of an already committed turn
-                    if ev.text.strip():
-                        self._turn_finals.append(ev.text)
-                        self._emit(
-                            InputTranscript(
-                                item_id=self._turn_item_id,
-                                text=self._turn_text(),
-                                is_final=False,
-                                language=ev.transcript.language if ev.transcript else None,
-                                segment_final=True,
-                            )
-                        )
-                    self._turn_interim = ""
-                    self._final_event.set()
-                    if self._spec is not None and not self._stt_turns:
-                        self._speculate()  # a late final changed the transcript: start over
-                elif ev.type == STTEventType.START_OF_SPEECH and self._vad is None:
-                    self._on_speech_started(None)
-                elif ev.type == STTEventType.END_OF_SPEECH and self._vad is None:
-                    # STT audio time = our input stream time (all audio goes to the STT)
-                    end = ev.transcript.end_time if ev.transcript else None
-                    self._on_speech_stopped(end if end is not None else self._last_final_end)
-                elif ev.type == STTEventType.END_OF_TURN and self.options.turn_detection:
-                    if self._endpoint_task is not None and not self._endpoint_task.done():
-                        self._endpoint_task.cancel()
-                    self._stt_commit_task = self._tasks.spawn(self._commit_when_allowed())
-                elif ev.type == STTEventType.EAGER_END_OF_TURN:
-                    eager = " ".join(p for p in (self._turn_text(), ev.text.strip()) if p)
-                    self._speculate(text=eager)
-                elif ev.type == STTEventType.TURN_RESUMED:
-                    self._discard_speculation("resumed")
-            if not self._closing:
-                # the provider closed the stream: without it the cascade is deaf
-                logger.error("the STT stream ended unexpectedly")
-                error = ProviderConnectionError(
-                    "the STT stream ended", provider=getattr(self._e.stt, "provider", None)
-                )
-                self._emit(EngineErrorEvent(error=error, recoverable=False))
-        except Exception as exc:
-            logger.exception("STT stream failed")
-            self._emit(EngineErrorEvent(error=exc, recoverable=False))
+                if attempts >= self._opts.stt_reconnect_attempts or not self._stt_retryable(error):
+                    if ended:
+                        logger.error("the STT stream ended unexpectedly")
+                    else:
+                        logger.error("STT stream failed", exc_info=error)
+                    self._emit(EngineErrorEvent(error=error, recoverable=False))
+                    return
+                attempts += 1
+                reopened = await self._reopen_stt(stt, error, attempts, ended=ended)
+                if reopened is None:
+                    return
+                stt = reopened
         finally:
             # nothing reads the stream's input any more: stop feeding (and buffering) it
             self._stt_ended = True
+            self._stt_down = False
+            self._stt_gap.clear()
             self._final_event.set()
             await stt.aclose()
+
+    def _stt_retryable(self, error: Exception) -> bool:
+        """May a new STT stream succeed where this one ended or failed?"""
+        stt = self._e.stt
+        enabled = self._opts.stt_reconnect
+        if enabled is None:
+            enabled = stt is not None and stt.capabilities.reconnect
+        if not enabled or self._opts.stt_reconnect_attempts <= 0:
+            return False
+        return not isinstance(error, VoiceAgentError) or (
+            isinstance(error, ProviderError) and error.retryable
+        )
+
+    async def _reopen_stt(
+        self, old: STTStream, error: Exception, attempt: int, *, ended: bool
+    ) -> STTStream | None:
+        """Replace an ended STT stream after a backoff; the audio sent meanwhile is
+        buffered (up to ``stt_reconnect_buffer`` seconds) and replayed to the new one."""
+        stt = self._e.stt
+        assert stt is not None
+        self._stt_down = True
+        self._stt_epoch += 1
+        self._final_event.set()  # a pending flush will not be answered by that stream
+        self._late_flushes.clear()  # nor will the flushes that already timed out
+        await old.aclose()
+        reason = "the STT stream ended" if ended else f"the STT stream failed: {error!r}"
+        logger.warning("%s; reopening it (attempt %d)", reason, attempt)
+        self._emit(EngineStatus(status="reconnecting", detail=reason))
+        backoff = self._opts.stt_reconnect_backoff * 2 ** (attempt - 1)
+        await sleep_for(min(backoff, _STT_MAX_BACKOFF))
+        if self._closing:
+            return None
+        try:
+            new = stt.stream(language=self.options.language)
+        except Exception as exc:  # e.g. a configuration error: no point retrying
+            logger.error("could not reopen the STT stream", exc_info=exc)
+            self._emit(EngineErrorEvent(error=exc, recoverable=False))
+            return None
+        gap, self._stt_gap = self._stt_gap, deque()
+        self._stt_gap_duration = 0.0
+        # the new stream's timestamps count from its first sample
+        self._stt_offset = gap[0][0] if gap else self.input_audio_time
+        for _, frame in gap:
+            new.push_audio(frame)
+        self._stt = new
+        self._stt_down = False
+        self._emit(EngineStatus(status="reconnected", detail="reopened the STT stream"))
+        return new
+
+    def _buffer_stt_gap(self, frame: AudioFrame) -> None:
+        self._stt_gap.append((self.input_audio_time - frame.duration, frame))
+        self._stt_gap_duration += frame.duration
+        limit = self._opts.stt_reconnect_buffer
+        while self._stt_gap and self._stt_gap_duration > limit + 1e-9:
+            self._stt_gap_duration -= self._stt_gap.popleft()[1].duration
+
+    def _on_stt_event(self, ev: STTEvent) -> None:
+        if ev.type == STTEventType.INTERIM_TRANSCRIPT:
+            self._turn_interim = ev.text
+            partial = " ".join(p for p in (self._turn_text(), ev.text) if p)
+            self._emit(InputTranscript(item_id=self._turn_item_id, text=partial, is_final=False))
+        elif ev.type == STTEventType.FINAL_TRANSCRIPT:
+            end_time = ev.transcript.end_time if ev.transcript is not None else None
+            if end_time is not None:
+                end_time += self._stt_offset  # on our input stream (see _reopen_stt)
+                self._last_final_end = end_time
+            if self._late_final(end_time):
+                return  # the late answer to a flush of an already committed turn
+            if ev.text.strip():
+                self._turn_finals.append(ev.text)
+                self._emit(
+                    InputTranscript(
+                        item_id=self._turn_item_id,
+                        text=self._turn_text(),
+                        is_final=False,
+                        language=ev.transcript.language if ev.transcript else None,
+                        segment_final=True,
+                    )
+                )
+            self._turn_interim = ""
+            self._final_event.set()
+            if self._spec is not None and not self._stt_turns:
+                self._speculate()  # a late final changed the transcript: start over
+        elif ev.type == STTEventType.START_OF_SPEECH and self._vad is None:
+            self._on_speech_started(None)
+        elif ev.type == STTEventType.END_OF_SPEECH and self._vad is None:
+            # STT audio time + offset = our input stream time (all audio goes to the STT)
+            end = ev.transcript.end_time if ev.transcript else None
+            if end is not None:
+                end += self._stt_offset
+            self._on_speech_stopped(end if end is not None else self._last_final_end)
+        elif ev.type == STTEventType.END_OF_TURN and self.options.turn_detection:
+            if self._endpoint_task is not None and not self._endpoint_task.done():
+                self._endpoint_task.cancel()
+            self._stt_commit_task = self._tasks.spawn(self._commit_when_allowed())
+        elif ev.type == STTEventType.EAGER_END_OF_TURN:
+            eager = " ".join(p for p in (self._turn_text(), ev.text.strip()) if p)
+            self._speculate(text=eager)
+        elif ev.type == STTEventType.TURN_RESUMED:
+            self._discard_speculation("resumed")
 
     async def _commit_turn(self) -> None:
         text = self._turn_text()

@@ -7,6 +7,7 @@ import asyncio
 import os
 import socket
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 from websockets.asyncio.server import Server, ServerConnection, serve
@@ -134,6 +135,62 @@ async def test_ws_connect_maps_invalid_urls_and_refused_connections() -> None:
     # refused at once, or (Windows retries the SYN for ~2 s) the handshake times out
     with pytest.raises((ProviderConnectionError, ProviderTimeoutError), match="the Acme API"):
         await _connect(f"ws://127.0.0.1:{port}", open_timeout=5.0)
+
+
+async def test_ws_connect_hint_and_timeout_error() -> None:
+    """``hint`` is appended to the messages; ``timeout_error`` picks the timeout class."""
+
+    async def silent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read()  # accept TCP, never answer the HTTP upgrade
+        writer.close()
+
+    server = await asyncio.start_server(silent, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    kw: dict[str, Any] = {
+        "provider": "acme",
+        "target": "the Acme server",
+        "name": "Acme",
+        "http_error": _http_error,
+        "open_timeout": 0.3,
+        "hint": "is it running?",
+    }
+    try:
+        with pytest.raises(ProviderTimeoutError, match=r"timed out .*\(is it running\?\)"):
+            await ws_connect(f"ws://127.0.0.1:{port}", **kw)
+        with pytest.raises(ProviderConnectionError, match=r"\(is it running\?\)") as info:
+            await ws_connect(f"ws://127.0.0.1:{port}", timeout_error=ProviderConnectionError, **kw)
+        assert type(info.value) is ProviderConnectionError and info.value.retryable
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.parametrize("module", ["moshi", "google.live"])
+async def test_engines_connect_through_the_shared_helper(
+    module: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Moshi and Gemini Live open their sockets with ``ws_connect`` (#157)."""
+    import importlib
+
+    from voice_agent_next.engine import EngineOptions
+
+    mod = importlib.import_module(f"voice_agent_next.providers.{module}")
+    calls: list[dict[str, Any]] = []
+
+    async def fake_connect(url: str, **kw: Any) -> Any:
+        calls.append({"url": url, **kw})
+        raise ProviderConnectionError("stop here", provider=kw["provider"])
+
+    monkeypatch.setattr(mod, "ws_connect", fake_connect)
+    if module == "moshi":
+        engine: Any = mod.MoshiEngine(base_url="ws://127.0.0.1:9", reconnect=False)
+    else:
+        engine = mod.GeminiLiveEngine(api_key="k", base_url="ws://127.0.0.1:9")
+    with pytest.raises(ProviderConnectionError, match="stop here"):
+        await engine.connect(EngineOptions())
+    (call,) = calls
+    assert call["url"].startswith("ws://127.0.0.1:9")
+    assert call["timeout_error"] is ProviderConnectionError
 
 
 async def test_ws_connect_opens_a_connection() -> None:

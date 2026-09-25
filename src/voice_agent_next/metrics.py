@@ -129,7 +129,9 @@ class EngineMetrics:
 
     Token counts are the provider's own when it reports them. ``tokens_estimated`` marks
     counts derived locally (Moshi/PersonaPlex: Mimi frames from the audio duration). Engines
-    billed by time report no tokens: GPT-Live's usage is ``connection.usage_seconds``.
+    billed by time report no tokens but ``billed_seconds`` (GPT-Live: the session's
+    ``usage.seconds`` accrued since the previous response; the running total is
+    ``connection.usage_seconds``).
     """
 
     provider: str
@@ -146,6 +148,9 @@ class EngineMetrics:
     cancelled: bool = False
     tokens_estimated: bool = False
     """The token counts are derived locally rather than reported by the provider."""
+    billed_seconds: float = 0.0
+    """Engines billed by time: billed seconds attributed to this response (listening
+    since the previous response included)."""
     timestamp: float = field(default_factory=_ts)
     type: Literal["engine"] = "engine"
 
@@ -362,6 +367,8 @@ class UsageSummary:
     engine_output_audio_tokens: int = 0
     engine_input_text_tokens: int = 0
     engine_output_text_tokens: int = 0
+    engine_billed_seconds: float = 0.0
+    """Engines billed by time (GPT-Live): billed seconds reported with the responses."""
     speculation_hits: int = 0
     """Speculative (preemptive) replies that were kept."""
     speculation_waste_calls: int = 0
@@ -391,6 +398,7 @@ class UsageSummary:
             self.engine_output_audio_tokens += m.output_audio_tokens
             self.engine_input_text_tokens += m.input_text_tokens
             self.engine_output_text_tokens += m.output_text_tokens
+            self.engine_billed_seconds += m.billed_seconds
         elif isinstance(m, SpeculationMetrics):
             if m.hit:
                 self.speculation_hits += 1

@@ -9,11 +9,12 @@ import pytest
 
 from tests.test_session import mock_cascade, wait_for
 from voice_agent_next import Agent
+from voice_agent_next.errors import ProviderConnectionError
 from voice_agent_next.fallback import FallbackTTS
 from voice_agent_next.metrics import TTSMetrics, UsageSummary
 from voice_agent_next.providers.mock import MockTTS
 from voice_agent_next.transports import LoopbackTransport
-from voice_agent_next.tts import TTS, SentenceStreamAdapter
+from voice_agent_next.tts import TTS, ChunkedStream, SentenceStreamAdapter
 
 TEXT = "Hello there. This is a second sentence. And a third one."
 
@@ -98,6 +99,35 @@ async def test_fallback_sentence_adapter_reports_usage_once() -> None:
     await _stream(fb, TEXT)
     assert len(got) == 1
     assert usage.tts_characters == _pushed(TEXT)
+
+
+class _RefusesSecond(MockTTS):
+    """Fails every sentence that mentions "second" (a per-sentence outage)."""
+
+    def _synthesize(self, text: str, *, voice: str | None) -> ChunkedStream:
+        if "second" in text:
+            raise ProviderConnectionError("refused", provider="mock")
+        return super()._synthesize(text, voice=voice)
+
+
+async def test_fallback_sentence_adapter_attributes_usage_to_the_serving_provider() -> None:
+    """Fallback + sentence adapter (#157): each sentence's usage is reported under the
+    provider that served it, still exactly once in total."""
+    a = _RefusesSecond(model="a", chars_per_second=200)
+    b = MockTTS(model="b", chars_per_second=200)
+    fb = FallbackTTS([a, b], cooldown=0)
+    got, usage = _record(fb)
+    duration = await _stream(fb, TEXT)
+    sentences = ["Hello there.", "This is a second sentence.", "And a third one."]
+    assert a.requests == [sentences[0], sentences[2]] and b.requests == [sentences[1]]
+    by_model = {m.model: m for m in got}
+    assert sorted(by_model) == ["a", "b"] and len(got) == 2
+    assert {m.provider for m in got} == {"mock"}
+    assert by_model["b"].characters == len(sentences[1])
+    assert usage.tts_characters == _pushed(TEXT)  # the separators count once, too
+    assert usage.tts_audio_seconds == pytest.approx(duration, abs=0.01)
+    assert by_model["b"].audio_duration == pytest.approx(b.audio_duration_for(sentences[1]), abs=0.01)  # fmt: skip
+    assert by_model["a"].ttfb is not None  # the request's TTFB, on its first provider
 
 
 async def test_fallback_native_stream_reports_usage_once() -> None:

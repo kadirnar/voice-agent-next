@@ -316,6 +316,7 @@ class SonioxSTT(STT):
                 word_timestamps=True,
                 end_of_turn=end_of_turn,
                 language_detection=bool(language_identification),
+                reconnect=True,  # each stream opens its own WebSocket
             ),
             sample_rate=sample_rate,
             language=language,

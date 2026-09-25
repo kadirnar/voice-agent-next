@@ -744,6 +744,7 @@ class _Reply:
         "closing_at",
         "first_audio_at",
         "item_id",
+        "pcm",
         "response_id",
         "started_at",
         "text",
@@ -760,6 +761,8 @@ class _Reply:
         self.closing_at: float | None = None
         """The response ends at this time unless more assistant content arrives."""
         self.text = ""
+        self.pcm = PCM16Reassembler()
+        """Carries a partial sample across this response's audio chunks (never into the next)."""
 
 
 class NovaSonicSessionConnection(EngineConnection):
@@ -789,7 +792,6 @@ class NovaSonicSessionConnection(EngineConnection):
         self._closing = False
         self._failed = False
         self._audio_open = False
-        self._pcm = PCM16Reassembler()
         self._warned: set[str] = set()
         # ---- clocks
         self._t0 = now()
@@ -1230,7 +1232,7 @@ class NovaSonicSessionConnection(EngineConnection):
         reply = self._reply
         if reply is None or content.response_id != reply.response_id:
             return
-        raw = self._pcm.push(base64.b64decode(data))
+        raw = reply.pcm.push(base64.b64decode(data))
         if not raw:
             return
         frame = AudioFrame(raw, self._e.output_sample_rate)

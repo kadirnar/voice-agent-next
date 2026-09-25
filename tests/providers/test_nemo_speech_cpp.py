@@ -391,6 +391,45 @@ async def test_a_real_server_session_replays() -> None:
     assert final.start_time == pytest.approx(0.8) and final.confidence == pytest.approx(0.9375)
 
 
+def _server_deltas(partials: list[str]) -> list[dict[str, Any]]:
+    """What ``nemo-speech serve`` sends for these successive partials: the new suffix when
+    a partial extends the previous one, else the whole rewritten partial."""
+    out, prev = [], ""
+    for text in partials:
+        delta = text[len(prev) :] if text.startswith(prev) else text
+        out.append({"type": "conversation.item.input_audio_transcription.delta", "delta": delta})
+        prev = text
+    return out
+
+
+async def test_a_rewritten_interim_replaces_the_old_text() -> None:
+    """A partial the server rewrites (not an extension) arrives as the full text (#157):
+    it replaces the interim instead of being appended to it; extensions, including a
+    repeated word, still append."""
+    partials = [
+        "in other",
+        "in other words",
+        "In other words,",  # rewritten: capitalized, punctuated
+        "In other words, no",
+        "In other words, no no",  # a repeated word is an extension
+        "In other words, no, no.",  # rewritten again
+        "In other words, no, no. I",
+        "In other words, no, no. It",  # mid-word continuation
+        "In other words, no, no. It is",
+    ]
+    final = {"type": "conversation.item.input_audio_transcription.completed",
+             "transcript": partials[-1] + "."}  # fmt: skip
+    replay = [*_server_deltas(partials), final, {"type": "input_audio_buffer.committed"}]
+    async with FakeNemoServer(replay=replay) as srv:
+        stream = NeMoSpeechCppSTT(base_url=srv.base_url).stream()
+        await push(stream, voiced(0.1))
+        stream.flush()
+        events = await collect(stream)
+        await stream.aclose()
+    interims = [e.text for e in events if e.type == STTEventType.INTERIM_TRANSCRIPT]
+    assert interims == partials
+
+
 async def test_session_options_are_sent() -> None:
     async with FakeNemoServer() as srv:
         stt = NeMoSpeechCppSTT(

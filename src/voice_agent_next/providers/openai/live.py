@@ -624,6 +624,8 @@ class LiveSessionConnection(EngineConnection):
         """Unix time at which the session expires (from ``session.started``)."""
         self.usage_seconds = 0.0
         """Latest cumulative billed voice duration (``usage.seconds``)."""
+        self._billed_mark = 0.0
+        """``usage_seconds`` already attributed to a response."""
         self.context_usage: float | None = None
         """Latest ``context_window.usage_ratio``."""
         self.close_reason: str | None = None
@@ -657,6 +659,11 @@ class LiveSessionConnection(EngineConnection):
         self._mute_speech_end = 0.0
         self._response_ended_at: float | None = None
         self._input_since_response = 0.0
+        # One per *session*, deliberately not per response: GPT-Live's output is one
+        # continuous PCM stream with no response boundaries on the wire (responses are
+        # inferred locally from loudness, and an interrupted model keeps streaming), so
+        # a reset at a local response boundary could misalign every later sample. A new
+        # session (rotation/reconnect) starts a new stream and a new reassembler.
         self._pcm = PCM16Reassembler()
         # ---- user speech (local VAD) and transcript
         opts = VADOptions(min_speech_duration=0.1, min_silence_duration=engine.user_min_silence)
@@ -1193,6 +1200,8 @@ class LiveSessionConnection(EngineConnection):
         if resp is None:
             return
         resp.ended_at = now()
+        billed = max(0.0, self.usage_seconds - self._billed_mark)
+        self._billed_mark = max(self._billed_mark, self.usage_seconds)
         self._emit(ResponseDone(response_id=resp.response_id, status=status))
         ttfb = None
         if resp.trigger_at is not None and resp.first_audio_at is not None:
@@ -1206,6 +1215,7 @@ class LiveSessionConnection(EngineConnection):
                 ttfb=ttfb,
                 duration=resp.ended_at - resp.started_at,
                 cancelled=status == "cancelled",
+                billed_seconds=billed,
             ),
         )
         self._input_since_response = 0.0
