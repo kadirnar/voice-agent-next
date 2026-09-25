@@ -135,6 +135,19 @@ LibriSpeech test-clean smoke subset (50 utterances, 10 speakers), Ryzen 5 5600 C
 
 On this subset the streaming NeMo model is both the most accurate and the fastest to finalize. Scores for FLEURS (en/es/de/tr/zh) are in PR #99.
 
+## T2 · ASR on the RTX 5070 Ti: NeMo-Speech.cpp (2026-09-25, #78)
+
+LibriSpeech test-clean smoke subset (50 utterances). TTFS = final transcript after the end of audio.
+
+| system | WER | TTFS p50 |
+|---|---:|---:|
+| Nemotron EN streaming (NeMo-Speech.cpp, CUDA), 80 / 160 / 560 / 1120 ms chunks | 2.64 / 2.64 / 2.11 / 2.02 % | **41 ms** |
+| Nemotron EN batch | **1.67 %** | 22 ms |
+| sherpa-onnx NeMo streaming (CPU) | 2.29 % | 64 ms |
+| faster-whisper `small.en` (CUDA) | 2.82 % | 140 ms |
+
+T1 with only the STT changed (same cascade): v2v p50 1,163 ms (Nemotron) vs 1,255 ms (sherpa-onnx) vs 1,222 ms (faster-whisper). Server-side endpointing in NeMo-Speech.cpp v0.1.0 drops words at its utterance splits (WER 2.6 → 4.1 %), so it is off by default.
+
 ## T7 · Framework overhead (mock components)
 
 `van bench latency --engine mock` (energy VAD 0.4 s silence, no model latency): v2v p50 ≈ 402 ms
