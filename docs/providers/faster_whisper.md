@@ -279,6 +279,13 @@ stream counts these finals in `finals_from_interim` and still reports `STTMetric
 them (the time spent waiting for the decode). Off by default, because it trades final
 accuracy (no beam search, no temperature fallback) for one decode less.
 
+It only helps when the speech really stopped before the input ended. In the benchmark
+above (`base`, CPU int8, 30 LibriSpeech utterances, Silero, real time, 2026-09-25), most
+recordings end on the last word, so voiced audio follows the last interim decode and the
+final is decoded as usual: WER was unchanged (5.00 %) and TTFS p50 / p90 were 379 / 533 ms
+without the option and 402 / 618 ms with it (a shared, loaded CPU: noise), with a 0 ms
+TTFS on the utterance whose last interim decode had heard everything.
+
 ## Hallucination guard
 
 Whisper was trained on subtitles, and when a VAD lets noise, breathing or silence through
