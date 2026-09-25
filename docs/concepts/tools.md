@@ -179,5 +179,6 @@ recorder (`record=...`) writes all of these events to the JSONL timeline.
   injection). The model sees them as context, not as function outputs.
 * `say()` on native engines asks the model to say the filler verbatim. Most models
   comply, but they are not guaranteed to be exact.
-* No engine implements `tool_mode="delegation"` yet (GPT-Live). Such engines get
-  non-blocking results through `send_async_tool_output`, and no fillers.
+* Engines with `tool_mode="delegation"` ([GPT-Live](../providers/openai-live.md)) get
+  *every* result, blocking tools included, through `send_async_tool_output` as soon as
+  it is ready (the voice model does not wait, it keeps talking), and no fillers.
