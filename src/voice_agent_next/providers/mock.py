@@ -45,7 +45,7 @@ from ..metrics import EngineMetrics
 from ..registry import register_provider
 from ..stt import STT, STTCapabilities, STTEvent, STTEventType, STTStream, Transcript
 from ..tools import FunctionTool
-from ..tts import TTS, ChunkedStream, SynthesizeStream, TTSCapabilities
+from ..tts import TTS, ChunkedStream, NormalizeOption, SynthesizeStream, TTSCapabilities
 from ..turn import TurnDetector
 from ..utils.clock import now
 from ..utils.ids import new_id
@@ -329,6 +329,7 @@ class MockTTS(TTS):
         ttfb: delay before the first chunk.
         realtime_factor: 0 = produce audio instantly; 1.0 = at real-time speed.
         streaming: expose a native input-streaming interface (synthesizes per flush).
+        normalize: spoken-form text normalization (off by default).
     """
 
     provider = "mock"
@@ -346,12 +347,14 @@ class MockTTS(TTS):
         streaming: bool = False,
         frequency: float = 220.0,
         amplitude: float = 0.3,
+        normalize: NormalizeOption = None,
     ) -> None:
         super().__init__(
             model=model,
             sample_rate=sample_rate,
             capabilities=TTSCapabilities(streaming=streaming),
             voice=voice,
+            normalize=normalize,
         )
         self.ttfb = ttfb
         self.chars_per_second = chars_per_second

@@ -28,7 +28,7 @@ from ...audio.frame import AudioFrame
 from ...audio.resample import StreamResampler
 from ...errors import ConfigurationError, ProviderError, VoiceAgentError
 from ...registry import register_provider
-from ...tts import TTS, ChunkedStream, TTSCapabilities
+from ...tts import TTS, ChunkedStream, NormalizeOption, TTSCapabilities
 from ...utils.log import logger
 from ._common import API_KEY_ENV, PROVIDER, deep_merge, make_genai_client, map_google_error
 
@@ -144,7 +144,8 @@ class GeminiTTS(TTS):
         base_url, api_version, headers: endpoint overrides and extra HTTP headers.
         client: a pre-built ``google.genai.Client`` (not closed by :meth:`aclose`).
         http_client: an ``httpx.AsyncClient`` for the SDK (not closed by :meth:`aclose`).
-        clean_text, trim_silence: see :class:`~voice_agent_next.tts.TTS`.
+        clean_text, trim_silence, normalize: see :class:`~voice_agent_next.tts.TTS` (the
+            service normalizes text itself, so ``normalize`` is off by default).
     """
 
     provider = PROVIDER
@@ -173,6 +174,7 @@ class GeminiTTS(TTS):
         client: Any = None,
         http_client: Any = None,
         clean_text: bool = True,
+        normalize: NormalizeOption = None,
         trim_silence: bool = True,
     ) -> None:
         if max_retries < 0 or empty_retries < 0:
@@ -184,6 +186,7 @@ class GeminiTTS(TTS):
             capabilities=TTSCapabilities(streaming=False),
             voice=voice or DEFAULT_VOICE,
             clean_text=clean_text,
+            normalize=normalize,
             trim_silence=trim_silence,
         )
         self.language = language

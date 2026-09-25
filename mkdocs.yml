@@ -116,6 +116,7 @@ nav:
       - Architecture: ARCHITECTURE.md
       - Engines and events: concepts/engines.md
       - The cascade: concepts/cascade.md
+      - Text normalization: concepts/text-normalization.md
       - Turn-taking: concepts/turn-taking.md
       - Endpointing: concepts/endpointing.md
       - Session rotation: concepts/session-rotation.md

@@ -43,7 +43,14 @@ from ..errors import (
 )
 from ..registry import register_provider
 from ..stt import STT, STTCapabilities, STTEvent, STTEventType, STTStream, Transcript, WordTiming
-from ..tts import TTS, ChunkedStream, SynthesizedAudio, SynthesizeStream, TTSCapabilities
+from ..tts import (
+    TTS,
+    ChunkedStream,
+    NormalizeOption,
+    SynthesizedAudio,
+    SynthesizeStream,
+    TTSCapabilities,
+)
 from ..utils.aio import Chan, cancel_and_wait
 from ..utils.clock import now
 from ..utils.ids import new_id
@@ -287,6 +294,8 @@ class CartesiaTTS(TTS):
             :class:`~voice_agent_next.errors.ProviderTimeoutError` if Cartesia stays silent
             this long (a watchdog against audio that never arrives); also the HTTP read
             timeout of :meth:`synthesize`.
+        normalize: spoken-form text normalization (see :class:`~voice_agent_next.tts.TTS`),
+            off by default: the service normalizes text itself.
     """
 
     provider = "cartesia"
@@ -311,6 +320,7 @@ class CartesiaTTS(TTS):
         connect_timeout: float = 10.0,
         receive_timeout: float = 10.0,
         clean_text: bool = True,
+        normalize: NormalizeOption = None,
     ) -> None:
         if sample_rate not in TTS_SAMPLE_RATES:
             raise ConfigurationError(
@@ -331,6 +341,7 @@ class CartesiaTTS(TTS):
             capabilities=TTSCapabilities(streaming=True, word_timestamps=word_timestamps),
             voice=voice or DEFAULT_VOICE,
             clean_text=clean_text,
+            normalize=normalize,
         )
         self._api_key = _resolve_api_key(api_key)
         self.language = language
