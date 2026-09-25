@@ -1587,7 +1587,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
                 logger.warning("engine clear_input failed: %s", exc)
             if self._barge is not barge:
                 return
-        elif overlap.final_after_quiet and not overlap.not_a_turn():
+        elif overlap.is_turn():
             self._defer_engine_commits(False)  # a real utterance: the engine may commit it
         verdict = overlap.verdict(now())
         if verdict is None:

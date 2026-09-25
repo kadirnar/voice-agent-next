@@ -35,6 +35,7 @@ cascade (see ``docs/concepts/omni-models.md``).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
@@ -474,6 +475,8 @@ class CascadeConnection(EngineConnection):
         """Clear while automatic commits are deferred (:meth:`defer_commit`)."""
         self._commit_gate.set()
         self._stt_commit_task: asyncio.Task[None] | None = None
+        self._vad_input = asyncio.Event()
+        """Set whenever the VAD has processed input audio."""
 
     # ---------------------------------------------------------------- user turn
     def _reset_turn(self) -> None:
@@ -506,6 +509,7 @@ class CascadeConnection(EngineConnection):
                 self._on_speech_started(self.input_audio_time - ev.speech_duration)
             elif ev.type == VADEventType.END_OF_SPEECH:
                 self._on_speech_stopped(self.input_audio_time - ev.silence_duration)
+        self._vad_input.set()
 
     def _on_speech_started(self, audio_time: float | None) -> None:
         onset = self.audio_time_to_wall(audio_time) if audio_time is not None else None
@@ -599,7 +603,9 @@ class CascadeConnection(EngineConnection):
         opts = self._e.vad.options
         deadline = now() + opts.min_speech_duration + 0.1
         while vad.probability >= opts.activation_threshold and now() < deadline:
-            await asyncio.sleep(0.01)
+            self._vad_input.clear()  # set by the next input frame the VAD has seen
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._vad_input.wait(), max(0.0, deadline - now()))
 
     def _on_resumed(self, pause: _Pause | None, onset: float) -> None:
         """The user spoke again before the pending pause was committed."""

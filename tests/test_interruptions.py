@@ -679,7 +679,7 @@ def test_short_garbled_backchannel_does_not_interrupt() -> None:
     assert ov.deadline() == pytest.approx(1.0)  # the duration rule needs 1 s of speech now
     ov.speech_stopped(0.6, 0.9)
     ov.add_transcript("item", "but high", final=True)  # the STT's "uh-huh"
-    assert ov.not_a_turn()  # dropped, not answered
+    assert ov.not_a_turn() and not ov.is_turn()  # dropped, not answered
     assert ov.verdict(0.95) == Verdict.RESUME and ov.reason() == "backchannel"
 
 
@@ -690,7 +690,7 @@ def test_short_utterance_with_an_interruption_word_is_a_barge_in() -> None:
     short = Overlap.begin(short_rule(false_interruption_timeout=1.0), 0.0)
     short.speech_stopped(0.3, 0.55)
     short.add_transcript("item", "Okay, wait.", final=True)
-    assert not short.not_a_turn()  # a real turn: the engine commits (and answers) it
+    assert short.is_turn() and not short.not_a_turn()  # the engine commits (answers) it
     assert short.verdict(0.6) is None and short.verdict(1.55) == Verdict.INTERRUPT
 
 

@@ -476,6 +476,14 @@ with ~4 s replies; the mock engine gets user transcripts only when it commits a 
 answers backchannels (100 % false barge-ins) — a real STT with the session's backchannel
 filter does better.
 
+A CI smoke version runs the battery on a mock cascade with the local presets'
+turn-taking settings (`tests/bench/test_turn_taking.py::test_mock_cascade_battery_smoke`):
+a short mid-turn pause, a backchannel the mock STT transcribes as "but high" (what
+sherpa-onnx NeMo makes of Kokoro's "Uh-huh."), and a real interruption; it asserts 0 %
+premature replies, false barge-ins, dead air and missed turns. Findings and defaults from
+the real local stack: [endpointing](../docs/concepts/endpointing.md#the-local-presets-issue-113)
+and [interruptions](../docs/concepts/interruptions.md#short-utterances-small-asr-models).
+
 ## T6: tool use (`van bench tools`)
 
 ```bash

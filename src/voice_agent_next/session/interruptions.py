@@ -453,6 +453,16 @@ class Overlap:
             )
         )
 
+    def is_turn(self) -> bool:
+        """The user went quiet after saying enough meaningful words, and not a short
+        backchannel: whatever the verdict, the engine may commit (and answer) it."""
+        return (
+            not self.confirmed
+            and self.speaking_since is None
+            and len(self.meaningful_words()) >= self.policy.words_needed
+            and not self.short_backchannel(self.quiet_since or self.started_at)
+        )
+
     def reason(self) -> FalseInterruptionReason:
         """Why the overlap was not an interruption."""
         if not self.transcript:
@@ -480,12 +490,16 @@ class Overlap:
                 return Verdict.SETTLED if words else Verdict.FALSE_INTERRUPTION
             return None
         short = self.short_backchannel(t)
-        if self.segment_duration(t) >= p.min_duration - _EPS and words >= p.min_words:
-            if not short:
-                return Verdict.INTERRUPT
-        if quiet_for is not None and self.final_after_quiet and self.transcript:
-            if not words or short:
-                return Verdict.RESUME  # only backchannels: no reason to keep the agent waiting
+        long_enough = self.segment_duration(t) >= p.min_duration - _EPS
+        if long_enough and words >= p.min_words and not short:
+            return Verdict.INTERRUPT
+        if (
+            quiet_for is not None
+            and self.final_after_quiet
+            and self.transcript
+            and (not words or short)
+        ):
+            return Verdict.RESUME  # only backchannels: no reason to keep the agent waiting
         if timed_out:
             return Verdict.INTERRUPT if words >= p.words_needed and not short else Verdict.RESUME
         if (
@@ -506,7 +520,9 @@ class Overlap:
             if len(self.meaningful_words()) >= p.min_words:
                 # the duration rule: the segment and, for a possible backchannel, the speech
                 # of the whole overlap must be long enough
-                due = [self.speaking_since + p.min_duration] if self.longest < p.min_duration else []
+                due = []
+                if self.longest < p.min_duration:
+                    due.append(self.speaking_since + p.min_duration)
                 limit = p.max_backchannel_duration
                 if limit is not None and self.short_backchannel(self.speaking_since):
                     due.append(self.speaking_since + limit - self.speech)

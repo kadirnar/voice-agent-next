@@ -173,7 +173,6 @@ def test_patient_mock_engine_waits_through_pauses() -> None:
 
 # ------------------------------------------ smoke battery on the mock cascade (issue #113)
 
-CASCADE_REPLY = "Sure, we open at nine every day, weekends too."  # ~3 s of mock speech
 CASCADE_BATTERY = {
     "name": "battery-mock-cascade",
     "lead_in": 0.3,
@@ -211,7 +210,7 @@ class _MockCascade(BenchSystem):
     def build_engine(self) -> Any:
         return CascadeEngine(
             stt=MockSTT(transcripts=_hear, default_text=""),  # no interim words
-            llm=MockLLM(default_response=CASCADE_REPLY),
+            llm=MockLLM(default_response=REPLY),
             tts=MockTTS(),
             vad=EnergyVAD(),
             turn_detector=MockTurnDetector(),
