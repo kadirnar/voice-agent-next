@@ -214,9 +214,9 @@ async def test_llm_speech_goes_to_the_speaker_and_its_text_to_the_transcript() -
     # metrics: the turn and the engine measure the first *audio*
     [turn] = rec.turn_metrics()
     assert turn.voice_to_voice is not None and turn.response_ttfb is not None
-    assert turn.response_ttfb >= 0.05
+    assert turn.response_ttfb >= 0.03  # the fake 50 ms TTFB; Windows timers are coarse (15.6 ms)
     engine_m = [m for m in rec.of("metrics") if isinstance(m, EngineMetrics)]
-    assert engine_m and engine_m[0].ttfb is not None and engine_m[0].ttfb >= 0.05
+    assert engine_m and engine_m[0].ttfb is not None and engine_m[0].ttfb >= 0.03
     llm_m = [m for m in rec.of("metrics") if isinstance(m, LLMMetrics)]
     assert llm_m and llm_m[0].ttfb is not None and llm_m[0].ttft is not None
     assert llm_m[0].ttft <= llm_m[0].ttfb  # the text comes first
