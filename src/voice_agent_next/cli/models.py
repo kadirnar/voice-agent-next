@@ -108,7 +108,9 @@ def list_models(
         )
     console.print(table)
     if models.is_offline():
-        console.print("[yellow]VAN_OFFLINE is set: downloads are disabled[/yellow]")
+        console.print(
+            "[yellow]offline mode (VAN_OFFLINE/HF_HUB_OFFLINE): downloads are disabled[/yellow]"
+        )
 
 
 @app.command()
@@ -166,7 +168,7 @@ def download(
         return
     if pending and models.is_offline():
         missing = ", ".join(m.name for m, _ in pending)
-        raise _fail(f"VAN_OFFLINE is set; not cached: {missing}")
+        raise _fail(f"offline mode (VAN_OFFLINE/HF_HUB_OFFLINE); not cached: {missing}")
     failed = 0
     with Progress(
         TextColumn("{task.description}"),

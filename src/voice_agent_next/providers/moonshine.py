@@ -44,6 +44,7 @@ from ..stt import STT, STTCapabilities, STTEvent, STTEventType, STTStream, Trans
 from ..utils.aio import ChanClosed
 from ..utils.clock import now
 from ..utils.deps import is_installed, require
+from ..utils.env import is_offline
 from ..utils.log import logger
 
 __all__ = ["MoonshineSTT"]
@@ -253,7 +254,7 @@ class MoonshineSTT(STT):
                 language,
             )
         cache_root = Path(self.cache_dir) if self.cache_dir is not None else None
-        offline = os.environ.get("VAN_OFFLINE", "").lower() in ("1", "true", "yes")
+        offline = is_offline()
         if self.local_files_only or offline:
             return self._cached_model_dir(info, cache_root)
         try:

@@ -291,30 +291,17 @@ def _run_config(
 ) -> Any:
     """The :class:`AppConfig` ``van run`` runs: preset < config file < flags, checked."""
     from .. import presets as presets_mod
-    from ..config import AppConfig, load_config, merge_config
+    from ..config import AppConfig, layer_config, merge_config
     from ..errors import ConfigurationError
 
-    try:
-        file_cfg = load_config(config) if config else None
-        if (
-            preset
-            and file_cfg is not None
-            and file_cfg.extends
-            and presets_mod.get_preset(preset).name != file_cfg.extends
-        ):
-            raise ConfigurationError(
-                f"--preset {preset} conflicts with `extends: {file_cfg.extends}` in {config}"
-            )
-        chosen = presets_mod.get_preset(preset) if preset else None
+    overrides = {k: v for k, v in components.items() if v is not None}
+    try:  # read raw, merge (preset < file < flags), validate once at the end
+        raw = layer_config(preset=preset, file=config, overrides=overrides)
+        extends = raw.pop("extends", None)
+        chosen = presets_mod.get_preset(extends) if extends else None
     except ConfigurationError as exc:
         console.print(f"[red]{escape(str(exc))}[/red]", highlight=False)
         raise typer.Exit(2) from None
-    raw: dict[str, Any] = dict(chosen.config) if chosen else {}
-    if file_cfg is not None:
-        chosen = chosen or (presets_mod.get_preset(file_cfg.extends) if file_cfg.extends else None)
-        raw = merge_config(raw, file_cfg.model_dump(exclude_unset=True))
-    overrides = {k: v for k, v in components.items() if v is not None}
-    raw = merge_config(raw, overrides)
     if config is None or transport != "local":
         raw["transport"] = {"type": transport}
     transport_type = str((raw.get("transport") or {"type": "local"}).get("type", "local"))
@@ -353,15 +340,19 @@ def _run_config(
         raw = result.config
     if chosen is not None:
         raw["extends"] = chosen.name
-    cfg = AppConfig.model_validate(raw)
-    if instructions:
-        cfg.agent.instructions = instructions
-    if greeting:
-        cfg.agent.greeting = greeting
-    if cfg.engine is None and cfg.llm is None:
-        cfg.engine = "mock"
-        console.print("[yellow]no engine configured; using the mock engine[/yellow]")
-    cfg.validate_components()
+    try:
+        cfg = AppConfig.model_validate(raw)
+        if instructions:
+            cfg.agent.instructions = instructions
+        if greeting:
+            cfg.agent.greeting = greeting
+        if cfg.engine is None and cfg.llm is None:
+            cfg.engine = "mock"
+            console.print("[yellow]no engine configured; using the mock engine[/yellow]")
+        cfg.validate_components()
+    except (ConfigurationError, ValueError) as exc:  # pydantic's ValidationError included
+        console.print(f"[red]invalid config: {escape(str(exc))}[/red]", highlight=False)
+        raise typer.Exit(2) from None
     return cfg
 
 

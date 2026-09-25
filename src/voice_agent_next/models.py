@@ -367,7 +367,7 @@ def resolve_models(name: str) -> list[ModelInfo]:
 
 
 def is_offline() -> bool:
-    """``VAN_OFFLINE`` is set: nothing may be downloaded."""
+    """``VAN_OFFLINE`` or ``HF_HUB_OFFLINE`` is set: nothing may be downloaded."""
     return _offline()
 
 

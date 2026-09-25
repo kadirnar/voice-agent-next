@@ -113,6 +113,9 @@ _RECHECK_DELAY = 0.01
 _MAX_PLAYBACK_LAG = 2.0
 """Longest wait (s) for a transport to finish playing a response after the virtual clock."""
 _ASIDE_TIMEOUT = 10.0
+_KEEP_SETTLED = 16
+"""Settled responses (done, and played out or interrupted) kept for late engine events;
+older ones are dropped so a long call does not accumulate every response."""
 """Longest wait (s) for a filler/progress utterance to be generated before tool outputs
 (whose follow-up response would cut it off) are sent."""
 _IDLE_POLL = 0.05
@@ -284,7 +287,8 @@ class _Response:
     turn: _Turn | None
     item_id: str | None = None
     message: ChatMessage | None = None
-    text: list[str] = field(default_factory=list)
+    text: str = ""
+    """The reply's text so far (appended per delta: no re-join of every delta)."""
     tool_calls: list[FunctionCall] = field(default_factory=list)
     """Calls of this response's tool round (the model waits for their outputs)."""
     tool_runs: list[_ToolRun] = field(default_factory=list)
@@ -306,6 +310,8 @@ class _Response:
     """(playback start time, duration) of every chunk sent to the transport."""
     allow_interruptions: bool | None = None
     """Overrides ``SessionOptions.allow_interruptions`` (``say(..., allow_interruptions=)``)."""
+    settled: bool = False
+    """Done and finished (or interrupted): queued for pruning (``_KEEP_SETTLED``)."""
 
     def played(self, t: float) -> float:
         return sum(min(max(t - start, 0.0), dur) for start, dur in self.segments)
@@ -433,6 +439,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         self._out: Chan[ResponseAudio | _EndOfResponse] = Chan()
         self._virtual_end = 0.0
         self._responses: dict[str, _Response] = {}
+        self._settled: deque[str] = deque()
         self._current: _Response | None = None
         self._user_items: dict[str, ChatMessage] = {}
         self._turn: _Turn | None = None
@@ -1110,10 +1117,10 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         if resp is None or resp.interrupted:
             return
         resp.item_id = resp.item_id or ev.item_id
-        resp.text.append(ev.delta)
+        resp.text += ev.delta
         if resp.message is None:
             resp.message = self.history.add_message("assistant", "", id=ev.item_id)
-        resp.message.content = ["".join(resp.text).strip()]
+        resp.message.content = [resp.text.strip()]
         self.emit("agent_transcript", AgentTranscript(ev.delta, ev.item_id, ev.response_id))
 
     def _on_tool_call(self, ev: ResponseToolCall) -> None:
@@ -1221,6 +1228,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
             return
         resp.done = True
         resp.status = ev.status
+        self._settle(resp)
         if resp.say is not None:
             resp.say.done.set()
         if resp.tool_runs:
@@ -1232,6 +1240,17 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
             self._tasks.spawn(self._finish_after(resp, 0.0))
         else:
             self._out.send_nowait(_EndOfResponse(ev.response_id))
+
+    def _settle(self, resp: _Response) -> None:
+        """Drop the oldest settled responses beyond the last ``_KEEP_SETTLED`` (code still
+        working on one holds it directly; later events for a dropped id are ignored, as
+        they are for an interrupted response)."""
+        if resp.settled or not resp.done or not (resp.finished or resp.interrupted):
+            return
+        resp.settled = True
+        self._settled.append(resp.response_id)
+        while len(self._settled) > _KEEP_SETTLED:
+            self._responses.pop(self._settled.popleft(), None)
 
     async def _complete_tools(self, resp: _Response) -> None:
         await asyncio.wait([run.task for run in resp.tool_runs])
@@ -1465,6 +1484,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         if resp.finished or resp.interrupted:
             return
         resp.finished = True
+        self._settle(resp)
         await self._release_barge_in(resp)
         if resp.turn is not None and not resp.turn.closed:  # its metrics are already out
             resp.turn.agent_speech += resp.played(now())
@@ -1896,7 +1916,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
             logger.warning("engine interrupt failed: %s", exc)
         if resp.message is not None:
             if heard is None:  # estimate: text is roughly proportional to audio
-                full = "".join(resp.text).strip()
+                full = resp.text.strip()
                 total = max(resp.received, resp.sent)
                 heard = full[: round(len(full) * min(1.0, played / total))] if total > 0 else ""
             resp.message.content = [heard.strip()]
@@ -1907,6 +1927,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
             resp.turn.agent_speech += played
             self._close_turn(resp.turn)
         resp.finished = True
+        self._settle(resp)
         if self._current is resp:
             self._current = None
             self._set_agent_state(AgentState.LISTENING)

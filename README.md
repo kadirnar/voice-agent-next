@@ -49,13 +49,15 @@ agent:
   greeting: Hi!
 ```
 
+Layers apply in the order preset < config file < flags, so a file can hold only tweaks:
+`van run --preset local-cpu -c tweaks.yaml --llm ollama/qwen3.5:4b`. `${ENV_VAR}` values in
+a config are expanded (`extends: ${VAN_PRESET:-local-cpu}` works).
+
 In Python:
 
 ```python
 import asyncio
-from voice_agent_next import Agent, function_tool
-from voice_agent_next.app import build_session
-from voice_agent_next.presets import load_preset
+from voice_agent_next import Agent, build_session, function_tool, load_preset
 from voice_agent_next.transports import create_transport
 
 
@@ -108,7 +110,7 @@ Every roadmap milestone has landed; see the [roadmap](ROADMAP.md) for what's nex
 
 ## Benchmarks
 
-`van bench latency` drives a simulated caller through the real runtime and measures voice-to-voice latency **on the call recording** (end of user speech → first agent audio), with a reproducibility manifest for every run. A fully local pipeline (Silero + Smart Turn + faster-whisper `base` + Ollama LFM2.5-1.2B + Kokoro) on a Ryzen 5 5600 CPU: **1.13 s p50 / 1.63 s p90**, **0.88 s** with streaming Pocket TTS on CPU, **0.72 s** fully local on an RTX 5070 Ti (Qwen3-TTS), and **0.28 s** with Moshi full-duplex; the runtime itself adds ≈ 2 ms (checked on every PR). Details and methodology: [docs/benchmarks/results.md](docs/benchmarks/results.md), [benchmarks/README.md](benchmarks/README.md).
+`van bench latency` drives a simulated caller through the real runtime and measures voice-to-voice latency **on the call recording** (end of user speech → first agent audio), with a reproducibility manifest for every run. The `local-cpu` preset (Silero + Smart Turn + sherpa-onnx Kroko streaming STT + Ollama LFM2.5-1.2B + Kokoro), fully local on a Ryzen 5 5600 CPU: **1.13 s p50 / 1.62 s p90**, **0.88 s** with streaming Pocket TTS on CPU, **0.72 s** fully local on an RTX 5070 Ti (Qwen3-TTS), and **0.28 s** with Moshi full-duplex; the runtime itself adds ≈ 2 ms (checked on every PR). Details and methodology: [docs/benchmarks/results.md](docs/benchmarks/results.md), [benchmarks/README.md](benchmarks/README.md).
 
 ## Architecture (short)
 

@@ -61,9 +61,7 @@ them all. A list of specs is a [failover chain](../concepts/failover.md).
 ```python
 import asyncio
 
-from voice_agent_next import Agent, AgentSession, function_tool
-from voice_agent_next.app import build_session
-from voice_agent_next.presets import load_preset
+from voice_agent_next import Agent, AgentSession, build_session, function_tool, load_preset
 from voice_agent_next.transports import create_transport
 
 

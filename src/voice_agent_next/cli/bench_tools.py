@@ -99,7 +99,6 @@ def tools_cmd(
         tools_markdown_table,
     )
     from ..errors import ConfigurationError, VoiceAgentError
-    from ..presets import get_preset
     from .bench import _logging, _print_notes, err
 
     _logging(verbose)
@@ -107,10 +106,9 @@ def tools_cmd(
         x is not None for x in (engine, stt, llm, tts, turn_detector, config, preset)
     )
     try:
-        if config is not None and preset is not None:
-            raise ConfigurationError("pass either --config or --preset (a config can `extends:`)")
-        system = BenchSystem.from_options(
-            config=dict(get_preset(preset).config) if preset is not None else config,
+        system = BenchSystem.from_options(  # --preset < --config < flags
+            config=config,
+            preset=preset,
             engine=None if reference else parse_component_spec(engine),
             stt=parse_component_spec(stt),
             llm=parse_component_spec(llm),

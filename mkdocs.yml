@@ -160,6 +160,7 @@ nav:
           - Qwen3-TTS: providers/qwen-tts.md
           - MLX (Apple silicon): providers/mlx.md
           - Silero VAD: providers/silero.md
+          - Energy VAD: providers/energy.md
           - Smart Turn: providers/smart_turn.md
           - Semantic end of turn (lm_turn, fused): providers/lm-turn.md
   - Transports:

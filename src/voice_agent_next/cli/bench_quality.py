@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 import typer
 
@@ -98,19 +98,14 @@ def quality_cmd(
         run_quality_benchmark,
     )
     from ..errors import VoiceAgentError
-    from ..presets import get_preset
     from ..utils.download import DownloadError
     from .bench import _logging, _print_notes, err
 
     _logging(verbose)
     try:
-        if preset is not None and config is not None:
-            raise ValueError("pass either --preset or --config, not both")
-        base: Any = config
-        if preset is not None:
-            base = dict(get_preset(preset).config)
-        system = BenchSystem.from_options(
-            config=base, engine=parse_component_spec(engine), stt=parse_component_spec(stt),
+        system = BenchSystem.from_options(  # --preset < --config < flags
+            config=config, preset=preset, engine=parse_component_spec(engine),
+            stt=parse_component_spec(stt),
             llm=parse_component_spec(llm), tts=parse_component_spec(tts),
             vad=parse_component_spec(vad), turn_detector=parse_component_spec(turn_detector),
             label=label or preset,

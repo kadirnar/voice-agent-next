@@ -8,19 +8,16 @@ registry can create can be benchmarked.
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 
 from ..app import build_agent
-from ..config import AppConfig, ComponentSpec, load_config, resolve_extends
+from ..config import AppConfig, ComponentSpec, expand_env, read_config_file, resolve_extends
 from ..engine import S2SEngine
 from ..engines.cascade import CascadeEngine, CascadeOptions
 from ..errors import ConfigurationError
@@ -61,25 +58,6 @@ def redact(value: Any) -> Any:
     return value
 
 
-def _read_config_file(path: Path) -> dict[str, Any]:
-    """Raw mapping of a YAML/TOML/JSON config file (validated later by ``load_config``)."""
-    if not path.exists():
-        raise ConfigurationError(f"config file not found: {path}")
-    text = path.read_text(encoding="utf-8")
-    suffix = path.suffix.lower()
-    if suffix in (".yaml", ".yml"):
-        data = yaml.safe_load(text) or {}
-    elif suffix == ".toml":
-        data = tomllib.loads(text)
-    elif suffix == ".json":
-        data = json.loads(text)
-    else:
-        raise ConfigurationError(f"unsupported config format: {suffix}")
-    if not isinstance(data, dict):
-        raise ConfigurationError(f"{path}: config root must be a mapping")
-    return data
-
-
 def _spec_name(spec: ComponentSpec | None) -> str:
     if spec is None:
         return "none"
@@ -110,6 +88,7 @@ class BenchSystem:
         cls,
         *,
         config: str | os.PathLike[str] | Mapping[str, Any] | AppConfig | None = None,
+        preset: str | None = None,
         engine: ComponentSpec | None = None,
         stt: ComponentSpec | None = None,
         llm: ComponentSpec | None = None,
@@ -119,22 +98,31 @@ class BenchSystem:
         label: str | None = None,
         default_engine: str | None = "mock",
     ) -> BenchSystem:
-        """Combine a config file/mapping with explicit specs (explicit specs win).
+        """Combine a preset, a config file/mapping and explicit specs, in that order
+        (``van run``'s preset < file < flags; the file's ``extends:`` is the preset when
+        ``preset`` is not given). Validated once, after merging.
 
         The file may hold only agent/session settings when the engine comes from the
-        arguments; without any engine or LLM configured (counting the ``extends:`` preset's
+        arguments; without any engine or LLM configured (counting the preset's
         components), ``default_engine`` is used.
         """
         resolved = isinstance(config, AppConfig)  # its preset is already merged in
         if isinstance(config, AppConfig):
             data: dict[str, Any] = config.model_dump()
         elif isinstance(config, Mapping):
-            data = dict(config)
+            data = expand_env(dict(config))
         elif config is not None:
-            data = _read_config_file(Path(config))
+            data = expand_env(read_config_file(config))
         else:
             data = {}
         extends = data.pop("extends", None)
+        if preset is not None:
+            from ..presets import get_preset
+
+            name = get_preset(preset).name
+            if extends is not None and get_preset(str(extends)).name != name:
+                raise ConfigurationError(f"preset {preset} conflicts with `extends: {extends}`")
+            extends, resolved = name, False
         cascade = {"stt": stt, "llm": llm, "tts": tts, "turn_detector": turn_detector}
         explicit_cascade = any(v is not None for v in cascade.values())
         if engine is not None and explicit_cascade:
@@ -154,7 +142,8 @@ class BenchSystem:
             extends = data.pop("extends")
         if data.get("engine") is None and data.get("llm") is None and default_engine:
             data["engine"] = default_engine
-        cfg = load_config(data)  # validated once, after merging
+        cfg = AppConfig.model_validate(data)  # validated once, after merging
+        cfg.validate_components()
         cfg.extends = extends
         return cls(cfg, label or cls.default_label(cfg))
 
