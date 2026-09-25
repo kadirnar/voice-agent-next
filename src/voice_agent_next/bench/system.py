@@ -92,6 +92,12 @@ def _spec_name(spec: ComponentSpec | None) -> str:
     return f"{target}/{model}" if model and "/" not in target else target
 
 
+def _describe_object(value: Any) -> str:
+    """JSON stand-in for config values that are not data (callables, instances)."""
+    name = getattr(value, "__qualname__", None) or type(value).__qualname__
+    return f"<{getattr(value, '__module__', '?')}.{name}>"
+
+
 @dataclass
 class BenchSystem:
     """What is being benchmarked, plus a short ``label`` for reports and run ids."""
@@ -181,6 +187,7 @@ class BenchSystem:
                     mode="json",
                     exclude={"transport"},
                     exclude_none=True,
+                    fallback=_describe_object,  # e.g. a callable reply script
                 )
             ),
         }

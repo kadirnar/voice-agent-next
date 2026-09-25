@@ -8,7 +8,8 @@ number is read off the recording with a reference VAD
 (:mod:`~voice_agent_next.bench.onset`). Results are written as ``manifest.json``,
 ``items.jsonl``, ``summary.json`` and ``report.md`` (:mod:`~voice_agent_next.bench.results`).
 
-Tracks: T1 latency (:mod:`voice_agent_next.bench.tracks.latency`), T7 framework overhead
+Tracks: T1 latency (:mod:`voice_agent_next.bench.tracks.latency`), T5 speech-to-speech
+quality (:mod:`voice_agent_next.bench.tracks.quality`), T7 framework overhead
 (:mod:`voice_agent_next.bench.tracks.overhead`) with its CI regression gate
 (:mod:`voice_agent_next.bench.gate`), T6 tool use (:mod:`voice_agent_next.bench.tracks.tools`).
 CLI: ``van bench``.
