@@ -26,7 +26,13 @@ user audio ─► VAD ─► turn detector ─► commit ─► omni LLM ─┬�
 |---|---|---|---|
 | LFM2.5-Audio-1.5B (Liquid AI) | [`liquid-audio`](../providers/liquid-audio.md) | local (CPU), `llama-liquid-audio-server` | float32 PCM, 24 kHz |
 | `gpt-audio`, `gpt-4o-audio-preview` (OpenAI) | [`openai`](../providers/openai.md) (Chat Completions) | cloud | pcm16, 24 kHz |
-| any OpenAI-compatible server with `modalities: ["text", "audio"]` | `openai` + `base_url`, `extra={"modalities": [...]}` | e.g. vLLM-Omni (Qwen-Omni) | pcm16 |
+| Qwen3.5-Omni (Alibaba Model Studio) | [`dashscope`](../providers/openai-compatible.md#dashscope-qwen-omni) + `voice=` | cloud | pcm16, 24 kHz |
+| Qwen2.5/3-Omni on vLLM-Omni | [`vllm_omni`](../providers/openai-compatible.md#vllm-omni) + `voice=` (experimental) | self-hosted GPU | pcm16 |
+| any OpenAI-compatible server with `modalities: ["text", "audio"]` | `openai` + `base_url`, `extra={"modalities": [...]}` | | pcm16 |
+
+Models that hear audio but answer in text (Ultravox, Voxtral, Gemma audio, Qwen2-Audio,
+LFM2.5-Audio on `llama-server`...) keep a TTS: that is the
+[half-cascade](#audio-input-half-cascade) below.
 
 ## How it works
 
@@ -79,6 +85,55 @@ speculates (`preemptive_generation=True`) only when `preemptive_tts=True` also a
 speculative speech. Otherwise it waits for the commit, as without preemptive generation.
 Speculation also needs an STT, since the transcript is what is compared, so a typical
 omni setup (`stt=None`) never speculates.
+
+## Audio input: half-cascade
+
+Without `stt=`, the user's turn goes to the LLM as audio even when the LLM answers in
+text, and a TTS speaks the reply:
+
+```
+user audio ─► VAD ─► turn detector ─► commit ─► audio-input LLM ─► text ─► TTS ─► speaker
+                                          └──► (optional) transcript for the history
+```
+
+| Host | Provider | Audio sent as |
+|---|---|---|
+| OpenAI `gpt-audio*`, `gpt-4o-audio*` | `openai` | WAV at the input rate |
+| Alibaba Model Studio (Qwen3.5/3.8-Omni) | `dashscope` | WAV 16 kHz as `data:;base64,`, always streamed |
+| vLLM (Qwen2-Audio, Qwen-Omni thinker, Ultravox, Voxtral, Gemma 3n...) | `vllm` | WAV 16 kHz |
+| vLLM-Omni (Qwen2.5/3-Omni) | `vllm_omni` | WAV 16 kHz; text out unless `voice=` |
+| llama.cpp `llama-server` + mtmd (Ultravox, Voxtral, Qwen2.5-Omni, Gemma 4 E2B/E4B, LFM2.5-Audio) | `llamacpp` + `audio_input=True` | WAV 16 kHz |
+| Gemini | [`google`](../providers/google.md) | native adapter |
+
+```python
+from voice_agent_next import AgentSession, CascadeOptions
+
+session = AgentSession(
+    llm={"provider": "llamacpp", "audio_input": True, "audio_history": 2},
+    tts="kokoro",
+    vad="silero",
+    turn_detector="smart_turn",
+    cascade_options=CascadeOptions(input_transcriber="llm"),
+)
+```
+
+* **Does the model hear audio?** `LLMCapabilities.audio_input`. The OpenAI-compatible
+  hosts set it from `audio_input=`, or from a table of known audio models matched on the
+  model id. A model discovered from the server (`llamacpp`, `vllm` without a model) needs
+  `audio_input=True`; `llamacpp` checks the server's `/props` at warmup and warns on a
+  mismatch.
+* **The user's words for the history.** The session history holds an empty user turn
+  unless `CascadeOptions.input_transcriber` provides one: `"llm"` asks the same model in a
+  second, text-only request (`llm.transcribe()`; LFM2-Audio gets its own `Perform ASR.`
+  prompt, since it answers under any other), and an STT spec such as
+  `"faster_whisper/tiny"` transcribes locally. The reply does not wait for it: the
+  transcript arrives as the turn's final `user_transcript`, fills the history item and
+  `AudioContent.transcript`. With a single-slot local server, start it with
+  `-np 2` so the two requests run in parallel.
+* **Request size.** Every earlier user turn is audio too. `audio_history=N` on the LLM
+  sends only the last N clips as audio and older ones as their transcripts.
+* **Preemptive generation** needs an STT transcript to compare, so a half-cascade never
+  speculates.
 
 ## Limits
 

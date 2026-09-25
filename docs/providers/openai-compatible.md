@@ -28,6 +28,8 @@ session = AgentSession(
 | `ollama` | `OllamaLLM` | `http://127.0.0.1:11434/v1` | optional, `OLLAMA_API_KEY` | `qwen3.5:4b` |
 | `llamacpp` | `LlamaCppLLM` | `http://127.0.0.1:8080/v1` | optional, `LLAMA_API_KEY` | the loaded model |
 | `vllm` | `VllmLLM` | `http://127.0.0.1:8000/v1` | optional, `VLLM_API_KEY` | the served model |
+| `vllm_omni` | `VllmOmniLLM` | `http://127.0.0.1:8091/v1` | optional, `VLLM_API_KEY` | the served model |
+| `dashscope` | `DashScopeLLM` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY` | `qwen3.5-omni-flash` |
 | `lmstudio` | `LMStudioLLM` | `http://127.0.0.1:1234/v1` | optional, `LM_API_TOKEN` | the first listed LLM |
 | `mlx_lm` | `MLXLMServerLLM` | `http://127.0.0.1:8080/v1` | none | the server's `--model` |
 | `groq` | `GroqLLM` | `https://api.groq.com/openai/v1` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` |
@@ -101,6 +103,18 @@ llama-server -m model.gguf --jinja --port 8080
 (the variable `llama-server` itself reads) or pass `api_key=`. Reasoning from
 `--reasoning-format` arrives in `reasoning_content` and is never spoken.
 
+Audio models (libmtmd) take the user's audio directly, for a [half-cascade](#audio-input-half-cascades):
+
+```bash
+llama-server -hf ggml-org/ultravox-v0_5-llama-3_2-1b-GGUF --port 8080   # or Voxtral Mini,
+# Qwen2.5-Omni, Gemma 4 E2B/E4B, or -m LFM2.5-Audio-1.5B-Q4_0.gguf --mmproj mmproj-...gguf
+```
+
+`llm={"provider": "llamacpp", "audio_input": True}`. The model is discovered from the
+server, so `audio_input=True` has to be explicit (a model id from the known-model table
+turns it on by itself). `warmup()` reads `GET /props` and warns when the loaded model has
+no audio support. Audio is sent as 16 kHz WAV.
+
 ### vLLM
 
 ```bash
@@ -111,6 +125,88 @@ vllm serve Qwen/Qwen3-8B --enable-auto-tool-choice --tool-call-parser hermes
 Linux; the client works anywhere. Pass template options through `extra`, e.g.
 `extra={"chat_template_kwargs": {"enable_thinking": False}}` to turn off Qwen3 thinking.
 With `--api-key`, set `VLLM_API_KEY`.
+
+vLLM also serves audio-in / text-out models (Qwen2-Audio, the thinker of Qwen2.5/3-Omni,
+Ultravox, Voxtral, Gemma 3n, Phi-4-multimodal): `llm="vllm/Qwen/Qwen2.5-Omni-7B"` turns
+`audio_input` on from the model id. Audio is sent as 16 kHz WAV.
+
+### vLLM-Omni
+
+```bash
+vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct --omni --port 8091
+```
+
+`llm="vllm_omni"` (or `vllm_omni/<served model>`) has `audio_input` on and asks for text
+only (`modalities: ["text"]`): the cascade's TTS speaks the reply. Pass `voice=...` or
+`extra={"modalities": ["text", "audio"]}` to hear the model's own voice instead
+(experimental: the stream must carry pcm16 `delta.audio` like OpenAI's). Address:
+`base_url=`, else `VLLM_OMNI_BASE_URL`; key: `VLLM_API_KEY`. The same server's Realtime
+WebSocket is the [`vllm_realtime` engine](openai-realtime.md).
+
+### DashScope (Qwen-Omni)
+
+Alibaba Model Studio's OpenAI-compatible mode. `llm="dashscope/qwen3.5-omni-flash"`
+(default), `qwen3.5-omni-plus`, `qwen3.8-omni-flash` (text output only, tool calling),
+`qwen3-omni-flash`. Set `DASHSCOPE_API_KEY`; the endpoint is `base_url=`, else
+`DASHSCOPE_BASE_URL`, else the workspace endpoint when `DASHSCOPE_WORKSPACE_ID` is set,
+else the regional one (`DASHSCOPE_REGION`: `ap-southeast-1` default, `cn-beijing`,
+`us-east-1`). Differences handled by the provider:
+
+* requests are always streamed (the API refuses unstreamed calls to these models);
+* audio goes as a `data:;base64,` URL (WAV, 16 kHz);
+* system messages are merged into one leading message;
+* spoken replies: `voice="Tina"` requests `modalities: ["text", "audio"]` with
+  `audio: {"voice": "Tina", "format": "wav"}` (the only format accepted; the chunks are
+  pcm16 at 24 kHz). Without a TTS the cascade plays that voice, see
+  [omni models](../concepts/omni-models.md).
+
+For the Realtime WebSocket use the [`qwen_omni` engine](openai-realtime.md).
+
+## Audio-input half-cascades
+
+With `stt=None`, the cascade sends the user's turn to the LLM as audio (`AudioContent`,
+an `input_audio` part). The LLM hears tone and hesitation, and an STT round-trip
+disappears. Every host above that serves an audio model works; the per-host format is
+handled for you:
+
+| host | audio sent as | notes |
+|---|---|---|
+| `openai` (`gpt-audio*`, `gpt-4o-audio*`) | WAV at the input rate | audio in and out |
+| `vllm`, `vllm_omni` | WAV, 16 kHz | `vllm_omni`: `audio_input` on, text out by default |
+| `llamacpp` | WAV, 16 kHz | `audio_input=True` for a discovered model; `/props` check |
+| `dashscope` | WAV, 16 kHz, `data:;base64,` URL | always streamed |
+
+* **Which models hear audio.** `audio_input=` on the LLM decides. Left unset, a table of
+  known audio models decides from the model id (`gpt-audio`, `Qwen*-Omni`, `Qwen2-Audio`,
+  `Ultravox`, `Voxtral`, `Gemma 3n/4 E2B-E4B`, `Phi-4-multimodal`, `MiniCPM-o`,
+  `LFM2-Audio`, `Gemini`..., see `providers/openai/_models.py`).
+* **Encoding.** `audio_format=AudioInputFormat(format="wav" | "pcm16", sample_rate=...,
+  data_url=...)` (or a mapping in YAML) overrides the host's default, e.g. raw PCM for a
+  server that takes it.
+* **The user's words.** The model gets audio, so the history has no user text unless you
+  ask for it: `CascadeOptions(input_transcriber="llm")` asks the same model for a
+  transcript in a second, text-only request (`llm.transcribe()`), run alongside the reply;
+  `input_transcriber="faster_whisper/tiny"` (any STT) transcribes locally instead. The
+  transcript arrives as the turn's final `user_transcript` and fills the history.
+* **Shorter requests.** Every earlier user turn is audio too, so each request grows.
+  `audio_history=N` sends only the last N turns as audio and older ones as their
+  transcripts (turns without a transcript stay audio).
+
+```python
+from voice_agent_next import AgentSession, CascadeOptions
+
+session = AgentSession(
+    llm={"provider": "llamacpp", "audio_input": True, "audio_history": 2},
+    tts="kokoro",
+    vad="silero",
+    turn_detector="smart_turn",
+    cascade_options=CascadeOptions(input_transcriber="llm"),
+)  # no stt=...
+```
+
+Measured (T1, `latency-local-omni` scenario, RTX 5070 Ti, shared machine):
+LFM2.5-Audio-1.5B Q4_0 on `llama-server` (CUDA, `-np 2`) + Kokoro (CPU) + Silero +
+Smart Turn, 11 measured turns: see the table in [omni models](../concepts/omni-models.md#audio-input-half-cascade).
 
 ### LM Studio
 

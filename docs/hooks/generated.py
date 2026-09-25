@@ -61,6 +61,8 @@ PAGE_OVERRIDES: dict[tuple[str, str], str] = {
     ("stt", "mlx_whisper"): "mlx.md#stt-whisper-mlx_whisper",
     ("tts", "mlx_audio"): "mlx.md#tts-mlx-audio-mlx_audio",
     ("llm", "mlx_lm"): "mlx.md#llm-mlx-lm-server-mlx_lm",
+    ("llm", "vllm_omni"): f"{_OPENAI_COMPAT}#vllm-omni",
+    ("llm", "dashscope"): f"{_OPENAI_COMPAT}#dashscope-qwen-omni",
     **{
         ("llm", name): _OPENAI_COMPAT
         for name in (
