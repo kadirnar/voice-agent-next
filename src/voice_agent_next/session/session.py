@@ -1044,7 +1044,10 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
         run = _ToolRun(call, tool, task)
         self._tool_runs[call.call_id] = run
         task.add_done_callback(functools.partial(self._forget_run, run))
-        if tool is not None and not tool.blocking:
+        # a delegating engine (GPT-Live) keeps the conversation going while its backend
+        # waits: every result is delivered when ready, whatever the tool's ``blocking``
+        delegated = self.connection.capabilities.tool_mode == "delegation"
+        if (tool is not None and not tool.blocking) or delegated:
             native = self.connection.capabilities.tool_mode != "blocking"
             self._tasks.spawn(self._deliver_later(run, native=native), name=f"tool-{call.name}")
             if native:  # the model does not wait: nothing to answer now
@@ -1053,7 +1056,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
                 return
             # the model waits for an output: acknowledge now, deliver the result later
             ack: asyncio.Future[FunctionCallOutput] = asyncio.get_running_loop().create_future()
-            text = tool.ack if tool.ack is not None else DEFAULT_TOOL_ACK
+            text = tool.ack if tool is not None and tool.ack is not None else DEFAULT_TOOL_ACK
             ack.set_result(FunctionCallOutput(call_id=call.call_id, name=call.name, output=text))
             run = _ToolRun(call, tool, ack, ack=True)
         if resp is not None:

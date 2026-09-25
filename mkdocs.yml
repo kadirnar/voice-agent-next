@@ -133,6 +133,7 @@ nav:
       - providers/index.md
       - Speech-to-speech engines:
           - OpenAI Realtime (+ compatible): providers/openai-realtime.md
+          - OpenAI GPT-Live (full-duplex, delegation): providers/openai-live.md
           - Gemini Live: providers/gemini-live.md
           - Moshi and PersonaPlex: providers/moshi.md
           - LFM2.5-Audio (omni, local): providers/liquid-audio.md

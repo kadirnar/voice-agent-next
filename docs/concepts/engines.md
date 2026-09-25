@@ -71,6 +71,7 @@ where the engine can.
 | Engine | Page |
 |---|---|
 | OpenAI Realtime, Azure OpenAI, xAI Grok Voice, Qwen-Omni Realtime, vLLM-Omni, Speaches, LocalAI | [OpenAI Realtime (+ compatible)](../providers/openai-realtime.md) |
+| OpenAI GPT-Live (full-duplex, delegation) | [OpenAI GPT-Live](../providers/openai-live.md) |
 | Gemini Live | [Gemini Live](../providers/gemini-live.md) |
 | Moshi, PersonaPlex (local, full-duplex) | [Moshi and PersonaPlex](../providers/moshi.md) |
 | `mock` | a deterministic engine for tests, `van demo` and benchmarks |

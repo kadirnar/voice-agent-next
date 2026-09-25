@@ -6,6 +6,7 @@ Provider sessions do not last forever, and connections drop:
 |---|---|---|
 | OpenAI Realtime (+ Azure, xAI, compatible servers) | 60 min per session (`expires_at`) | rotates to a new session prepared in the background, re-seeded with the conversation |
 | Gemini Live | ~10 min per connection (`goAway`), 15 min audio without compression | resumes the server-side session with a resumption handle; re-seeds a fresh session if the handle expired |
+| OpenAI GPT-Live | per session (`expires_at`, announced `expiry_warning` ahead) | `RotatingEngine`: a new session prepared in the background, seeded through `session.input` |
 | Nova Sonic | 8 min | (engine not wired yet) `RotatingEngine` rotates any engine |
 | any engine | network drops | reconnects with backoff and the same carry-over |
 
