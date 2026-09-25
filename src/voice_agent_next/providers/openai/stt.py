@@ -81,6 +81,7 @@ from ...stt import STT, STTCapabilities, STTEvent, STTEventType, STTStream, Tran
 from ...utils.aio import cancel_and_wait
 from ...utils.clock import now
 from ...utils.log import logger
+from .._ws import close_ws
 from ._http import (
     OPENAI_BASE_URL,
     APIEndpoint,
@@ -820,9 +821,7 @@ class _TranscriptionStream(STTStream):
 
     async def _close_ws(self) -> None:
         ws, self._ws = self._ws, None
-        if ws is not None:
-            with contextlib.suppress(Exception):
-                await ws.close()
+        await close_ws(ws)
 
     def _next_event_id(self) -> str:
         self._event_seq += 1

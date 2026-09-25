@@ -65,6 +65,7 @@ from ..errors import (
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
+    for_status,
 )
 from ..models import ModelFile, register_model
 from ..registry import register_provider
@@ -73,6 +74,7 @@ from ..tts import NormalizeOption
 from ..utils.aio import ChanClosed, cancel_and_wait
 from ..utils.ids import new_id
 from ..utils.log import logger
+from ._ws import close_ws, raise_task_error
 from .openai._http import is_loopback
 from .openai.stt import OpenAICompatibleSTT
 from .openai.tts import OpenAICompatibleTTS
@@ -699,11 +701,9 @@ class NeMoSpeechCppSTT(_ManagedServer, OpenAICompatibleSTT):
         except InvalidStatus as exc:
             status = exc.response.status_code
             msg = f"{PROVIDER}: realtime handshake rejected with HTTP {status} ({url})"
-            if status in (401, 403):
-                raise AuthenticationError(msg, provider=PROVIDER, status_code=status) from exc
             if status == 404:
                 msg += ": is an ASR model loaded? (the route exists only with --asr-model)"
-            raise ProviderError(msg, provider=PROVIDER, status_code=status) from exc
+            raise for_status(status, msg, provider=PROVIDER) from exc
         except InvalidURI as exc:
             raise ConfigurationError(f"{PROVIDER}: invalid realtime URL {url!r}: {exc}") from exc
         except TimeoutError as exc:
@@ -763,7 +763,7 @@ class NeMoSpeechCppStream(STTStream):
         sender = asyncio.create_task(self._send_loop(ws), name="nemo-speech-stt-send")
         try:
             await asyncio.wait({receiver, sender}, return_when=asyncio.FIRST_COMPLETED)
-            self._raise_task_error(receiver, sender)
+            raise_task_error(receiver, sender)
             if not sender.done():
                 raise self._server_error or ProviderConnectionError(
                     f"{PROVIDER}: the server closed the realtime session", provider=PROVIDER
@@ -776,7 +776,7 @@ class NeMoSpeechCppStream(STTStream):
                         await asyncio.wait({waiter, receiver}, return_when=asyncio.FIRST_COMPLETED)
                     finally:
                         waiter.cancel()
-            self._raise_task_error(receiver)
+            raise_task_error(receiver)
             if not self._drained.is_set():
                 logger.warning(
                     "%s: no answer to the last commit %.1fs after the input ended",
@@ -787,16 +787,7 @@ class NeMoSpeechCppStream(STTStream):
         finally:
             self._closing = True
             await cancel_and_wait(sender, receiver)
-            with contextlib.suppress(Exception):
-                await ws.close()
-
-    @staticmethod
-    def _raise_task_error(*tasks: asyncio.Task[None]) -> None:
-        for task in tasks:
-            if task.done() and not task.cancelled():
-                exc = task.exception()
-                if exc is not None:
-                    raise exc
+            await close_ws(ws)
 
     async def _send_loop(self, ws: ClientConnection) -> None:
         try:

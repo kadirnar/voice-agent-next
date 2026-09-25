@@ -45,7 +45,7 @@ The URL and SHA-256 (`1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d
 | `model` | `"v6.2"` | Model id. With `model_path` it is only a label. |
 | `sample_rate` | `16000` | Model rate: `16000` (512-sample windows) or `8000` (256-sample windows). Input audio at any rate and channel count is converted by the stream. |
 | `model_path` | `None` | Local Silero v5/v6 ONNX file to use instead of the download. |
-| `force_cpu` | `True` | Use the CPU execution provider even when an accelerator is available. Keep it on: the model is tiny and runs with batch size 1, so a GPU only adds transfer overhead. |
+| `device` | `"cpu"` | ONNX Runtime device: `"cpu"`, `"auto"` (every available execution provider), `"cuda"`, `"coreml"`... or a list of execution providers. Keep the CPU: the model is tiny and runs with batch size 1, so a GPU only adds transfer overhead. (`force_cpu=True`/`False` is deprecated.) |
 | `options` | `VADOptions()` | Thresholds and durations, see below. Single fields can also be passed as keyword arguments (`min_silence_duration=0.3`); they are applied on top of `options`. |
 
 `VADOptions` fields (shared by all VADs, see `voice_agent_next/vad.py`):

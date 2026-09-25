@@ -24,11 +24,12 @@ from typing import Any
 from ...errors import (
     AuthenticationError,
     ConfigurationError,
+    MissingAPIKeyError,
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
-    RateLimitError,
     VoiceAgentError,
+    for_status,
 )
 from ...utils.deps import require
 
@@ -87,8 +88,8 @@ def use_vertexai(
     return any(os.environ.get(name, "").strip().lower() in _TRUE for name in VERTEX_ENV)
 
 
-def missing_key_error(what: str) -> AuthenticationError:
-    return AuthenticationError(
+def missing_key_error(what: str) -> MissingAPIKeyError:
+    return MissingAPIKeyError(
         f"{what} needs credentials: pass api_key=... or set GOOGLE_API_KEY (or "
         "GEMINI_API_KEY); for Vertex AI pass vertexai=True (or set "
         "GOOGLE_GENAI_USE_VERTEXAI=true) with a project and Application Default Credentials",
@@ -227,7 +228,8 @@ def error_for_status(
 
     401/403 and invalid API keys (which the Gemini API reports as 400
     ``API_KEY_INVALID``) -> :class:`AuthenticationError`, 429 -> :class:`RateLimitError`,
-    408/504 -> :class:`ProviderTimeoutError`, 409/5xx -> retryable :class:`ProviderError`.
+    408/504 -> :class:`ProviderTimeoutError`, other 5xx -> :class:`ProviderConnectionError`,
+    409 -> retryable :class:`ProviderError` (see :func:`voice_agent_next.errors.for_status`).
     """
     text = f"{what} error {status}"
     if status_text:
@@ -237,17 +239,11 @@ def error_for_status(
     key_problem = bool(_reasons(details) & {"API_KEY_INVALID", "API_KEY_EXPIRED"}) or (
         "api key" in lowered and ("not valid" in lowered or "expired" in lowered)
     )
-    if status in (401, 403) or key_problem:
+    if key_problem:
         return AuthenticationError(text, provider=PROVIDER, status_code=status)
-    if status == 429:
-        return RateLimitError(text, provider=PROVIDER, status_code=status)
-    if status in (408, 504):
-        return ProviderTimeoutError(text, provider=PROVIDER, status_code=status)
     if status == 404:
         text += " (check the model id)"
-    return ProviderError(
-        text, provider=PROVIDER, status_code=status, retryable=status == 409 or status >= 500
-    )
+    return for_status(status, text, provider=PROVIDER)
 
 
 def _transport_error_kind(exc: BaseException) -> str | None:

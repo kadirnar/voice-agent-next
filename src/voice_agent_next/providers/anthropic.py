@@ -40,18 +40,19 @@ from ..chat import (
     ImageContent,
 )
 from ..errors import (
-    AuthenticationError,
     ConfigurationError,
+    MissingAPIKeyError,
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
-    RateLimitError,
+    for_status,
 )
 from ..llm import LLM, ChatChunk, CompletionUsage, LLMCapabilities, LLMStream, ToolChoice
 from ..registry import register_provider
 from ..tools import FunctionTool
 from ..utils.deps import require
 from ..utils.log import logger
+from ._options import deprecated
 
 __all__ = [
     "DEFAULT_MAX_TOKENS",
@@ -429,15 +430,7 @@ def map_anthropic_error(sdk: Any, exc: BaseException) -> ProviderError | None:
         request_id = getattr(exc, "request_id", None)
         if request_id:
             text += f" [request-id: {request_id}]"
-        if status in (401, 403):
-            return AuthenticationError(text, provider=PROVIDER, status_code=status)
-        if status == 429:
-            return RateLimitError(text, provider=PROVIDER, status_code=status)
-        if status in (408, 504):
-            return ProviderTimeoutError(text, provider=PROVIDER, status_code=status)
-        return ProviderError(
-            text, provider=PROVIDER, status_code=status, retryable=status == 409 or status >= 500
-        )
+        return for_status(status, text, provider=PROVIDER)
     kind = _transport_error_kind(exc)
     if kind == "timeout":
         return ProviderTimeoutError(f"Anthropic stream timed out: {exc!r}", provider=PROVIDER)
@@ -488,16 +481,28 @@ class AnthropicLLM(LLM):
         max_retries: SDK retries for connection errors, 408/409/429/5xx before streaming.
         keepalive_expiry: seconds an idle HTTP connection is kept for reuse (saves the TLS
             handshake between turns).
-        extra_params: extra request body fields for every request, e.g.
+        extra: extra request body fields for every request, e.g.
             ``{"output_config": {"effort": "low"}}``, ``{"thinking": {...}}``,
-            ``{"metadata": {...}}``. Per-call ``extra`` overrides them.
-        extra_headers: extra HTTP headers for every request (e.g. ``anthropic-beta``).
+            ``{"metadata": {...}}``. Per-call ``extra`` overrides them. (``extra_params`` is a
+            deprecated alias.)
+        headers: extra HTTP headers for every request (e.g. ``anthropic-beta``).
+            (``extra_headers`` is a deprecated alias.)
         client: a pre-built ``anthropic.AsyncAnthropic`` compatible client (e.g. the
             Bedrock/Vertex/Foundry variants); connection options above are then ignored.
         http_client: an ``httpx2.AsyncClient`` for the SDK (proxies, custom transports).
     """
 
     provider = PROVIDER
+
+    @property
+    def extra_headers(self) -> dict[str, str]:
+        """Deprecated alias of :attr:`headers`."""
+        return self.headers
+
+    @property
+    def extra_params(self) -> dict[str, Any]:
+        """Deprecated alias of :attr:`extra`."""
+        return self.extra
 
     def __init__(
         self,
@@ -514,11 +519,17 @@ class AnthropicLLM(LLM):
         timeout: float | None = 30.0,
         max_retries: int = 1,
         keepalive_expiry: float = 120.0,
-        extra_params: Mapping[str, Any] | None = None,
-        extra_headers: Mapping[str, str] | None = None,
+        extra: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
         client: Any = None,
         http_client: Any = None,
+        extra_params: Mapping[str, Any] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> None:
+        if extra_headers is not None:
+            headers = deprecated("AnthropicLLM", "headers", "extra_headers", extra_headers)
+        if extra_params is not None:
+            extra = deprecated("AnthropicLLM", "extra", "extra_params", extra_params)
         if max_tokens is None:
             max_tokens = DEFAULT_MAX_TOKENS  # the Messages API requires a value
         if max_tokens < 1:
@@ -540,8 +551,8 @@ class AnthropicLLM(LLM):
         self.parallel_tool_calls = parallel_tool_calls
         self.prompt_caching = prompt_caching
         self.cache_ttl = cache_ttl
-        self.extra_params: dict[str, Any] = dict(extra_params or {})
-        self.extra_headers: dict[str, str] = dict(extra_headers or {})
+        self.extra: dict[str, Any] = dict(extra or {})
+        self.headers: dict[str, str] = dict(headers or {})
         self._sdk = require("anthropic", extra="anthropic")
         self._owns_client = False
         self._external_client = client is not None
@@ -573,7 +584,7 @@ class AnthropicLLM(LLM):
             or getattr(self._client, "auth_token", None)
             or getattr(self._client, "credentials", None)
         ):
-            raise AuthenticationError(
+            raise MissingAPIKeyError(
                 "no Anthropic credentials: pass api_key=... or set ANTHROPIC_API_KEY",
                 provider=PROVIDER,
             )
@@ -650,14 +661,14 @@ class AnthropicLLM(LLM):
             params["tools"] = tool_specs
         if choice is not None:
             params["tool_choice"] = choice
-        body = dict(self.extra_params)
+        body = dict(self.extra)
         if temperature is not None:
             body["temperature"] = temperature
         body.update(extra or {})
         if body:
             params["extra_body"] = body  # merged into the JSON body by the SDK
-        if self.extra_headers:
-            params["extra_headers"] = dict(self.extra_headers)
+        if self.headers:
+            params["extra_headers"] = dict(self.headers)
         return params
 
     def map_error(self, exc: BaseException) -> ProviderError | None:
@@ -677,7 +688,7 @@ class AnthropicLLM(LLM):
         reads it. Pass exactly what later requests send. Failures are logged, never raised.
         """
         try:
-            thinking = self.extra_params.get("thinking")
+            thinking = self.extra.get("thinking")
             manual_thinking = isinstance(thinking, Mapping) and thinking.get("type") == "enabled"
             if (ctx is not None or tools) and self.prompt_caching and not manual_thinking:
                 await self._prewarm_cache(ctx or ChatContext(), tools)

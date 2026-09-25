@@ -322,7 +322,7 @@ async def test_synthesize_emits_small_chunks_and_passes_options(backend: FakeBac
 async def test_voice_override_and_explicit_lang(backend: FakeBackend) -> None:
     tts = KokoroTTS()
     await synthesize(tts, "Hola, ¿qué tal?", voice="ef_dora")
-    french = KokoroTTS(voice="ff_siwis", lang="fr-fr")
+    french = KokoroTTS(voice="ff_siwis", language="fr-fr")
     await synthesize(french, "Bonjour à tous.")
     await synthesize(french, "Hello everyone.", voice="af_heart")  # explicit lang wins
     calls = [(c["voice"], c["lang"]) for e in backend.engines for c in e.calls]
@@ -445,7 +445,7 @@ async def test_session_prefers_accelerator_and_falls_back_to_cpu(backend: FakeBa
     await KokoroTTS().warmup()
     assert [s.providers for s in backend.sessions[1:]] == [["CUDAExecutionProvider", CPU], [CPU]]
 
-    explicit = KokoroTTS(providers="CUDAExecutionProvider")  # explicit choices are kept
+    explicit = KokoroTTS(device="CUDAExecutionProvider")  # explicit choices are kept
     with pytest.raises(ProviderError, match="CUDAExecutionProvider is not usable"):
         await explicit.warmup()
 
@@ -628,3 +628,20 @@ def test_normalization_language_follows_the_voice(backend: FakeBackend) -> None:
     assert tts.text_language("ef_dora") == "es"
     assert tts.normalizer_for("bf_emma") is not None
     assert KokoroTTS(normalize=False).normalizer_for() is None
+
+
+async def test_deprecated_lang_and_providers_options(backend: FakeBackend) -> None:
+    with pytest.warns(DeprecationWarning, match=r"KokoroTTS\(lang=\.\.\.\) is deprecated"):
+        tts = KokoroTTS(voice="ff_siwis", lang="fr-fr")
+    assert tts.language == tts.lang == "fr-fr"
+    with pytest.warns(DeprecationWarning, match=r"KokoroTTS\(providers=\.\.\.\) is deprecated"):
+        old = KokoroTTS(providers="CPUExecutionProvider")
+    await old.warmup()
+    assert backend.sessions[-1].providers == [CPU]
+    await KokoroTTS(device="cpu").warmup()
+    assert backend.sessions[-1].providers == [CPU]
+    with (
+        pytest.raises(ConfigurationError, match="not both"),
+        pytest.warns(DeprecationWarning, match="use language"),
+    ):
+        KokoroTTS(language="en-us", lang="fr-fr")

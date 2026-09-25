@@ -10,6 +10,7 @@ __all__ = [
     "AuthenticationError",
     "ConfigurationError",
     "EngineError",
+    "MissingAPIKeyError",
     "MissingDependencyError",
     "ProviderConnectionError",
     "ProviderError",
@@ -20,6 +21,7 @@ __all__ = [
     "ToolError",
     "TransportError",
     "VoiceAgentError",
+    "for_status",
 ]
 
 
@@ -88,6 +90,52 @@ class ProviderTimeoutError(ProviderError):
     def __init__(self, message: str, **kwargs: object) -> None:
         kwargs.setdefault("retryable", True)
         super().__init__(message, **kwargs)  # type: ignore[arg-type]
+
+
+class MissingAPIKeyError(ConfigurationError, AuthenticationError):
+    """No API key / credentials were configured for a provider that needs them.
+
+    Raised before any request is made. It is a :class:`ConfigurationError` (the one type
+    to catch for a missing key) and, for backward compatibility, also an
+    :class:`AuthenticationError`.
+    """
+
+    def __init__(self, message: str, *, provider: str | None = None) -> None:
+        super().__init__(message, provider=provider)
+
+
+def for_status(
+    status: int | None,
+    message: str,
+    *,
+    provider: str | None = None,
+    retryable: bool | None = None,
+) -> ProviderError:
+    """Map an HTTP (or WebSocket handshake) status code to a library error.
+
+    * 401, 403: :class:`AuthenticationError` (not retryable)
+    * 429: :class:`RateLimitError` (retryable)
+    * 408, 504: :class:`ProviderTimeoutError` (retryable)
+    * other 5xx: :class:`ProviderConnectionError` (retryable)
+    * 409: :class:`ProviderError` (retryable)
+    * anything else, or ``None``: :class:`ProviderError` (not retryable)
+
+    ``retryable`` overrides the default, e.g. ``False`` for a 429 caused by an exhausted
+    quota (retrying does not help until it is raised).
+    """
+    kwargs: dict[str, object] = {"provider": provider, "status_code": status}
+    if retryable is not None:
+        kwargs["retryable"] = retryable
+    if status in (401, 403):
+        return AuthenticationError(message, **kwargs)  # type: ignore[arg-type]
+    if status == 429:
+        return RateLimitError(message, **kwargs)
+    if status in (408, 504):
+        return ProviderTimeoutError(message, **kwargs)
+    if status is not None and 500 <= status < 600:
+        return ProviderConnectionError(message, **kwargs)
+    kwargs.setdefault("retryable", status == 409)
+    return ProviderError(message, **kwargs)  # type: ignore[arg-type]
 
 
 class EngineError(VoiceAgentError):

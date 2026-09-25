@@ -25,7 +25,6 @@ or ``DEEPGRAM_API_KEY``. See ``docs/providers/deepgram.md``.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import re
@@ -36,13 +35,10 @@ from typing import Any, Literal
 from urllib.parse import urlencode
 
 import httpx
-from websockets.asyncio.client import ClientConnection, connect
+from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import (
     ConnectionClosed,
     ConnectionClosedError,
-    InvalidHandshake,
-    InvalidStatus,
-    InvalidURI,
 )
 from websockets.protocol import State
 
@@ -51,10 +47,12 @@ from ..audio.frame import AudioFrame
 from ..errors import (
     AuthenticationError,
     ConfigurationError,
+    MissingAPIKeyError,
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
     RateLimitError,
+    for_status,
 )
 from ..metrics import STTMetrics
 from ..registry import register_provider
@@ -64,6 +62,8 @@ from ..utils.aio import BackgroundTasks, ChanClosed, cancel_and_wait
 from ..utils.clock import now
 from ..utils.ids import new_id
 from ..utils.log import logger
+from ._options import deprecated
+from ._ws import close_ws, ws_connect
 
 __all__ = ["DeepgramSTT", "DeepgramTTS"]
 
@@ -94,7 +94,7 @@ _MAX_CONNECTION_AGE = 55 * 60.0
 def _resolve_api_key(api_key: str | None) -> str:
     key = (api_key or os.environ.get(API_KEY_ENV) or "").strip()
     if not key:
-        raise ConfigurationError(
+        raise MissingAPIKeyError(
             f"Deepgram needs an API key: pass api_key=... or set {API_KEY_ENV}"
         )
     return key
@@ -187,12 +187,7 @@ def _error_detail(
 
 def _http_error(status: int, detail: str) -> ProviderError:
     message = f"Deepgram returned HTTP {status}" + (f": {detail}" if detail else "")
-    if status in (401, 403):
-        return AuthenticationError(message, provider=PROVIDER, status_code=status)
-    if status == 429:
-        return RateLimitError(message, provider=PROVIDER, status_code=status)
-    retryable = status >= 500 or status == 408
-    return ProviderError(message, provider=PROVIDER, status_code=status, retryable=retryable)
+    return for_status(status, message, provider=PROVIDER)
 
 
 def _close_error(exc: ConnectionClosed, what: str) -> ProviderError:
@@ -232,28 +227,16 @@ def _task_error(tasks: Sequence[asyncio.Task[None]], what: str) -> BaseException
 
 
 async def _open_websocket(url: str, api_key: str, *, timeout: float, what: str) -> ClientConnection:
-    try:
-        ws = await connect(
-            url,
-            additional_headers={"Authorization": f"Token {api_key}"},
-            open_timeout=timeout,
-            close_timeout=2.0,
-            compression=None,  # PCM audio does not compress; save the CPU
-        )
-    except InvalidStatus as exc:
-        response = exc.response
-        detail = _error_detail(response.body, response.headers)
-        raise _http_error(response.status_code, detail) from exc
-    except InvalidURI as exc:
-        raise ConfigurationError(f"invalid Deepgram URL: {exc}") from exc
-    except TimeoutError as exc:
-        raise ProviderTimeoutError(
-            f"timed out connecting to the Deepgram {what} API", provider=PROVIDER
-        ) from exc
-    except (OSError, InvalidHandshake) as exc:
-        raise ProviderConnectionError(
-            f"could not connect to the Deepgram {what} API: {exc}", provider=PROVIDER
-        ) from exc
+    ws = await ws_connect(
+        url,
+        provider=PROVIDER,
+        target=f"the Deepgram {what} API",
+        name="Deepgram",
+        http_error=lambda r: _http_error(r.status_code, _error_detail(r.body, r.headers)),
+        headers={"Authorization": f"Token {api_key}"},
+        open_timeout=timeout,
+        compression=None,  # PCM audio does not compress; save the CPU
+    )
     request_id = ws.response.headers.get("dg-request-id") if ws.response else None
     logger.debug("Deepgram %s connected (request_id=%s)", what, request_id)
     return ws
@@ -492,7 +475,7 @@ class _DeepgramStream(STTStream):
                 raise error
         finally:
             await cancel_and_wait(sender, receiver)
-            await ws.close()
+            await close_ws(ws)
 
     async def _send_loop(self, ws: ClientConnection) -> None:
         interval = self._keepalive_interval()
@@ -764,8 +747,7 @@ class _SpeakConnection:
         )
 
     async def aclose(self) -> None:
-        with contextlib.suppress(Exception):
-            await self.ws.close()
+        await close_ws(self.ws)
 
 
 @register_provider(
@@ -807,6 +789,8 @@ class DeepgramTTS(TTS):
             text/audio alignment for truncation, at the cost of one request per sentence).
         base_url: API origin (``https://api.deepgram.com``).
         http_client: an ``httpx.AsyncClient`` for REST requests (created if omitted).
+        timeout: HTTP timeout of REST requests, in seconds. (``request_timeout`` is a
+            deprecated alias.)
         idle_timeout: close pooled WebSocket connections unused for this many seconds.
         clear_timeout: max wait for ``Cleared`` before a connection is dropped instead.
         mip_opt_out, tags, extra_params: passed through as query parameters.
@@ -815,6 +799,11 @@ class DeepgramTTS(TTS):
     """
 
     provider = PROVIDER
+
+    @property
+    def request_timeout(self) -> float:
+        """Deprecated alias of :attr:`timeout`."""
+        return self.timeout
 
     def __init__(
         self,
@@ -828,7 +817,7 @@ class DeepgramTTS(TTS):
         base_url: str = DEFAULT_BASE_URL,
         http_client: httpx.AsyncClient | None = None,
         connect_timeout: float = 10.0,
-        request_timeout: float = 30.0,
+        timeout: float = 30.0,
         idle_timeout: float = 60.0,
         clear_timeout: float = 2.0,
         mip_opt_out: bool | None = None,
@@ -836,7 +825,10 @@ class DeepgramTTS(TTS):
         extra_params: Mapping[str, Any] | None = None,
         clean_text: bool = True,
         normalize: NormalizeOption = None,
+        request_timeout: float | None = None,
     ) -> None:
+        if request_timeout is not None:
+            timeout = deprecated("DeepgramTTS", "timeout", "request_timeout", request_timeout)
         if sample_rate not in _AURA_SAMPLE_RATES:
             raise ConfigurationError(
                 f"Aura supports sample rates {_AURA_SAMPLE_RATES} for linear16, got {sample_rate}"
@@ -854,7 +846,7 @@ class DeepgramTTS(TTS):
         self.speed = speed
         self.base_url = base_url
         self.connect_timeout = connect_timeout
-        self.request_timeout = request_timeout
+        self.timeout = timeout
         self.idle_timeout = idle_timeout
         self.clear_timeout = clear_timeout
         self.mip_opt_out = mip_opt_out
@@ -903,7 +895,7 @@ class DeepgramTTS(TTS):
     def _client(self) -> httpx.AsyncClient:
         if self._http is None:
             self._http = httpx.AsyncClient(
-                timeout=httpx.Timeout(self.request_timeout, connect=self.connect_timeout)
+                timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout)
             )
         return self._http
 

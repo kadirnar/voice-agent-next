@@ -63,10 +63,12 @@ from ...engines.rotation import HistoryCarryOver, TruncateHistory
 from ...errors import (
     AuthenticationError,
     ConfigurationError,
+    MissingAPIKeyError,
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
     RateLimitError,
+    for_status,
 )
 from ...events import (
     EngineErrorEvent,
@@ -93,6 +95,7 @@ from ...utils.clock import now
 from ...utils.ids import new_id
 from ...utils.log import logger
 from ...vad import VADEventType, VADOptions, VADStream
+from .._options import deprecated
 from ..energy import EnergyVAD
 
 if TYPE_CHECKING:
@@ -256,13 +259,7 @@ def _close_error(code: int | None, reason: str) -> ProviderError:
 def _http_error(status: int, body: str) -> ProviderError:
     """Map a rejected WebSocket handshake to a library error."""
     msg = f"Gemini Live rejected the connection (HTTP {status}): {body.strip()[:300]}"
-    if status in (401, 403):
-        return AuthenticationError(msg, provider="google", status_code=status)
-    if status == 429:
-        return RateLimitError(msg, provider="google", status_code=status)
-    if status >= 500:
-        return ProviderConnectionError(msg, provider="google", status_code=status)
-    return ProviderError(msg, provider="google", status_code=status)
+    return for_status(status, msg, provider="google")
 
 
 def _close_info(exc: Exception) -> tuple[int | None, str]:
@@ -337,10 +334,16 @@ class GeminiLiveEngine(S2SEngine):
         local_vad: run a cheap energy VAD on the sent audio to estimate where speech ended
             (voice-to-voice metrics), to rotate only while the user is silent and, with
             ``turn_detection=False``, to open a manual turn when the user starts speaking.
-        extra_setup: extra ``setup`` fields (API camelCase), deep-merged last.
+        extra_config: extra ``setup`` fields (API camelCase), deep-merged last.
+            (``extra_setup`` is a deprecated alias.)
     """
 
     provider = "google"
+
+    @property
+    def extra_setup(self) -> dict[str, Any]:
+        """Deprecated alias of :attr:`extra_config`."""
+        return self.extra_config
 
     def __init__(
         self,
@@ -367,9 +370,14 @@ class GeminiLiveEngine(S2SEngine):
         connect_timeout: float = 15.0,
         max_reconnect_attempts: int = 5,
         local_vad: bool = True,
-        extra_setup: Mapping[str, Any] | None = None,
+        extra_config: Mapping[str, Any] | None = None,
         carry_over: HistoryCarryOver | None = None,
+        extra_setup: Mapping[str, Any] | None = None,
     ) -> None:
+        if extra_setup is not None:
+            extra_config = deprecated(
+                "GeminiLiveEngine", "extra_config", "extra_setup", extra_setup
+            )
         model = model or DEFAULT_MODEL
         if tool_behavior is None:
             tool_behavior = "blocking" if "3.1-flash-live" in model else "non_blocking"
@@ -419,13 +427,13 @@ class GeminiLiveEngine(S2SEngine):
         self.connect_timeout = connect_timeout
         self.max_reconnect_attempts = max_reconnect_attempts
         self.local_vad = local_vad
-        self.extra_setup = dict(extra_setup or {})
+        self.extra_config = dict(extra_config or {})
         self.carry_over: HistoryCarryOver = carry_over or TruncateHistory()
 
     def _resolve_api_key(self) -> str:
         key = self._api_key or next((os.environ[e] for e in API_KEY_ENV if os.environ.get(e)), "")
         if not key:
-            raise ConfigurationError(
+            raise MissingAPIKeyError(
                 "Gemini Live needs an API key: pass api_key=... or set GOOGLE_API_KEY "
                 "(or GEMINI_API_KEY)"
             )
@@ -748,7 +756,7 @@ class GeminiLiveConnection(EngineConnection):
             )
         if seed_history:
             setup["historyConfig"] = {"initialHistoryInClientContent": True}
-        setup = _deep_merge(setup, e.extra_setup)
+        setup = _deep_merge(setup, e.extra_config)
         setup = _deep_merge(setup, opts.extra)
         return {"setup": setup}
 

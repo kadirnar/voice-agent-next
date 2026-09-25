@@ -44,6 +44,7 @@ from ..utils.clock import now
 from ..utils.deps import is_installed, require
 from ..utils.log import logger
 from . import _mlx
+from ._options import renamed
 
 __all__ = ["DEFAULT_MODEL", "MODELS", "MLXAudioTTS", "kokoro_lang_code"]
 
@@ -116,6 +117,29 @@ def kokoro_lang_code(voice: str) -> str:
     return code if code in _KOKORO_LANGS else "a"
 
 
+_KOKORO_LANG_BY_TAG = {
+    "en": "a",
+    "en-us": "a",
+    "en-gb": "b",
+    "es": "e",
+    "fr": "f",
+    "hi": "h",
+    "it": "i",
+    "ja": "j",
+    "pt": "p",
+    "pt-br": "p",
+    "zh": "z",
+    "cmn": "z",
+}
+
+
+def kokoro_lang_for(language: str) -> str:
+    """Kokoro's language code for a language tag (``"en-GB"`` -> ``"b"``); Kokoro codes
+    (``"a"``, ``"b"``...) and unknown tags pass through."""
+    tag = language.strip().lower().replace("_", "-")
+    return _KOKORO_LANG_BY_TAG.get(tag) or _KOKORO_LANG_BY_TAG.get(tag.split("-")[0]) or language
+
+
 def _lookup(model: str) -> _Model | None:
     key = model.strip().lower().replace("_", "-")
     return MODELS.get(key) or MODELS.get(key.removesuffix("-82m"))
@@ -142,7 +166,9 @@ class MLXAudioTTS(TTS):
         voice: model voice (Kokoro: ``af_heart``...; Pocket TTS: ``alba``..., or a WAV
             file to clone). Default: the model's own default voice.
         speed: speaking rate multiplier (models that support it, e.g. Kokoro).
-        lang_code: Kokoro language code; default: from the voice's first letter.
+        language: the model's language: for Kokoro a language tag (``"en-us"``, ``"en-gb"``,
+            ``"es"``, ``"fr"``, ``"ja"``...) or Kokoro code (``"a"``, ``"b"``...); default:
+            from the voice's first letter. (``lang_code`` is a deprecated alias.)
         sample_rate: output rate for models not in :data:`MODELS` (default 24 kHz).
         streaming_interval: seconds of audio per chunk for audio-streaming models (Pocket
             TTS); smaller chunks arrive sooner.
@@ -159,12 +185,14 @@ class MLXAudioTTS(TTS):
         model: str | None = None,
         voice: str | None = None,
         speed: float = 1.0,
-        lang_code: str | None = None,
+        language: str | None = None,
         sample_rate: int | None = None,
         streaming_interval: float = 0.4,
         generate_options: Mapping[str, Any] | None = None,
         local_files_only: bool = False,
+        lang_code: str | None = None,
     ) -> None:
+        language = renamed("MLXAudioTTS", "language", language, "lang_code", lang_code)
         _mlx.ensure_available("mlx_audio", extra=_EXTRA, package="mlx-audio", provider=_PROVIDER)
         name = (model or DEFAULT_MODEL).strip()
         if speed <= 0:
@@ -183,7 +211,7 @@ class MLXAudioTTS(TTS):
         self.repo = known.repo if known else name
         self.is_kokoro = "kokoro" in self.repo.lower()
         self.speed = speed
-        self.lang_code = lang_code
+        self.language = language
         self.streaming_interval = streaming_interval
         self.generate_options = dict(generate_options or {})
         self.local_files_only = local_files_only
@@ -246,9 +274,14 @@ class MLXAudioTTS(TTS):
         )
         return model
 
+    @property
+    def lang_code(self) -> str | None:
+        """Deprecated alias of :attr:`language`."""
+        return self.language
+
     def _language(self, voice: str | None) -> str | None:
-        if self.lang_code:
-            return self.lang_code
+        if self.language:
+            return kokoro_lang_for(self.language) if self.is_kokoro else self.language
         if self.is_kokoro:
             return kokoro_lang_code(voice or "af_heart")
         return None

@@ -29,7 +29,7 @@ from ..errors import ConfigurationError, ProviderError
 from ..hardware import select_torch_backend
 from ..stt import WordTiming
 from ..text.sentences import SentenceSegmenter
-from ..tts import TTS, ChunkedStream, SynthesizedAudio
+from ..tts import TTS, ChunkedStream, SynthesizedAudio, TTSCapabilities
 from ..utils.clock import now
 from ..utils.log import logger
 from .pocket_tts import estimate_word_timings, speech_bounds
@@ -79,7 +79,14 @@ class LocalTorchTTS(TTS):
         word_timings: bool = True,
         clean_text: bool = True,
     ) -> None:
-        super().__init__(model=model, sample_rate=sample_rate, voice=voice, clean_text=clean_text)
+        super().__init__(
+            model=model,
+            sample_rate=sample_rate,
+            voice=voice,
+            clean_text=clean_text,
+            # word timings are estimated (pocket_tts.estimate_word_timings)
+            capabilities=TTSCapabilities(word_timestamps=word_timings),
+        )
         self.device_request = device
         self.device: str | None = None
         """Where the model runs once loaded (``"cuda"``, ``"mps"``, ``"cpu"``)."""

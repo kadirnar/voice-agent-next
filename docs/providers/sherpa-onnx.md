@@ -169,7 +169,7 @@ of them.
 | `language` | `None` | reported in transcripts; passed to SenseVoice/Whisper and as the Nemotron 3.5 prompt |
 | `kind`, `files`, `sha256` | — | for models outside the catalog (see above) |
 | `num_threads` | `2` | ONNX Runtime threads |
-| `execution_provider` | `"cpu"` | `"cuda"` / `"coreml"` need a sherpa-onnx build with that provider (PyPI wheels are CPU) |
+| `device` | `"cpu"` | `"cuda"` / `"coreml"` need a sherpa-onnx build with that provider (PyPI wheels are CPU); `execution_provider` is a deprecated alias |
 | `decoding_method` | `"greedy_search"` | or `"modified_beam_search"` (transducers; `max_active_paths`) |
 | `endpoint_detection` | `False` | sherpa's endpoint rules (streaming models) |
 | `tail_padding` | auto | silence (s) appended on `flush()`; auto = just enough for the last chunk |
@@ -187,7 +187,7 @@ of them.
 | `voice` | model default | speaker id (`"12"`) or a Kokoro voice name (`"bm_george"`) |
 | `speed` | `1.0` | speaking rate (0.25–4) |
 | `sample_rate` | model rate | output rate; other rates are resampled |
-| `lang` | `None` | Kokoro language hint (`"es"`, `"fr"`…) |
+| `language` | `None` | Kokoro language hint (`"es"`, `"fr"`…); `lang` is a deprecated alias |
 | `num_threads` | `2` | ONNX Runtime threads |
 | `max_num_sentences` | `1` | sentences per synthesis step; each step's audio is emitted as soon as it is ready |
 | `silence_scale` | `0.2` | pause between sentences of one request |

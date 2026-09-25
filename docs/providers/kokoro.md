@@ -91,12 +91,12 @@ any `model=` label (it shows up in metrics) and uses the v1.0 voice pack unless 
 
 ## Voices and languages
 
-The first letter of a voice name selects its language and, unless you set `lang`, the
+The first letter of a voice name selects its language and, unless you set `language`, the
 espeak-ng phonemizer language. Grades are from the upstream
 [VOICES.md](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) and estimate the
 quality and quantity of each voice's training data; the best voices are in bold.
 
-| Language | `lang` (espeak-ng) | Voices (v1.0) |
+| Language | `language` (espeak-ng) | Voices (v1.0) |
 |---|---|---|
 | American English | `en-us` | **af_heart** (A), **af_bella** (A-), af_nicole (B-), af_aoede, af_kore, af_sarah, af_alloy, af_nova, af_sky, af_jessica, af_river; am_fenrir, am_michael, am_puck, am_echo, am_eric, am_liam, am_onyx, am_santa, am_adam |
 | British English | `en-gb` | **bf_emma** (B-), bf_isabella, bf_alice, bf_lily; bm_fable, bm_george, bm_lewis, bm_daniel |
@@ -125,9 +125,9 @@ phonemizes kanji as the English words "Chinese letter". To use a better G2P, pas
 | `model` | `"v1.0"` | model id (see [Models](#models)) |
 | `voice` | `"af_heart"` (`"zf_001"` for v1.1-zh) | default voice; `synthesize(text, voice=...)` overrides it per request |
 | `speed` | `1.0` | speaking rate, 0.5 to 2.0 |
-| `lang` | from the voice | espeak-ng language code, e.g. `en-us`, `en-gb`, `fr-fr`, `pt-br`, `cmn` |
+| `language` | from the voice | espeak-ng language code, e.g. `en-us`, `en-gb`, `fr-fr`, `pt-br`, `cmn` (`lang` is a deprecated alias) |
 | `model_path`, `voices_path` | downloaded | local files instead of the pinned downloads |
-| `providers` | auto | ONNX Runtime execution providers, e.g. `["CPUExecutionProvider"]` or `[("CUDAExecutionProvider", {"device_id": 1}), "CPUExecutionProvider"]` |
+| `device` | `"auto"` | `"cpu"`, `"cuda"`, `"coreml"`, `"directml"`, or a list of ONNX Runtime execution providers, e.g. `["CPUExecutionProvider"]` or `[("CUDAExecutionProvider", {"device_id": 1}), "CPUExecutionProvider"]` (`providers` is a deprecated alias) |
 | `num_threads` | ORT default (one per physical core) | ONNX Runtime intra-op threads; lower it when STT/LLM share the CPU |
 | `chunk_duration` | `0.05` | seconds of audio per emitted chunk |
 | `split_sentences` | `True` | synthesize long texts sentence by sentence: sentences shorter than 20 characters are merged, and run-ons longer than 300 are split at clauses |
@@ -170,7 +170,7 @@ phonemizes kanji as the English words "Chinese letter". To use a better G2P, pas
 By default the first available of `CUDAExecutionProvider`, `CoreMLExecutionProvider` and
 `DmlExecutionProvider` is used, with `CPUExecutionProvider` as the fallback for unsupported
 operators. If the accelerated session cannot be created, the provider logs a warning and
-retries on CPU. Providers passed explicitly (`providers=`) are used as given. The standard
+retries on CPU. An explicit `device=` is used as given. The standard
 `onnxruntime` wheel is CPU-only on Linux and Windows (plus `AzureExecutionProvider`, which is
 ignored) and includes CoreML on macOS.
 
@@ -231,5 +231,5 @@ VAN_KOKORO_TEST_MODEL=v1.0 uv run pytest -m model tests/providers/test_kokoro.py
 * No voice blending (for example `af_heart:0.7,af_bella:0.3`) yet.
 * espeak-ng G2P only; misaki is not bundled (use `g2p=`).
 * The CoreML and DirectML paths are untested on real hardware. Upstream kokoro-onnx uses
-  CPU on macOS unless told otherwise; pass `providers=["CPUExecutionProvider"]` if CoreML
+  CPU on macOS unless told otherwise; pass `device="cpu"` if CoreML
   turns out slower for Kokoro's dynamic shapes.

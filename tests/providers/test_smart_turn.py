@@ -318,7 +318,7 @@ def test_model_variants_revision_and_threads(monkeypatch: pytest.MonkeyPatch) ->
         return Path(filename)
 
     monkeypatch.setattr(smart_turn, "hf_file", fake_hf_file)
-    gpu = SmartTurnDetector(model="v3.2-gpu", num_threads=4, providers=["CUDAExecutionProvider"])
+    gpu = SmartTurnDetector(model="v3.2-gpu", num_threads=4, device=["CUDAExecutionProvider"])
     gpu._get_session()
     SmartTurnDetector(model="smart-turn-v3.1-cpu.onnx", revision="main")._get_session()
     assert fetched[0] == (

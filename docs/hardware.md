@@ -38,12 +38,12 @@ A yellow row means a faster backend is one install away, and the row gives the c
 |---|---|---|---|
 | faster-whisper | CTranslate2 | CUDA float16 if usable, else CPU int8 | The final transcription is on the critical path of every turn: ~390 → ~50 ms (see below) |
 | Kokoro | ONNX Runtime | CUDA > CoreML > DirectML > CPU, when the installed ONNX Runtime build has them | Unchanged order; CUDA libraries are now loaded first and checked |
-| Silero VAD | ONNX Runtime | CPU (`force_cpu=True`) | A 32 ms window every 32 ms on a tiny model: a GPU round trip costs more than the inference |
+| Silero VAD | ONNX Runtime | CPU (`device="cpu"`) | A 32 ms window every 32 ms on a tiny model: a GPU round trip costs more than the inference |
 | Smart Turn | ONNX Runtime | CPU (`providers` default) | Runs once per pause, concurrently with the STT flush, so it is off the critical path |
 | Chatterbox, Qwen3-TTS | PyTorch | CUDA > MPS > CPU | Autoregressive models of 110M–1.7B parameters: real time needs a GPU ([chatterbox](providers/chatterbox.md), [qwen-tts](providers/qwen-tts.md)) |
 
 Explicit choices are never second-guessed: `device="cpu"` / `device="cuda"` for
-faster-whisper and `providers=[...]` for the ONNX models are used as given. With an explicit
+faster-whisper and the ONNX models are used as given. With an explicit
 `device="cuda"`, a GPU failure is a `ProviderError`, not a fallback.
 
 ### Fallbacks

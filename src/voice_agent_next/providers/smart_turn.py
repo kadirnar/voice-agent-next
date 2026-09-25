@@ -46,6 +46,7 @@ from ..utils.clock import now
 from ..utils.deps import require
 from ..utils.download import hf_file
 from ..utils.log import logger
+from ._options import onnx_providers, renamed
 
 __all__ = [
     "DEFAULT_MODEL",
@@ -240,8 +241,10 @@ class SmartTurnDetector(TurnDetector):
             downloading ``model``; the file name then serves as the model name.
         threshold: probability at/above which the turn counts as complete.
         revision: Hugging Face revision of :data:`HF_REPO` to download from.
-        providers: ONNX Runtime execution providers, e.g.
-            ``["CUDAExecutionProvider", "CPUExecutionProvider"]`` (needs onnxruntime-gpu).
+        device: ``"cpu"`` (default), ``"auto"`` (every execution provider onnxruntime
+            offers), ``"cuda"`` (needs onnxruntime-gpu)... or a list of ONNX Runtime
+            execution providers, e.g. ``["CUDAExecutionProvider", "CPUExecutionProvider"]``.
+            (``providers`` is a deprecated alias.)
         num_threads: intra-op threads. The default (1, no spinning) keeps a voice agent's
             CPU usage predictable; raise it for the fp32 model on large machines.
     """
@@ -257,9 +260,11 @@ class SmartTurnDetector(TurnDetector):
         model_path: str | os.PathLike[str] | None = None,
         threshold: float = 0.5,
         revision: str = HF_REVISION,
-        providers: Sequence[str] | None = None,
+        device: str | Sequence[str] | None = None,
         num_threads: int = 1,
+        providers: Sequence[str] | None = None,
     ) -> None:
+        device = renamed("SmartTurnDetector", "device", device, "providers", providers)
         if not 0.0 <= threshold <= 1.0:
             raise ConfigurationError(f"threshold must be in [0, 1], got {threshold}")
         if num_threads < 1:
@@ -278,7 +283,8 @@ class SmartTurnDetector(TurnDetector):
         )
         self.model_path = Path(model_path) if model_path is not None else None
         self.revision = revision
-        self.providers: tuple[str, ...] = tuple(providers or ("CPUExecutionProvider",))
+        self.device = device or "cpu"
+        self._providers = onnx_providers(self.device)
         self.num_threads = num_threads
         self._session: Any = None
         self._input_name = "input_features"
@@ -294,6 +300,11 @@ class SmartTurnDetector(TurnDetector):
         sha256 = MODEL_SHA256.get(filename) if self.revision == HF_REVISION else None
         return hf_file(HF_REPO, filename, revision=self.revision, sha256=sha256)
 
+    @property
+    def providers(self) -> tuple[str, ...]:
+        """The ONNX Runtime execution providers :attr:`device` selects (empty: all)."""
+        return tuple(self._providers or ())
+
     def _load_session(self) -> Any:
         ort = require("onnxruntime", extra="smart-turn")
         path = self._model_file()
@@ -305,11 +316,10 @@ class SmartTurnDetector(TurnDetector):
         # idle worker threads must not busy-wait between the (rare) predictions
         opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
         opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
+        providers = list(self.providers) or list(ort.get_available_providers())
         t0 = now()
         try:
-            session = ort.InferenceSession(
-                os.fspath(path), sess_options=opts, providers=list(self.providers)
-            )
+            session = ort.InferenceSession(os.fspath(path), sess_options=opts, providers=providers)
         except Exception as exc:  # onnxruntime errors derive from Exception only
             raise ProviderError(
                 f"failed to load Smart Turn model {path}: {exc}", provider=self.provider
@@ -319,7 +329,7 @@ class SmartTurnDetector(TurnDetector):
             "loaded Smart Turn model %s in %.1f ms (providers: %s)",
             path,
             (now() - t0) * 1e3,
-            self.providers,
+            providers,
         )
         return session
 

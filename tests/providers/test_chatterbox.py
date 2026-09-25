@@ -218,6 +218,9 @@ def test_create_from_spec(backend: FakeBackend) -> None:
     mtl = create("tts", "chatterbox/multilingual", language="FR")
     assert (mtl.model, mtl.language) == ("multilingual", "fr")
     assert not backend.models  # the model loads lazily
+    # estimated word timings are reported (word-exact truncation on barge-in)
+    assert tts.capabilities.word_timestamps
+    assert not create("tts", "chatterbox", word_timings=False).capabilities.word_timestamps
 
 
 @pytest.mark.parametrize(
