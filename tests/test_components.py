@@ -157,7 +157,9 @@ async def test_mock_llm_streams_text_tool_calls_and_metrics() -> None:
     assert result.tool_calls[0].parsed_arguments() == {"q": "x"}
     # script exhausted -> echo
     assert (await llm.chat(ctx).collect()).text == "You said: hi"
-    assert metrics[0].ttft is not None and metrics[0].ttft >= 0.008  # injected 10 ms; Windows timers wake ~0.3 ms early
+    assert (
+        metrics[0].ttft is not None and metrics[0].ttft >= 0.008
+    )  # injected 10 ms; Windows timers wake ~0.3 ms early
     assert metrics[0].completion_tokens == 3
 
 
