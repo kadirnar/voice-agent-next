@@ -69,7 +69,9 @@ transcript it already has, so fusion costs little latency; the text half has a l
 budget, past which the audio verdict is used alone. On eot-bench it lowers the false
 cut-offs in English, German and Spanish. It does not make a complete sentence
 incomplete: a pause after "Where is my order?" still reads, and sounds, like a turn end
-(see [endpointing](endpointing.md#semantic-end-of-turn-issue-124)).
+(see [endpointing](endpointing.md#semantic-end-of-turn-issue-124)). The `local-cpu`
+preset uses it by default. `local-gpu` does not: its batch STT would make the text half
+wait for the final transcript ([presets](../presets.md#why-these-defaults)).
 
 ## STT-driven turns
 

@@ -124,7 +124,91 @@ On CPU the omni model is slower than the best CPU cascade (≈ 0.9 s with Pocket
 - **Semantic + audio fusion (#124):** `fused` turn detection (Smart Turn + a SmolLM2-135M text model, 137 MB int8) at the presets' 0.5/1.5 s endpointing:
   - eot-bench false cut-offs: en 10.8 → 8.8 % (mean latency −53 ms), de 14.4 → 6.6 %, es 19.4 → 8.9 %; ROC-AUC (en) 0.83 → 0.91.
   - T4 premature replies: 75 % → ≈ 50 %, with v2v within +100 ms. Complete-sounding questions ("Where is my order?") followed by details stay premature. They need a detector that predicts "more is coming", or a ~1 s minimum delay.
-  - Opt-in (`turn_detector="fused"`), not yet the preset default.
+  - The default of `local-cpu` since #155 (next section).
+
+## Local defaults: turn detection and LLM (2026-09-25, #155)
+
+Which turn detector and which Ollama LLM the local presets should use. Every comparison
+was run back to back on the desktop of the T1 sections (Ryzen 5 5600, RTX 5070 Ti, Linux
+7.2). The machine was shared: a niced busy loop held one core all along, and other agents'
+test runs pushed the load average from about 2 to 4–9 at times. Ollama placed every model
+on the GPU, as it does by default; the `local-cpu` STT and TTS ran on the CPU. Configs:
+`extends: local-cpu` or `extends: local-gpu` with the LLM and turn detector swapped. T1 is
+`latency-local-sherpa.yaml` with the agent asked for two or three sentences (3 sessions ×
+6 turns, 15 measured). T4 is `turn-taking-local.yaml` (3 sessions, 12 mid-turn pauses per
+run). T5 is `big-bench-audio-smoke --limit 20` (5 questions per category, no judge). T6 is
+the 11-call smoke suite, 1 trial.
+
+**Turn detection, `local-cpu` stack** (Kroko streaming STT · LFM2.5-1.2B · Kokoro):
+
+| | Smart Turn | fused (Smart Turn + `lm_turn`) |
+|---|---:|---:|
+| T1 v2v p50 / p90 | 927 / 1,692 ms | 928 / 1,660 ms |
+| T1 end-of-turn delay mean | 501 ms | 533 ms |
+| T4 premature replies in mid-turn pauses (3 runs) | 33, 50, 25 % (**36 %**) | 25, 33, 25 % (**28 %**) |
+| T4 dead air (3 runs) | 4, 25, 17 % | 8, 4, 4 % |
+| T4 v2v p50 (3 runs) | 1,047, 1,303, 1,484 ms | 932, 1,214, 915 ms |
+| T5 premature answers to long spoken questions (20) | 35 % | 40 % |
+| eot-bench en: false cut-offs @ 0.5 / 1.5 s, mean latency | 10.8 %, 755 ms | **8.8 %, 702 ms** |
+| eot-bench en: ROC-AUC, false cut-offs @ 300 / 600 ms | 0.834, 36.0 / 15.3 % | **0.912, 21.4 / 9.9 %** |
+| install (CPU Docker image) | – | +32 MB of packages (`tokenizers`, `huggingface-hub`, `hf-xet`...), +137 MB model |
+
+**Turn detection, `local-gpu` stack** (faster-whisper `large-v3-turbo` on CUDA ·
+Qwen3.5-4B · Kokoro on the CPU), 2 T1 runs pooled:
+
+| | Smart Turn | fused |
+|---|---:|---:|
+| T1 v2v p50 / p90 (30 turns) | 1,342 / 2,172 ms | 1,741 / 2,286 ms |
+| T1 end-of-turn delay mean | 550 ms | 707 ms |
+| T4 premature replies / dead air | 0 % / 33 % | 0 % / 17 % |
+
+- **`local-cpu` uses `fused` now.** The streaming STT has the transcript at the pause, so
+  the text half costs about 30 ms of end-of-turn delay and nothing measurable in v2v. It
+  cuts false cut-offs on real human turns (eot-bench) and, less clearly on 36 pauses per
+  arm, premature replies in the T4 battery.
+- **`local-gpu` keeps Smart Turn.** Behind a batch STT the text half waits for the final
+  transcript (170–400 ms with `large-v3-turbo` here), so the end of turn came 100–230 ms
+  later, and the battery had no premature replies to remove.
+- **`apple` keeps Smart Turn** until it is measured on a Mac. Parakeet streams like Kroko,
+  so the `local-cpu` result should carry over.
+- Complete questions followed by more ("Where is my order? · I placed it last week.",
+  "Please change my flight. · To Friday morning") stay premature with either detector.
+
+**LLM** (all through Ollama on the GPU; fused turn detection on the `local-cpu` stack,
+Smart Turn on `local-gpu`; Qwen3.5 with `reasoning_effort: none`):
+
+| | LFM2.5-1.2B | LFM2.5-2.6B (BF16) | Qwen3.5-4B |
+|---|---:|---:|---:|
+| `local-cpu` stack: T1 v2v p50 / p90 | **872 / 1,674 ms** | 2,347 / 2,948 ms | 1,240 / 1,771 ms |
+| `local-gpu` stack: T1 v2v p50 / p90 | **1,101 / 1,880 ms** | 2,656 / 3,330 ms | 1,672 / 2,167 ms |
+| LLM TTFT p50 (GPU) | 14–19 ms | 949–1,015 ms | 60–69 ms |
+| T1 dead air (`local-cpu` / `local-gpu`) | 0 / 7 % | 73 / 93 % | 0 / 20 % |
+| T5 accuracy (20 questions, 95 % CI) | 10 % [0, 25] | **60 % [40, 80]** | 35 % [15, 55] |
+| T5 answer latency p50 | 1,025 ms | 7,048 ms | 1,562 ms |
+| T6 pass@1 (11 calls) | 27 % | 45 % | **64 %** |
+| T6 tool F1 / argument accuracy | 62 / 71 % | 81 / 76 % | 69 / 82 % |
+| CPU only (`num_gpu: 0`): TTFT p50, decode | **219 ms, 40 tok/s** | reasons first, 5.5 tok/s | 945 ms, 10 tok/s |
+| size (Ollama) | 0.7 GB | 5.4 GB | 3.4 GB |
+
+- **LFM2.5-2.6B** reasons before every answer, and `reasoning_effort: none` does not stop
+  it. This buys its T5 score (60 %, 7 s to answer) and costs about
+  1 s before the first word of every reply. It is not a voice default.
+- **Qwen3.5-4B** needs `reasoning_effort: none`: by default Ollama lets it think first,
+  which took 210 reasoning tokens for "what is 2 + 2". Without thinking, the LLM's first token is only
+  about 45 ms slower than LFM2.5-1.2B. Most of its +370–570 ms v2v comes from longer
+  first clauses, which Kokoro renders on the CPU before the first audio.
+- **`local-gpu` → Qwen3.5-4B (thinking off)**, for quality: T6 27 → 64 %, T5 10 → 35 %.
+  No measured LLM keeps this stack's v2v under 1 s: Kokoro on the CPU and the batch
+  transcript set the floor (LFM2.5-1.2B: 1,101 ms). The previous default, Qwen3.5-9B, was
+  never measured, and with Ollama's default it thinks before answering.
+- **`local-cpu` keeps LFM2.5-1.2B** for latency. On a CPU alone Qwen3.5-4B takes about
+  1 s to its first token and competes with STT and TTS for the cores. Use it when Ollama
+  has a GPU or tools matter (`docs/presets.md`).
+- **Caveats:** 20 T5 questions give a ±20-point CI. Premature answers to long spoken
+  questions (25–40 % for the fast models, 5 % for the slow one) lower T5 for every model,
+  so T5 also reflects endpointing. The T6 caller is Kokoro, and the agent hears it through
+  Kroko. The issue's earlier LFM2.5-1.2B figures (8 % T5, 36 % T6) come from another
+  run; here it scored 10 % and 27 %.
 
 ## T2 · ASR on CPU (2026-09-24, `van bench asr`)
 

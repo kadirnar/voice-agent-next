@@ -82,13 +82,14 @@ def test_apple_preset_is_mlx() -> None:
 
 def test_apple_preset_prefers_a_running_mlx_lm_server() -> None:
     ready = check_preset("apple", env=fake_env(**MAC, mlx_lm=["mlx-community/Qwen3.5-4B-4bit"]))
-    assert ready.ready and ready.config["llm"] == ["mlx_lm/mlx-community/Qwen3.5-4B-4bit",
-                                                   "ollama/qwen3.5:4b"]  # fmt: skip
+    ollama = {"provider": "ollama/qwen3.5:4b", "reasoning_effort": "none"}  # no thinking (#155)
+    assert ready.ready and ready.config["llm"] == ["mlx_lm/mlx-community/Qwen3.5-4B-4bit", ollama]
 
 
 def test_apple_preset_falls_back_to_ollama_without_the_server() -> None:
     result = check_preset("apple", env=fake_env(**MAC))
-    assert result.ready and result.config["llm"] == "ollama/qwen3.5:4b"
+    assert result.ready
+    assert result.config["llm"] == {"provider": "ollama/qwen3.5:4b", "reasoning_effort": "none"}
     assert any("no mlx-lm server at http://127.0.0.1:8080/v1" in n for n in result.notes)
 
 

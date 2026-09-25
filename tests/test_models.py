@@ -427,6 +427,7 @@ def test_models_for_preset() -> None:
         "kokoro/v1.0-fp16",
         "silero/v6.2",
         "smart-turn/smart-turn-v3.2-cpu",
+        "lm-turn/smollm2-135m",  # the text half of local-cpu's fused detector (#155)
     ]
     assert any("ollama" in n for n in req.notes)
     with pytest.raises(ConfigurationError, match="unknown preset"):

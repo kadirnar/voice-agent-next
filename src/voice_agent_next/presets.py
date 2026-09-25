@@ -226,11 +226,19 @@ _PRESETS: tuple[Preset, ...] = (
             "speech, which cuts the end-of-turn delay from 633 to 400 ms against "
             "faster-whisper base and gave the best voice-to-voice latency (p50 1,126 ms, p90 "
             "1,620 ms, 4 % dead air), with cased, punctuated transcripts (57 MB, English). "
-            "LFM2.5 1.2B is the local LLM of every T1 measurement (~12 ms warm TTFT on CPU), "
-            "so the CPU is left to STT and TTS, the contention research note 03 warns about; "
-            "for better tool calling use `--llm ollama/qwen3.5:4b` (note 03 §7.5). Kokoro-82M "
+            "LFM2.5 1.2B stays the LLM (#155): on this CPU alone it answers in ~220 ms at "
+            "~40 tok/s, Qwen3.5-4B in ~950 ms at ~10 tok/s, and the CPU is left to STT and "
+            "TTS, the contention research note 03 warns about. The price is quality: 27 % "
+            "pass@1 on the T6 tool-use smoke suite and 10 % on T5 against 64 % and 35 % for "
+            "Qwen3.5-4B, whose longer first clauses also add ~370 ms v2v with the GPU doing "
+            "the LLM. With a GPU for Ollama or when tools matter, use "
+            "`--llm '{provider: ollama/qwen3.5:4b, reasoning_effort: none}'`. Kokoro-82M "
             "is the best open TTS that runs in real time on a CPU (first clause ~400 ms). "
-            f"{_TURN_TAKING}, off the critical path). {_TURN_TAKING_NOTE}"
+            "Silero VAD and Smart Turn v3.2 fused with the lm_turn text model (SmolLM2-135M, "
+            "137 MB) end the user's turn, both concurrently with the STT flush (#155): on "
+            "eot-bench English 8.8 % false cut-offs instead of 10.8 % at a 53 ms lower mean "
+            "latency, premature replies in the T4 battery 28 % instead of 36 %, and the same "
+            f"v2v (T1 p50 928 vs 927 ms). {_TURN_TAKING_NOTE}"
         ),
         where="local",
     ),

@@ -37,7 +37,11 @@ session = AgentSession(
 )
 ```
 
-`van models for` and Docker images pick up both halves of a `fused` detector.
+`van models for` and Docker images pick up both halves of a `fused` detector. The
+`local-cpu` preset uses this detector (issue #155), and `van presets` checks both halves'
+extras. With a batch STT (faster-whisper) the text half waits for the final transcript,
+which added 100–230 ms of end-of-turn delay in `local-gpu`, so that preset keeps Smart
+Turn alone ([results](../benchmarks/results.md#local-defaults-turn-detection-and-llm-2026-09-25-155)).
 
 ## `fused`: how the cascade runs it
 

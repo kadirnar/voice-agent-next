@@ -4,7 +4,8 @@
 extends: local-gpu
 
 # The model the `ollama-pull` service fetches (OLLAMA_MODEL in the compose file).
-llm: ollama/${OLLAMA_MODEL:-qwen3.5:9b}
+# reasoning_effort none: Qwen3.5 would think before every answer (seconds of silence).
+llm: {provider: "ollama/${OLLAMA_MODEL:-qwen3.5:4b}", reasoning_effort: none}
 
 agent:
   instructions: >-

@@ -55,12 +55,14 @@ you only write what differs:
 
 ```yaml
 extends: local-cpu
-llm: ollama/${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}
+llm: {provider: "ollama/${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}", reasoning_effort: none}
 agent:
   instructions: You are a pirate. Answer in one sentence.
 ```
 
-To use another Ollama model, set `OLLAMA_MODEL`. Both the pull and the config read it:
+To use another Ollama model, set `OLLAMA_MODEL`. Both the pull and the config read it.
+`reasoning_effort: none` keeps models that think by default (Qwen3.5) from reasoning
+before every answer:
 
 ```bash
 OLLAMA_MODEL=qwen3.5:4b docker compose -f docker/compose.yaml up
@@ -92,10 +94,10 @@ on the host. The override changes four things:
 * The agents run the CUDA image.
 * The config is `docker/config/local-gpu.yaml`, which extends the
   [`local-gpu` preset](../presets.md): faster-whisper `large-v3-turbo` on CUDA and Kokoro.
-* Ollama runs `qwen3.5:9b` on the GPU.
+* Ollama runs `qwen3.5:4b` (thinking off) on the GPU.
 * Ollama and the agents reserve the GPUs (`deploy.resources.reservations.devices`).
 
-The first start downloads about 6.6 GB for the LLM and 1.8 GB of models.
+The first start downloads about 3.4 GB for the LLM and 1.8 GB of models.
 
 ## The images
 
@@ -103,7 +105,7 @@ The first start downloads about 6.6 GB for the LLM and 1.8 GB of models.
 | --- | --- | --- |
 | Tags | `latest`, `main`, `X.Y.Z`, `X.Y`, `sha-…` | the same with `-cuda` (`latest-cuda`, ...) |
 | Platforms | `linux/amd64`, `linux/arm64` | `linux/amd64` |
-| Size (uncompressed, amd64) | 515 MB; 789 MB with `BAKE_MODELS=preset:local-cpu` | 3.9 GB (cuBLAS, cuDNN, CUDA runtime wheels) |
+| Size (uncompressed, amd64) | 515 MB; 789 MB with `BAKE_MODELS=preset:local-cpu` (measured before `text-turn` was added: +32 MB of packages, +137 MB baked model) | 3.9 GB (cuBLAS, cuDNN, CUDA runtime wheels) |
 | Extras | `sherpa-onnx openai kokoro silero smart-turn text-turn webrtc resample`: the `local-cpu` preset and WebRTC | `faster-whisper openai kokoro silero smart-turn webrtc resample cuda`: the `local-gpu` preset, cuBLAS 12 |
 | ONNX Runtime | `onnxruntime` (CPU) | `onnxruntime-gpu[cuda,cudnn]` 1.26 (CUDA 12, cuDNN 9) |
 
