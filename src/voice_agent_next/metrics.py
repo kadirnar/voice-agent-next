@@ -250,6 +250,9 @@ class EndpointingMetrics:
     text_probability: float | None = None
     """Fused turn detector: the text half's end-of-turn probability (``None``: no
     transcript, or over its latency budget)."""
+    detector_error: str | None = None
+    """The turn detector failed at this pause (``repr`` of its error): the delay was
+    chosen as if there were no detector."""
     timestamp: float = field(default_factory=_ts)
     type: Literal["endpointing"] = "endpointing"
 
