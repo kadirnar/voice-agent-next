@@ -9,9 +9,9 @@ number is read off the recording with a reference VAD
 ``items.jsonl``, ``summary.json`` and ``report.md`` (:mod:`~voice_agent_next.bench.results`).
 
 Tracks: T1 latency (:mod:`voice_agent_next.bench.tracks.latency`), T7 framework overhead
-(:mod:`voice_agent_next.bench.tracks.overhead`) with its CI regression gate, T6 tool use
-(:mod:`voice_agent_next.bench.tracks.tools`)
-(:mod:`voice_agent_next.bench.gate`). CLI: ``van bench``.
+(:mod:`voice_agent_next.bench.tracks.overhead`) with its CI regression gate
+(:mod:`voice_agent_next.bench.gate`), T6 tool use (:mod:`voice_agent_next.bench.tracks.tools`).
+CLI: ``van bench``.
 """
 
 from __future__ import annotations
