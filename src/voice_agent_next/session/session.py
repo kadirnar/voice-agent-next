@@ -1056,7 +1056,7 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
                 return
             # the model waits for an output: acknowledge now, deliver the result later
             ack: asyncio.Future[FunctionCallOutput] = asyncio.get_running_loop().create_future()
-            text = tool.ack if tool.ack is not None else DEFAULT_TOOL_ACK
+            text = tool.ack if tool is not None and tool.ack is not None else DEFAULT_TOOL_ACK
             ack.set_result(FunctionCallOutput(call_id=call.call_id, name=call.name, output=text))
             run = _ToolRun(call, tool, ack, ack=True)
         if resp is not None:

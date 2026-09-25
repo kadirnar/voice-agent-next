@@ -6,8 +6,9 @@ Submodules register their components on import:
 * ``stt``      — realtime transcription / batch transcription
 * ``tts``      — speech synthesis
 * ``realtime`` — the Realtime speech-to-speech engine (+ compatible backends)
+* ``live``     — the GPT-Live full-duplex engine (Live protocol, delegation)
 """
 
 from __future__ import annotations
 
-from . import llm, realtime, stt, tts  # noqa: F401  (import registers the components)
+from . import live, llm, realtime, stt, tts  # noqa: F401  (import registers the components)
