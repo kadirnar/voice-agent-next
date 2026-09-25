@@ -155,6 +155,7 @@ nav:
           - Pocket TTS: providers/pocket-tts.md
           - Chatterbox: providers/chatterbox.md
           - Qwen3-TTS: providers/qwen-tts.md
+          - MLX (Apple silicon): providers/mlx.md
           - Silero VAD: providers/silero.md
           - Smart Turn: providers/smart_turn.md
   - Transports:

@@ -17,7 +17,7 @@ $ van run                      # no preset/config/flags: the first ready preset,
 | Preset | Where | Stack | Needs |
 |---|---|---|---|
 | `local-gpu` | local | faster-whisper `large-v3-turbo` (CUDA) · Ollama `qwen3.5:9b` · Kokoro v1.0 fp16 · Silero · Smart Turn | Linux/Windows, an NVIDIA GPU usable by CTranslate2, Ollama |
-| `apple` | local | sherpa-onnx `zipformer-en-kroko` · Ollama `qwen3.5:4b` (Metal) · Kokoro (CoreML) · Silero · Smart Turn | Apple silicon with an arm64 Python, Ollama |
+| `apple` | local | MLX: Parakeet TDT 0.6B v3 (parakeet-mlx) · mlx-lm `Qwen3.5-4B-4bit` → Ollama `qwen3.5:4b` · Kokoro (mlx-audio) · Silero · Smart Turn | Apple silicon with an arm64 Python, the `mlx` extra, `mlx_lm.server` or Ollama |
 | `local-cpu` | local | sherpa-onnx `zipformer-en-kroko` · Ollama `LiquidAI/lfm2.5-1.2b-instruct` · Kokoro v1.0 fp16 · Silero · Smart Turn | any OS, Ollama |
 | `hybrid` | hybrid | local-cpu's STT/TTS · Claude Haiku 4.5 → Groq `gpt-oss-120b` → local Ollama | one LLM: `ANTHROPIC_API_KEY`, `GROQ_API_KEY` or Ollama |
 | `cloud-fast` | cloud | Deepgram Flux · Groq → Cerebras `gpt-oss-120b` · Cartesia Sonic 3.6 | `DEEPGRAM_API_KEY`, `GROQ_API_KEY` or `CEREBRAS_API_KEY`, `CARTESIA_API_KEY` |
@@ -50,8 +50,11 @@ preset's `rationale` (shown by `van presets <name>`) has the details.
   speed. Qwen3.5-9B is note 03's LLM for a 16 GB GPU. The preset fails its check when
   faster-whisper would fall back to CPU (for example, cuBLAS 12 is missing), and the
   check prints the install command.
-* **apple.** The same streaming STT as local-cpu. Ollama runs the LLM on Metal and Kokoro
-  picks CoreML. MLX runtimes (parakeet-mlx, mlx-audio) are not integrated yet.
+* **apple.** Everything on the GPU through MLX ([mlx.md](providers/mlx.md)): Parakeet TDT
+  0.6B v3 streams through parakeet-mlx (25 European languages) and has the final transcript
+  when the turn ends, `mlx_lm.server` runs Qwen3.5-4B at 4-bit (Ollama is the failover when
+  no mlx-lm server runs), and Kokoro-82M runs through mlx-audio. The check says how to
+  start the mlx-lm server.
 * **cloud-fast.** Deepgram Flux ends turns itself, so there is no VAD or endpointing
   delay. gpt-oss-120b on Groq has a 98 / 217 ms p50 / p95 TTFAT in Pipecat's benchmark,
   and Cerebras is the fastest host of the same model. Sonic 3.6 tops the TTS arena.
@@ -72,6 +75,7 @@ preset's `rationale` (shown by `van presets <name>`) has the details.
 | `accelerator: cuda`: an NVIDIA GPU, and that faster-whisper's `device="auto"` would use it (`hardware.select_ctranslate2_backend`) | the fix from `van doctor`, e.g. `pip install 'voice-agent-next[cuda]'` |
 | `accelerator: apple`: Apple silicon, not an x86_64 Python under Rosetta | install an arm64 Python |
 | Ollama: the server answers `GET /api/tags` at the URL the provider uses (`base_url`, `OLLAMA_BASE_URL`, `OLLAMA_HOST`), and has the model (`:latest` implied) | `ollama serve` / `ollama pull <model>` |
+| mlx-lm: the server answers `GET /v1/models` at the URL the provider uses (`base_url`, `MLX_LM_BASE_URL`); it loads the model by itself | `python -m mlx_lm.server --model <model>` |
 | `--transport local`: `sounddevice` | the `audio` extra |
 
 **Failover lists are pruned.** A chain is ready when at least one member is ready. The
