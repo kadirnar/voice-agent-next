@@ -136,7 +136,6 @@ def test_sdist_contents(dists: dict[str, Path]) -> None:
     top_level = {n.split("/", 1)[0] for n in rel}
     assert top_level <= {
         "src",
-        "tests",
         "pyproject.toml",
         "PKG-INFO",
         "README.md",

@@ -158,12 +158,11 @@ explicit = true
 [tool.hatch.build.targets.wheel]
 packages = ["src/voice_agent_next"]
 
-# Anchored patterns (a bare "README.md" would also match examples/README.md, ...). Tests are
-# shipped so downstream packagers can run them from the sdist; docs, benchmarks and CI are not.
+# Anchored patterns (a bare "README.md" would also match examples/README.md, ...). No tests:
+# the suite also reads docs/, examples/ and benchmarks/, so it only runs from a repo clone.
 [tool.hatch.build.targets.sdist]
 include = [
   "/src",
-  "/tests",
   "/README.md",
   "/CHANGELOG.md",
   "/LICENSE",

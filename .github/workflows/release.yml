@@ -1,0 +1,265 @@
+name: Release
+
+# Tag-driven releases (docs/releasing.md).
+#
+# * Push a `v<version>` tag (it must equal `project.version` in pyproject.toml): build the
+#   sdist + wheel, verify them, install the wheel on Linux, macOS and Windows, publish to PyPI
+#   with trusted publishing (OIDC, no API token; environment `pypi`), then create the GitHub
+#   Release with the changelog section as notes and the distributions attached.
+# * Run it manually (Actions > Release > Run workflow): a dry run. Everything except the PyPI
+#   upload and the GitHub Release; the notes are in the job summary and every file is an
+#   artifact. Tick `testpypi` to also upload to TestPyPI (environment `testpypi`).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      testpypi:
+        description: "Also upload to TestPyPI (needs a version not on TestPyPI yet)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  GIT_CLIFF_VERSION: "2.14.2" # keep in sync with cliff.toml
+  TWINE_VERSION: "7.0.0" # >= 7 understands Metadata-Version 2.5 (hatchling >= 1.28)
+  PYTHONUNBUFFERED: "1"
+  FORCE_COLOR: "1"
+
+jobs:
+  build:
+    name: build sdist + wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the changelog needs the history and tags
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false # never restore a cache into a release build
+          python-version: "3.12"
+
+      - name: Version and tag
+        id: version
+        shell: bash
+        run: |
+          version="$(uv version --short)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$version" =~ (a|b|rc|\.dev)[0-9]+$ ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match pyproject.toml version $version (expected v$version)"
+              exit 1
+            fi
+            if [[ "$version" == *.dev* ]]; then
+              echo "::error::development versions ($version) are not released; bump with 'uv version'"
+              exit 1
+            fi
+            if ! grep -q "^## \[$version\]" CHANGELOG.md; then
+              echo "::error::CHANGELOG.md has no '## [$version]' section: run git-cliff --tag v$version -o CHANGELOG.md"
+              exit 1
+            fi
+          fi
+          echo "Version **$version** ($GITHUB_EVENT_NAME on \`$GITHUB_REF_NAME\`)" >> "$GITHUB_STEP_SUMMARY"
+
+      # --no-sources: build exactly what PyPI users get, ignoring [tool.uv.sources]
+      - name: Build
+        run: uv build --no-sources
+
+      - name: twine check --strict
+        run: uvx "twine==${TWINE_VERSION}" check --strict dist/*
+
+      - name: Inspect the distributions
+        shell: bash
+        run: |
+          python3 - "${{ steps.version.outputs.version }}" <<'EOF'
+          import os, sys, tarfile, zipfile
+          from pathlib import Path
+
+          version = sys.argv[1]
+          wheel = Path(f"dist/voice_agent_next-{version}-py3-none-any.whl")
+          sdist = Path(f"dist/voice_agent_next-{version}.tar.gz")
+          wheel_names = zipfile.ZipFile(wheel).namelist()
+          sdist_names = [m.name for m in tarfile.open(sdist) if m.isfile()]
+          errors = []
+          if "voice_agent_next/py.typed" not in wheel_names:
+              errors.append("wheel: py.typed missing")
+          if f"voice_agent_next-{version}.dist-info/licenses/LICENSE" not in wheel_names:
+              errors.append("wheel: LICENSE missing")
+          top = {n.split("/", 1)[0] for n in wheel_names}
+          if top != {"voice_agent_next", f"voice_agent_next-{version}.dist-info"}:
+              errors.append(f"wheel: unexpected top-level entries {sorted(top)}")
+          prefix = f"voice_agent_next-{version}/"
+          rel = {n.removeprefix(prefix) for n in sdist_names}
+          allowed = {"src", "pyproject.toml", "PKG-INFO", "README.md", "CHANGELOG.md", "LICENSE", ".gitignore"}
+          extra = {n.split("/", 1)[0] for n in rel} - allowed
+          if extra:
+              errors.append(f"sdist: unexpected top-level entries {sorted(extra)}")
+          for path in (wheel, sdist):
+              if path.stat().st_size > 4_000_000:
+                  errors.append(f"{path.name}: {path.stat().st_size} bytes (> 4 MB)")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("\n| file | size | entries |\n| --- | ---: | ---: |\n")
+              summary.write(f"| `{wheel.name}` | {wheel.stat().st_size:,} B | {len(wheel_names)} |\n")
+              summary.write(f"| `{sdist.name}` | {sdist.stat().st_size:,} B | {len(sdist_names)} |\n")
+          for e in errors:
+              print(f"::error::{e}")
+          sys.exit(1 if errors else 0)
+          EOF
+
+      - name: Release notes (git-cliff)
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            range="--current"
+          else
+            range="--unreleased"
+          fi
+          uvx "git-cliff==${GIT_CLIFF_VERSION}" $range --strip all -o release-notes.md
+          {
+            echo
+            echo "## Release notes"
+            echo
+            cat release-notes.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
+  # A clean virtual environment per OS, no checkout: only the built wheel is importable.
+  verify:
+    name: install wheel (${{ matrix.os }}, py${{ matrix.python }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.14" }
+          - { os: macos-latest, python: "3.12" }
+          - { os: windows-latest, python: "3.12" }
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+          python-version: ${{ matrix.python }}
+      - name: Install the wheel into a clean venv
+        shell: bash
+        run: |
+          uv venv --no-project --python "${{ matrix.python }}" "$RUNNER_TEMP/venv"
+          uv pip install --python "$RUNNER_TEMP/venv" "dist/voice_agent_next-${VERSION}-py3-none-any.whl"
+      - name: Smoke test
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then bin="$RUNNER_TEMP/venv/Scripts"; else bin="$RUNNER_TEMP/venv/bin"; fi
+          "$bin/python" -c "import sys, voice_agent_next as v; print(v.__file__); assert v.__version__ == sys.argv[1], v.__version__" "$VERSION"
+          "$bin/van" --help
+          "$bin/van" version
+          "$bin/van" providers --json > providers.json
+          "$bin/python" -c "import json; n = len(json.load(open('providers.json'))); print(n, 'providers'); assert n > 0"
+      - name: Install the sdist (builds the wheel from it)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          uv venv --no-project --python "${{ matrix.python }}" "$RUNNER_TEMP/venv-sdist"
+          uv pip install --python "$RUNNER_TEMP/venv-sdist" "dist/voice_agent_next-${VERSION}.tar.gz"
+          "$RUNNER_TEMP/venv-sdist/bin/van" version
+
+  publish-pypi:
+    name: publish to PyPI
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/voice-agent-next/${{ needs.build.outputs.version }}/
+    permissions:
+      id-token: write # trusted publishing (OIDC) and PEP 740 attestations
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  publish-testpypi:
+    name: publish to TestPyPI (dry run)
+    if: github.event_name == 'workflow_dispatch' && inputs.testpypi
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/voice-agent-next/${{ needs.build.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  github-release:
+    name: GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build, publish-pypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        shell: bash
+        run: |
+          flags=()
+          if [[ "$PRERELEASE" == "true" ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" artifacts/dist/* \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file artifacts/release-notes/release-notes.md \
+            "${flags[@]}"
