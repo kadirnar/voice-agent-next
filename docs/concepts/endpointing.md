@@ -315,10 +315,11 @@ found 92 % premature replies in mid-turn pauses, 100 % false barge-ins on "uh-hu
 * **Dead air:** Smart Turn says "not done" at the end of short or clipped answers ("Yes.",
   "For two people tonight."; *p* = 0.02–0.24), and the fixed policy then waited 2.5 s. On
   eot-bench English (400 real turns) it does so at **25.5 %** of the turn ends.
-* **Premature replies:** Smart Turn is confident (0.79–0.99) at three of the four
-  mid-turn pauses because the first part is a complete sentence. The reply starts
-  ~0.55 s into a 0.5–1.0 s pause. The fourth ("I would like to book a table,") was held
-  correctly — until the backchannel below leaked into it.
+* **Premature replies:** Smart Turn is confident at every mid-turn pause of the battery
+  (0.57–0.99): three first parts are complete sentences, and even "I would like to book
+  a table," scores 0.88 on this voice (0.46 when the "uh-huh" transcript below had leaked
+  into the turn). The reply then starts ~0.55 s into a 0.5–1.0 s pause. Only the 0.5 s
+  pause is now safe: the commit waits while the VAD has not yet confirmed resumed speech.
 * **Backchannels:** see [interruptions](interruptions.md#short-utterances-small-asr-models).
 
 eot-bench English with Smart Turn v3.2 (int8), the cascade's fixed policy at several
