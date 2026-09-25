@@ -155,6 +155,7 @@ nav:
       - deploy/index.md
       - Realtime server: deploy/realtime-server.md
       - Serving (van serve): deploy/serving.md
+      - Docker: deploy/docker.md
       - Telephony: transports/telephony.md
       - WebRTC: transports/webrtc.md
   - Benchmarks:

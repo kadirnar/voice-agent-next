@@ -1,0 +1,12 @@
+# The images need the package sources, the lock file and the two container scripts:
+# everything else stays out of the build context (docker/Dockerfile).
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src/
+!docker/entrypoint.sh
+!docker/healthcheck.py
+**/__pycache__
+**/*.py[cod]

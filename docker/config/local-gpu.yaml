@@ -1,0 +1,13 @@
+# The agent served by docker/compose.gpu.yaml (mounted at /config/agent.yaml).
+# `extends` starts from the `local-gpu` preset (docs/presets.md): faster-whisper
+# large-v3-turbo on CUDA, Ollama on the GPU, Kokoro, Silero VAD and Smart Turn.
+extends: local-gpu
+
+# The model the `ollama-pull` service fetches (OLLAMA_MODEL in the compose file).
+llm: ollama/${OLLAMA_MODEL:-qwen3.5:9b}
+
+agent:
+  instructions: >-
+    You are a friendly, concise voice assistant running locally on a GPU.
+    Answer in one or two short sentences.
+  greeting: Hi! I run entirely on this machine. What can I do for you?

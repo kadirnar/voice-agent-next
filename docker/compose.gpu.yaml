@@ -1,0 +1,46 @@
+# NVIDIA GPU variant of docker/compose.yaml: the CUDA image, the local-gpu stack
+# (faster-whisper large-v3-turbo on CUDA, Qwen3.5-9B in Ollama on the GPU, Kokoro on CUDA).
+#
+#   docker compose -f docker/compose.yaml -f docker/compose.gpu.yaml up --build
+#
+# Needs the NVIDIA driver and the NVIDIA Container Toolkit on the host. First start
+# downloads ~6.6 GB (Qwen3.5-9B) plus ~1.8 GB of models. Details: docs/deploy/docker.md.
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+x-cuda: &cuda
+  image: ${VAN_CUDA_IMAGE:-ghcr.io/kadirnar/voice-agent-next:latest-cuda}
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+    target: cuda
+    args:
+      EXTRAS: faster-whisper openai kokoro silero smart-turn webrtc resample cuda
+      ONNXRUNTIME_GPU: onnxruntime-gpu[cuda,cudnn]~=1.26.0
+  environment:
+    OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3.5:9b}
+  volumes:
+    - ./config/local-gpu.yaml:/config/agent.yaml:ro
+
+services:
+  ollama:
+    <<: *gpu
+
+  ollama-pull:
+    command: ["pull", "${OLLAMA_MODEL:-qwen3.5:9b}"]
+
+  models:
+    <<: *cuda
+
+  agent-ws:
+    <<: [*cuda, *gpu]
+
+  agent-webrtc:
+    <<: [*cuda, *gpu]

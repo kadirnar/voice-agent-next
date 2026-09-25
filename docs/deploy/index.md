@@ -8,6 +8,7 @@ How users reach your agent in production:
 | A web or mobile app over the internet | WebRTC transport + one HTTP signalling endpoint | [WebRTC](../transports/webrtc.md) |
 | A web app on a good network, or a backend-to-backend link | WebSocket transport | [WebSocket](../transports/websocket.md) |
 | Phone calls | Twilio, Telnyx, Vonage or Plivo media streams | [Telephony](../transports/telephony.md) |
+| Containers: a fully local stack with `docker compose up`, or images for your cluster | Docker images (CPU, CUDA) and compose files | [Docker](docker.md) |
 
 ## One session per connection
 
