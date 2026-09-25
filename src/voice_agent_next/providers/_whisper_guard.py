@@ -88,7 +88,7 @@ class HallucinationGuard:
 
     A segment is dropped when:
 
-    1. it has no word characters (``"..."``, ``"♪"``);
+    1. it has no word characters (``"..."``, ``"♪"``), unless :attr:`drop_empty` is off;
     2. its normalized text is in :attr:`artifacts`;
     3. its normalized text is in :attr:`suspects` and there is other evidence of
        non-speech: ``no_speech_prob >= suspect_no_speech_threshold``, ``avg_logprob <
@@ -117,6 +117,7 @@ class HallucinationGuard:
     max_ngram_repeats: int | None = 4
     artifacts: tuple[str, ...] = ARTIFACT_PHRASES
     suspects: tuple[str, ...] = SUSPECT_PHRASES
+    drop_empty: bool = True
 
     def __post_init__(self) -> None:
         if self.max_ngram < 1:
@@ -140,6 +141,7 @@ class HallucinationGuard:
             max_ngram_repeats=None,
             artifacts=(),
             suspects=(),
+            drop_empty=False,
         )
 
     def weak_vad(self, vad_confidence: float | None) -> bool:
@@ -156,7 +158,7 @@ class HallucinationGuard:
         logprob = _number(segment, "avg_logprob")
         ratio = _number(segment, "compression_ratio")
         weak = self.weak_vad(vad_confidence)
-        if not text:
+        if not text and self.drop_empty:
             return "no words"
         if text in self.artifacts:
             return "known artifact"
