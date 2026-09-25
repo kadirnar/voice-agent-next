@@ -739,39 +739,51 @@ class AgentSession(EventEmitter):
             self._schedule_close("engine_closed")
 
     async def _playout_loop(self) -> None:
-        transport = self.transport
-        fmt = transport.output_format
+        fmt = self.transport.output_format
         resampler = StreamResampler(fmt.sample_rate, fmt.channels)
+        held: str | None = None  # the response whose audio the resampler holds back
         async for item in self._out:
             if isinstance(item, _EndOfResponse):
                 resp = self._responses.get(item.response_id)
                 if resp is not None and not resp.interrupted:
+                    if held == item.response_id:
+                        # the resampler's filter delay holds back the end of the response
+                        # (e.g. 44 ms at 24 -> 8 kHz with soxr): play it with the response
+                        held = None
+                        await self._play_frame(resp, resampler.flush())
                     delay = max(0.0, self._virtual_end - now())
                     self._tasks.spawn(self._finish_after(resp, delay))
                 continue
             resp = self._responses.get(item.response_id)
             if resp is None or resp.interrupted:
                 continue
-            frame = resampler.push(item.frame)
-            if not frame:
-                continue
-            await self._wait_for_playout_slot()
-            if resp.interrupted:
-                continue
-            t = now()
-            start = max(t, self._virtual_end)
-            self._virtual_end = start + frame.duration
-            resp.segments.append((start, frame.duration))
-            if resp.first_audio_at is None:
-                resp.first_audio_at = t
-                if resp.turn is not None and resp.turn.first_audio_at is None:
-                    resp.turn.first_audio_at = t
-                self._set_agent_state(AgentState.SPEAKING)
-            if self._processors is not None:
-                self._processors.process_render(frame)
-            if self._taps:
-                self._notify("agent_audio", frame, start)
-            await transport.write_audio(frame)
+            if held is not None and held != item.response_id:
+                # the tail of an interrupted response must not open the next one
+                resampler = StreamResampler(fmt.sample_rate, fmt.channels)
+            held = item.response_id
+            await self._play_frame(resp, resampler.push(item.frame))
+
+    async def _play_frame(self, resp: _Response, frame: AudioFrame) -> None:
+        """Send one (resampled) frame of ``resp`` on the virtual playback clock."""
+        if not frame:
+            return
+        await self._wait_for_playout_slot()
+        if resp.interrupted:
+            return
+        t = now()
+        start = max(t, self._virtual_end)
+        self._virtual_end = start + frame.duration
+        resp.segments.append((start, frame.duration))
+        if resp.first_audio_at is None:
+            resp.first_audio_at = t
+            if resp.turn is not None and resp.turn.first_audio_at is None:
+                resp.turn.first_audio_at = t
+            self._set_agent_state(AgentState.SPEAKING)
+        if self._processors is not None:
+            self._processors.process_render(frame)
+        if self._taps:
+            self._notify("agent_audio", frame, start)
+        await self.transport.write_audio(frame)
 
     # ------------------------------------------------------------ event handling
     async def _handle(self, ev: EngineEvent) -> None:

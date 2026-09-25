@@ -624,6 +624,26 @@ async def test_dropped_connection_is_resumed_and_buffered_audio_delivered(
     assert bytes(second.audio) == after
 
 
+async def test_a_drop_noticed_by_a_send_keeps_the_close_code(fake: Callable[..., Any]) -> None:
+    """A send can hit the closed socket before the receive loop reads the close frame
+    (a loaded runner): the reconnect must still report, and act on, the server's code."""
+    server = await fake()
+    conn, events = await connect(server)
+    recv = conn._recv_task
+    assert recv is not None
+    recv.cancel()  # the receive loop has not got to the close frame yet
+    await asyncio.gather(recv, return_exceptions=True)
+    ws = conn._ws
+    assert ws is not None
+    await server.drop(1011, "Internal error encountered.")
+    await wait_for(lambda: ws.close_code is not None)
+    await conn.send_audio(quiet_noise(0.02)[0])  # this send notices the drop
+    await events.wait(lambda: resumed(events))
+    await conn.aclose()
+    reconnecting = events.of(EngineStatus)[0]
+    assert reconnecting.status == "reconnecting" and "1011" in (reconnecting.detail or "")
+
+
 async def test_expired_handle_falls_back_to_a_fresh_session_with_history(
     fake: Callable[..., Any],
 ) -> None:

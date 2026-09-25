@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -19,6 +21,7 @@ from voice_agent_next import (
     SessionOptions,
     function_tool,
 )
+from voice_agent_next.audio.frame import AudioFormat
 from voice_agent_next.chat import AudioContent
 from voice_agent_next.errors import ConfigurationError
 from voice_agent_next.metrics import TurnMetrics
@@ -33,6 +36,7 @@ from voice_agent_next.providers.mock import (
     synth_speech,
 )
 from voice_agent_next.transports import FileTransport, LoopbackTransport
+from voice_agent_next.utils import now
 
 
 class Recorder:
@@ -140,6 +144,76 @@ async def test_greeting_then_turn_then_close_on_hangup(kind: str) -> None:
     assert rec.of("close")[0].reason == "user_disconnected"
     played = sum(p.frame.duration for p in transport.played_log)
     assert played > 1.0  # greeting + answer were played
+
+
+async def test_loopback_playout_keeps_its_sample_clock_through_late_wakeups() -> None:
+    """Queued frames play back to back, like a sound card's: a stalled event loop (a coarse
+    timer, a loaded machine) must not make the simulated device fall behind."""
+    transport = LoopbackTransport(realtime_playout=True)
+    await transport.start()
+    for _ in range(10):
+        await transport.write_audio(AudioFrame.silence(0.02, 24_000))
+    await asyncio.sleep(0.03)
+    time.sleep(0.06)  # noqa: ASYNC251 - the loop stalls in the middle of playback
+    await asyncio.wait_for(transport.wait_for_playout(), 2)
+    log = transport.played_log
+    assert len(log) == 10
+    for prev, cur in itertools.pairwise(log):
+        assert cur.start_time == pytest.approx(prev.start_time + prev.frame.duration, abs=1e-9)
+    await transport.aclose()
+
+
+async def test_loopback_playout_never_starts_a_frame_in_the_future(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timers that fire early (Windows: up to a 15.6 ms clock tick) must not end a frame
+    early: the next one would be scheduled ahead of time, and a clear() in between would
+    let it "play" after the clear."""
+    wait_for = asyncio.wait_for
+
+    async def early_wait_for(aw: Any, timeout: float | None) -> Any:
+        if timeout is None or timeout <= 0.016:
+            return await wait_for(aw, timeout)
+        return await wait_for(aw, timeout - 0.016)
+
+    monkeypatch.setattr(asyncio, "wait_for", early_wait_for)
+    transport = LoopbackTransport(realtime_playout=True)
+    await transport.start()
+    late: list[float] = []
+
+    async def listen() -> None:
+        async for played in transport.agent_audio():
+            late.append(played.start_time - now())
+
+    listener = asyncio.create_task(listen())
+    for _ in range(10):
+        await transport.write_audio(AudioFrame.silence(0.02, 24_000))
+    await wait_for(transport.wait_for_playout(), 2)
+    await asyncio.sleep(0.03)
+    listener.cancel()
+    await transport.aclose()
+    assert len(late) == 10 and max(late) <= 0.0
+
+
+async def test_resampled_responses_are_played_to_the_end() -> None:
+    """24 kHz engine audio on an 8 kHz line: the resampler's filter delay must not hold back
+    the end of a response (soxr keeps 44 ms) until the next one starts."""
+    engine = MockEngine(transcripts=["hello"], responses=["Hi! Nice to meet you."])
+    session = AgentSession(engine)
+    transport = LoopbackTransport(output_format=AudioFormat(8_000, 1))
+    await session.start(Agent("x", greeting="Welcome."), transport)
+
+    def samples() -> int:
+        return sum(len(p.frame.data) // 2 for p in transport.played_log)
+
+    await wait_for(lambda: session.agent_state == AgentState.LISTENING and samples() > 0)
+    greeting = samples()
+    assert greeting == pytest.approx(len("Welcome.") / 15 * 8_000, abs=2)
+    await speak(transport)
+    await wait_for(lambda: len(session.history.messages()) == 3)
+    await wait_for(lambda: session.agent_state == AgentState.LISTENING)
+    assert samples() - greeting == pytest.approx(len("Hi! Nice to meet you.") / 15 * 8_000, abs=2)
+    await session.aclose()
 
 
 @pytest.mark.parametrize("kind", ENGINES)
