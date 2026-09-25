@@ -41,6 +41,7 @@ def fake_env(
     apple: AppleSilicon | None = None,
     backend: Backend | None = None,
     ollama: Sequence[str] | None = LOCAL_MODELS,
+    mlx_lm: Sequence[str] | None = None,
 ) -> Environment:
     """A machine with every module installed except ``missing``."""
     absent = set(missing)
@@ -58,6 +59,7 @@ def fake_env(
         apple_silicon=lambda: apple,
         cuda_backend=lambda: backend,
         ollama_models=ollama_models,
+        mlx_lm_models=lambda url: mlx_lm,
     )
     env.probed_urls = urls  # type: ignore[attr-defined]
     return env

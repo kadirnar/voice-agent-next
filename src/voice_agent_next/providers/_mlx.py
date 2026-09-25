@@ -71,13 +71,26 @@ class MLXWorker:
         self._executor: ThreadPoolExecutor | None = None
         self._lock = threading.Lock()
 
-    async def run(self, fn: Callable[..., T], *args: Any) -> T:
-        """Run ``fn(*args)`` on the worker thread and await its result."""
+    def _get(self) -> ThreadPoolExecutor:
         with self._lock:
             if self._executor is None:
                 self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=self._name)
-            executor = self._executor
-        return await asyncio.get_running_loop().run_in_executor(executor, fn, *args)
+            return self._executor
+
+    async def run(self, fn: Callable[..., T], *args: Any) -> T:
+        """Run ``fn(*args)`` on the worker thread and await its result."""
+        return await asyncio.get_running_loop().run_in_executor(self._get(), fn, *args)
+
+    def submit(self, fn: Callable[..., Any], *args: Any) -> None:
+        """Queue ``fn(*args)`` without waiting (cleanup from a cancelled task)."""
+        self._get().submit(fn, *args)
+
+    def close(self) -> None:
+        """Stop the thread once queued work is done (a later call starts a new one)."""
+        with self._lock:
+            executor, self._executor = self._executor, None
+        if executor is not None:
+            executor.shutdown(wait=False)
 
 
 WORKER = MLXWorker()
