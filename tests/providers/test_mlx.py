@@ -361,3 +361,13 @@ async def test_whisper_models_do_not_evict_each_other(mlx_fakes: MLXFakes) -> No
     assert mlx_fakes.whisper_loads[1] == ("/hf/mlx-community/whisper-base.en-mlx", "float32")
     assert mlx_fakes.whisper_calls[-2]["x"] == 1
     assert mlx_fakes.whisper_calls[-1]["path_or_hf_repo"] == "/hf/mlx-community/whisper-tiny"
+
+
+async def test_streaming_steps_pace_themselves(mlx_fakes: MLXFakes) -> None:
+    """A step slower than chunk_duration makes the next step wait for more audio."""
+    stt = create("stt", "mlx", chunk_duration=0.32)
+    stream = stt.stream()
+    assert stream._threshold == 5120  # type: ignore[attr-defined]
+    stream._step_time = 0.4  # type: ignore[attr-defined]
+    assert stream._threshold == 12_800  # type: ignore[attr-defined]  # 2 x 0.4 s of audio
+    await stream.aclose()

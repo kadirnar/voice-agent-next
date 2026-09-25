@@ -51,6 +51,8 @@ _SAMPLE_RATE = 16_000
 _FILES = ("config.json", "model.safetensors")
 _DTYPES = ("bfloat16", "float16", "float32")
 _MIN_TAIL = _SAMPLE_RATE // 20
+_PACING = 2.0
+"""Queue at least this many times the last step's duration of audio between steps."""
 """Shorter audio left at a flush is not fed (50 ms: a few mel windows)."""
 
 DEFAULT_MODEL = "parakeet-tdt-0.6b-v3"
@@ -368,6 +370,8 @@ class _ParakeetStream(STTStream):
         self._partial = ""
         self._speaking = False
         self._chunk = max(1, round(stt.chunk_duration * _SAMPLE_RATE))
+        self._step_time = 0.0
+        """Duration of the last streaming step on the MLX thread (seconds)."""
         super().__init__(stt, language=language)
 
     # -------------------------------------------------------------- event loop
@@ -394,7 +398,7 @@ class _ParakeetStream(STTStream):
                     else:
                         assert isinstance(nxt, AudioFrame)
                         self._queue(nxt)
-                if self._pending_samples >= self._chunk or (flush and self._pending):
+                if self._pending_samples >= self._threshold or (flush and self._pending):
                     self._update(await _mlx.WORKER.run(self._feed_sync, flush))
                 if flush:
                     self._finish(await _mlx.WORKER.run(self._finalize_sync))
@@ -402,6 +406,14 @@ class _ParakeetStream(STTStream):
             if self._streamer is not None:
                 self._streamer = None
                 await _mlx.WORKER.run(stt._close_streamer)
+
+    @property
+    def _threshold(self) -> int:
+        """Samples to queue before the next step: ``chunk_duration``, or more when a step
+        takes longer than that. Every step re-encodes the right-context window, so this keeps
+        the MLX thread at most about half busy: a flush then rarely waits for a step
+        in flight, and the final transcript costs one step."""
+        return max(self._chunk, round(self._step_time * _PACING * _SAMPLE_RATE))
 
     def _queue(self, frame: AudioFrame) -> None:
         samples = frame.to_float32()
@@ -462,11 +474,14 @@ class _ParakeetStream(STTStream):
             self._fed += len(samples)
             return None
         try:
+            t0 = now()
             if self._streamer is None:
                 self._streamer = stt._open_streamer()
             self._streamer.add_audio(stt._audio(samples))
             self._fed += len(samples)
-            return self._streamer.result
+            result = self._streamer.result
+            self._step_time = now() - t0
+            return result
         except Exception as exc:
             raise _mlx.map_error(exc, _PROVIDER, "streaming recognition") from exc
 

@@ -162,18 +162,14 @@ async def test_parakeet_streams_a_clip() -> None:
         f"\nparakeet-mlx {model}: load+warm-up {load:.2f} s; batch final for a 3 s turn "
         f"{min(times) * 1000:.0f} ms (best of 3)"
     )
-    default = stt.context_size
-    for context in (default, (256, 32), (128, 16)):
-        stt.context_size = context
-        text, latency, interims = await _stream_in_real_time(stt, clip)
+    for audio in (turn, clip):
+        text, latency, interims = await _stream_in_real_time(stt, audio)
         print(
-            f"  streaming {clip.duration:.1f} s in real time, context {context}: "
-            f"{interims} interim results, final {latency * 1000:.0f} ms after the flush: "
-            f"{text!r}"
+            f"  streaming {audio.duration:.1f} s in real time: {interims} interim results, "
+            f"final {latency * 1000:.0f} ms after the flush: {text!r}"
         )
-        if context == default:
-            assert "your country can do for you" in _normalize(text)
-            assert latency < 1.0
+        assert latency < 1.0
+    assert "your country can do for you" in _normalize(text)
     await stt.aclose()
 
 
