@@ -13,14 +13,25 @@ L16 audio, marks, clear, DTMF, start/stop) to the library's transport model::
         provider="twilio",
         host="0.0.0.0",
         port=8765,
+        stream_secret=os.environ["VAN_TELEPHONY_SECRET"],  # the webhook uses it too
     )
     await server.serve_forever()
 
-See ``docs/transports/telephony.md`` for the provider setup (TwiML, NCCO, XML).
+Every stream must carry the stream token of its call (:func:`stream_token`): the markup
+helpers add it when given the secret and the call ID. See ``docs/transports/telephony.md``
+for the provider setup (TwiML, NCCO, XML).
 """
 
 from __future__ import annotations
 
+from .auth import (
+    SECRET_ENV,
+    TOKEN_PARAMETER,
+    stream_token,
+    twilio_signature,
+    validate_twilio_signature,
+    verify_stream_token,
+)
 from .markup import plivo_stream_xml, telnyx_stream_texml, twilio_stream_twiml, vonage_ncco
 from .serializers import (
     SERIALIZERS,
@@ -44,7 +55,9 @@ from .transport import (
 )
 
 __all__ = [
+    "SECRET_ENV",
     "SERIALIZERS",
+    "TOKEN_PARAMETER",
     "AudioCodec",
     "CallInfo",
     "PlivoSerializer",
@@ -61,7 +74,11 @@ __all__ = [
     "create_serializer",
     "plivo_stream_xml",
     "serve_telephony",
+    "stream_token",
     "telnyx_stream_texml",
+    "twilio_signature",
     "twilio_stream_twiml",
+    "validate_twilio_signature",
+    "verify_stream_token",
     "vonage_ncco",
 ]

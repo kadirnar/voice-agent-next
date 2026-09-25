@@ -13,14 +13,17 @@ import httpx
 import numpy as np
 import pytest
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from voice_agent_next import Agent, AgentSession, AgentState, AudioFrame
 from voice_agent_next.audio.codecs import alaw_encode, mulaw_decode, mulaw_encode
+from voice_agent_next.errors import ConfigurationError
 from voice_agent_next.providers.mock import MockEngine, synth_speech
 from voice_agent_next.session import Interrupted, SessionClosed
 from voice_agent_next.transports import create_transport
 from voice_agent_next.transports.telephony import (
+    SECRET_ENV,
+    TOKEN_PARAMETER,
     AudioCodec,
     PlivoSerializer,
     TelephonyServer,
@@ -32,8 +35,12 @@ from voice_agent_next.transports.telephony import (
     VonageTransport,
     create_serializer,
     plivo_stream_xml,
+    stream_token,
     telnyx_stream_texml,
+    twilio_signature,
     twilio_stream_twiml,
+    validate_twilio_signature,
+    verify_stream_token,
     vonage_ncco,
 )
 from voice_agent_next.transports.telephony.serializers import (
@@ -55,6 +62,17 @@ TELNYX_STREAM = "32DE0DEA-53CB-4B21-89A4-9E1819C043BC"
 TELNYX_CALL = "v2:T02llQxIyaRkhfRKxgAP8nY511EhFLizdvdUKJiSw8d6A9BborherQ"
 PLIVO_STREAM = "87654321-4321-4321-4321-cba987654321"
 PLIVO_CALL = "12345678-1234-1234-1234-123456789abc"
+TWILIO_ACCOUNT = "AC00000000000000000000000000000000"
+PLIVO_ACCOUNT = "MAXXXXXXXXXXXXXXXXXX"
+VONAGE_CALL = "63f61863-4a51-4f6b-86e1-46edebcf9356"
+SECRET = "test-stream-secret"
+CALL_IDS = {"twilio": CALL_SID, "telnyx": TELNYX_CALL, "vonage": VONAGE_CALL, "plivo": PLIVO_CALL}
+
+
+@pytest.fixture(autouse=True)
+def _stream_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Servers and transports read the stream secret from the environment by default."""
+    monkeypatch.setenv(SECRET_ENV, SECRET)
 
 
 async def wait_for(predicate: Callable[[], Any], timeout: float = 5.0) -> None:
@@ -75,7 +93,7 @@ def twilio_start(custom: dict[str, str] | None = None) -> dict[str, Any]:
         "event": "start",
         "sequenceNumber": "1",
         "start": {
-            "accountSid": "AC00000000000000000000000000000000",
+            "accountSid": TWILIO_ACCOUNT,
             "streamSid": STREAM_SID,
             "callSid": CALL_SID,
             "tracks": ["inbound"],
@@ -111,7 +129,7 @@ def plivo_start(encoding: str = "audio/x-mulaw", rate: int = 8000) -> dict[str, 
         "start": {
             "callId": PLIVO_CALL,
             "streamId": PLIVO_STREAM,
-            "accountId": "MAXXXXXXXXXXXXXXXXXX",
+            "accountId": PLIVO_ACCOUNT,
             "tracks": ["inbound"],
             "mediaFormat": {"encoding": encoding, "sampleRate": rate},
         },
@@ -332,7 +350,11 @@ def test_hangup_requests(monkeypatch: pytest.MonkeyPatch) -> None:
     twilio.parse(json.dumps(twilio_start()))
     assert twilio.hangup_request() is None  # no credentials
     monkeypatch.setenv("TWILIO_AUTH_TOKEN", "secret")
+    monkeypatch.delenv("TWILIO_ACCOUNT_SID", raising=False)
     twilio = TwilioSerializer(api_base="https://twilio.test")
+    twilio.parse(json.dumps(twilio_start()))
+    assert twilio.hangup_request() is None  # the start's accountSid is never used
+    twilio = TwilioSerializer(account_sid=TWILIO_ACCOUNT, api_base="https://twilio.test")
     assert twilio.hangup_request() is None  # stream not started
     twilio.parse(json.dumps(twilio_start()))
     req = twilio.hangup_request()
@@ -351,11 +373,11 @@ def test_hangup_requests(monkeypatch: pytest.MonkeyPatch) -> None:
     assert str(req.url) == f"https://api.telnyx.com/v2/calls/{TELNYX_CALL}/actions/hangup"
     assert req.headers["authorization"] == "Bearer KEY"
 
-    plivo = PlivoSerializer(auth_id="MA1", auth_token="tok")
+    plivo = PlivoSerializer(auth_id=PLIVO_ACCOUNT, auth_token="tok")
     plivo.parse(json.dumps(plivo_start()))
     req = plivo.hangup_request()
     assert req is not None and req.method == "DELETE"
-    assert str(req.url) == f"https://api.plivo.com/v1/Account/MA1/Call/{PLIVO_CALL}/"
+    assert str(req.url) == f"https://api.plivo.com/v1/Account/{PLIVO_ACCOUNT}/Call/{PLIVO_CALL}/"
 
 
 def test_markup_helpers() -> None:
@@ -412,10 +434,20 @@ class Carrier:
     marks are flushed (Twilio, Telnyx) or dropped (Vonage, Plivo) by a clear.
     """
 
-    def __init__(self, provider: str, url: str, *, latency: float = 0.0) -> None:
+    def __init__(
+        self,
+        provider: str,
+        url: str,
+        *,
+        latency: float = 0.0,
+        token: str | None = "auto",
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.provider = provider
         self.url = url
         self.latency = latency
+        self.token = stream_token(SECRET, CALL_IDS[provider]) if token == "auto" else token
+        self.headers = headers
         self.rate = 16_000 if provider == "vonage" else 8_000
         self.ws: ClientConnection | None = None
         self.log: list[tuple[str, Any]] = []  # ("audio", pcm) | ("mark", name) | ("clear", t)
@@ -432,7 +464,7 @@ class Carrier:
         self._reader: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> Carrier:
-        self.ws = await connect(self.url)
+        self.ws = await connect(self.url, additional_headers=self.headers)
         self._reader = asyncio.create_task(self._read())
         return self
 
@@ -456,16 +488,21 @@ class Carrier:
         await self.ws.send(message if isinstance(message, bytes) else json.dumps(message))
 
     async def start(self) -> None:
+        token = {TOKEN_PARAMETER: self.token} if self.token is not None else {}
         if self.provider == "twilio":
             await self.send({"event": "connected", "protocol": "Call", "version": "1.0.0"})
-            await self.send(twilio_start({"caller": "+15550100"}))
+            await self.send(twilio_start({"caller": "+15550100", **token}))
         elif self.provider == "telnyx":
             await self.send({"event": "connected", "version": "1.0.0"})
-            await self.send(telnyx_start())
+            start = telnyx_start()
+            start["start"]["custom_parameters"] = token
+            await self.send(start)
         elif self.provider == "plivo":
-            await self.send(plivo_start())
+            start = plivo_start()
+            start["extra_headers"] += "".join(f";{k}={v}" for k, v in token.items())
+            await self.send(start)
         else:
-            await self.send(vonage_connected(self.rate))
+            await self.send({**vonage_connected(self.rate), "uuid": VONAGE_CALL, **token})
 
     async def speak(self, seconds: float = 0.8, silence: float = 0.6) -> None:
         audio = AudioFrame.concat(
@@ -822,9 +859,9 @@ async def test_caller_hang_up_ends_the_session_without_rest_call(provider: str) 
         transport=httpx.MockTransport(lambda r: requests.append(r) or httpx.Response(200))
     )
     options = {
-        "twilio": {"account_sid": "AC1", "auth_token": "t"},
+        "twilio": {"account_sid": TWILIO_ACCOUNT, "auth_token": "t"},
         "telnyx": {"api_key": "k"},
-        "plivo": {"auth_id": "MA1", "auth_token": "t"},
+        "plivo": {"auth_id": PLIVO_ACCOUNT, "auth_token": "t"},
         "vonage": {},
     }[provider]
     async with (
@@ -852,9 +889,9 @@ async def test_agent_hang_up_calls_the_rest_api(provider: str) -> None:
         transport=httpx.MockTransport(lambda r: requests.append(r) or httpx.Response(204))
     )
     options = {
-        "twilio": {"account_sid": "AC1", "auth_token": "t"},
+        "twilio": {"account_sid": TWILIO_ACCOUNT, "auth_token": "t"},
         "telnyx": {"api_key": "k"},
-        "plivo": {"auth_id": "MA1", "auth_token": "t"},
+        "plivo": {"auth_id": PLIVO_ACCOUNT, "auth_token": "t"},
     }[provider]
     async with (
         Calls(provider, serializer_options=options, transport_options={"http_client": client})
@@ -997,3 +1034,246 @@ async def test_standalone_transport_serves_one_call() -> None:
     finally:
         await cancel_and_wait(run)
         await transport.aclose()
+
+
+# ------------------------------------------------------------------ hostile carriers
+HOSTILE_CALL_IDS = [
+    "../Number/15550100",
+    "../../Account/MA1/Number/15550100",
+    "/Number/15550100",
+    "%2e%2e%2fNumber",
+    "x?Status=completed",
+    "x#y",
+    "",
+]
+
+
+@pytest.mark.parametrize("bad", HOSTILE_CALL_IDS)
+def test_start_messages_with_malformed_call_ids_are_rejected(bad: str) -> None:
+    twilio = twilio_start()
+    twilio["start"]["callSid"] = CALL_SID + bad if bad else bad
+    telnyx = telnyx_start()
+    telnyx["start"]["call_control_id"] = TELNYX_CALL + bad if bad else bad
+    plivo = plivo_start()
+    plivo["start"]["callId"] = bad
+    for serializer, message in (
+        (TwilioSerializer(account_sid=TWILIO_ACCOUNT, auth_token="t"), twilio),
+        (TelnyxSerializer(api_key="k"), telnyx),
+        (PlivoSerializer(auth_id=PLIVO_ACCOUNT, auth_token="t"), plivo),
+    ):
+        with pytest.raises(TelephonyProtocolError, match=r"invalid .* call ID"):
+            serializer.parse(json.dumps(message))
+        assert not serializer.started and serializer.hangup_request() is None
+
+
+def test_hangup_urls_never_leave_the_call_resource() -> None:
+    """Even a call ID that bypassed the start check cannot reach another REST path."""
+    twilio = TwilioSerializer(account_sid=TWILIO_ACCOUNT, auth_token="t")
+    telnyx = TelnyxSerializer(api_key="k")
+    plivo = PlivoSerializer(auth_id=PLIVO_ACCOUNT, auth_token="t")
+    for serializer, message in (
+        (twilio, twilio_start()),
+        (telnyx, telnyx_start()),
+        (plivo, plivo_start()),
+    ):
+        serializer.parse(json.dumps(message))
+        assert serializer.call is not None
+        serializer.call.call_id = "../Number/15550100"
+        assert serializer.hangup_request() is None
+    # a configured account SID that is not a SID is not put into a URL either
+    start = twilio_start()
+    del start["start"]["accountSid"]
+    bad_account = TwilioSerializer(account_sid="AC1/../../x", auth_token="t")
+    bad_account.parse(json.dumps(start))
+    assert bad_account.hangup_request() is None
+    # Plivo: the configured auth ID is percent-encoded as one path segment
+    start = plivo_start()
+    del start["start"]["accountId"]
+    odd = PlivoSerializer(auth_id="MA/1", auth_token="t")
+    odd.parse(json.dumps(start))
+    req = odd.hangup_request()
+    assert req is not None
+    assert req.url.raw_path == f"/v1/Account/MA%2F1/Call/{PLIVO_CALL}/".encode()
+
+
+def test_foreign_accounts_are_rejected_and_never_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    foreign = "AC" + "f" * 32
+    start = twilio_start()
+    start["start"]["accountSid"] = foreign
+    with pytest.raises(TelephonyProtocolError, match="not the configured"):
+        TwilioSerializer(account_sid=TWILIO_ACCOUNT, auth_token="t").parse(json.dumps(start))
+    # without a configured account SID the stream is accepted but cannot be hung up
+    monkeypatch.delenv("TWILIO_ACCOUNT_SID", raising=False)
+    twilio = TwilioSerializer(auth_token="t")
+    twilio.parse(json.dumps(start))
+    assert twilio.call is not None and twilio.call.account_id == foreign
+    assert twilio.hangup_request() is None
+    plivo = plivo_start()
+    plivo["start"]["accountId"] = "MAFOREIGNACCOUNT0000"
+    with pytest.raises(TelephonyProtocolError, match="not the configured"):
+        PlivoSerializer(auth_id=PLIVO_ACCOUNT, auth_token="t").parse(json.dumps(plivo))
+
+
+def test_stream_tokens_and_markup_helpers_with_a_secret() -> None:
+    token = stream_token(SECRET, CALL_SID)
+    assert token.isalnum() and len(token) == 64  # Plivo extraHeaders: [A-Za-z0-9] only
+    assert verify_stream_token(SECRET, CALL_SID, token)
+    assert not verify_stream_token(SECRET, CALL_SID.replace("4", "5"), token)  # other call
+    assert not verify_stream_token("other secret", CALL_SID, token)
+    assert not verify_stream_token(SECRET, None, token)
+    assert not verify_stream_token(SECRET, CALL_SID, None)
+    assert not verify_stream_token(SECRET, CALL_SID, ["not", "a", "string"])
+    with pytest.raises(ConfigurationError, match="call ID"):
+        stream_token(SECRET, "")
+
+    twiml = twilio_stream_twiml("wss://example.com/s", {"a": "1"}, secret=SECRET, call_id=CALL_SID)
+    assert f'<Parameter name="{TOKEN_PARAMETER}" value="{token}"/>' in twiml
+    texml = telnyx_stream_texml("wss://example.com/s", secret=SECRET, call_id=TELNYX_CALL)
+    assert stream_token(SECRET, TELNYX_CALL) in texml
+    (connect,) = vonage_ncco("wss://example.com/s", secret=SECRET, call_id=VONAGE_CALL)
+    assert connect["endpoint"][0]["headers"] == {
+        "uuid": VONAGE_CALL,
+        TOKEN_PARAMETER: stream_token(SECRET, VONAGE_CALL),
+    }
+    xml = plivo_stream_xml(
+        "wss://example.com/s", extra_headers={"a": 1}, secret=SECRET, call_id=PLIVO_CALL
+    )
+    assert f'extraHeaders="a=1,{TOKEN_PARAMETER}={stream_token(SECRET, PLIVO_CALL)}"' in xml
+    with pytest.raises(ConfigurationError, match="call_id"):
+        twilio_stream_twiml("wss://example.com/s", secret=SECRET)
+
+
+def test_twilio_signature_matches_the_documented_example() -> None:
+    # https://www.twilio.com/docs/usage/security (worked example)
+    url = "https://example.com/myapp.php?foo=1&bar=2"
+    params = {
+        "CallSid": "CA1234567890ABCDE",
+        "Caller": "+14158675310",
+        "Digits": "1234",
+        "From": "+14158675310",
+        "To": "+18005551212",
+    }
+    expected = "L/OH5YylLD5NRKLltdqwSvS0BnU="
+    assert twilio_signature("12345", url, params) == expected
+    assert validate_twilio_signature("12345", url, params, expected)
+    assert not validate_twilio_signature("12345", url, {**params, "Digits": "0"}, expected)
+    assert not validate_twilio_signature("12345", url, params, None)
+
+
+def _noop_factory() -> Any:
+    raise AssertionError("no call should start")
+
+
+def test_a_stream_secret_is_required_unless_authentication_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(SECRET_ENV)
+    with pytest.raises(ConfigurationError, match="stream_secret"):
+        create_transport({"type": "twilio", "port": 0})
+    with pytest.raises(ConfigurationError, match="authenticate=False"):
+        TelephonyServer(_noop_factory, _noop_factory, provider="plivo", port=0)
+    assert create_transport({"type": "twilio", "port": 0, "stream_secret": "s"})
+    insecure = create_transport({"type": "twilio", "port": 0, "authenticate": False})
+    assert isinstance(insecure, TelephonyTransport) and insecure.hangup_on_close is None
+    TelephonyServer(_noop_factory, _noop_factory, provider="vonage", authenticate=False)
+    with pytest.raises(ConfigurationError, match="auth_token"):
+        TelephonyServer(
+            _noop_factory, _noop_factory, provider="plivo", stream_secret="s",
+            public_url="wss://example.com",
+        )  # fmt: skip
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+@pytest.mark.parametrize("token", [None, "0" * 64, "wrong-call"])
+async def test_unauthenticated_streams_are_refused_before_the_call_starts(
+    provider: str, token: str | None
+) -> None:
+    requests: list[httpx.Request] = []
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: requests.append(r) or httpx.Response(204))
+    )
+    if token == "wrong-call":  # a valid token, but of another call
+        token = stream_token(SECRET, CALL_IDS[provider].replace("1", "2"))
+    options = {
+        "twilio": {"account_sid": TWILIO_ACCOUNT, "auth_token": "t"},
+        "telnyx": {"api_key": "k"},
+        "plivo": {"auth_id": PLIVO_ACCOUNT, "auth_token": "t"},
+        "vonage": {},
+    }[provider]
+    async with (
+        Calls(provider, serializer_options=options, transport_options={"http_client": client})
+        as calls,
+        Carrier(provider, calls.url, token=token) as carrier,
+    ):  # fmt: skip
+        await carrier.start()
+        await carrier.wait_closed()
+        assert carrier.ws is not None and carrier.ws.close_code == 1008
+        assert calls.sessions == [] and carrier.audio() == b""
+    assert requests == []  # nothing was hung up
+    await client.aclose()
+
+
+async def test_telnyx_stream_auth_token_header_is_accepted() -> None:
+    header = {"x-telnyx-streaming-auth-token": stream_token(SECRET, TELNYX_CALL)}
+    async with (
+        Calls("telnyx") as calls,
+        Carrier("telnyx", calls.url, token=None, headers=header) as carrier,
+    ):
+        await carrier.start()
+        await wait_for(lambda: calls.sessions)
+        assert calls.transports[0].authenticated
+
+
+async def test_the_token_is_not_passed_on_to_the_application() -> None:
+    async with Calls("twilio") as calls, Carrier("twilio", calls.url) as carrier:
+        await carrier.start()
+        await wait_for(lambda: calls.sessions)
+        call = calls.transports[0].call
+        assert call is not None and call.custom_parameters == {"caller": "+15550100"}
+
+
+async def test_without_authentication_the_call_is_not_hung_up_by_default() -> None:
+    requests: list[httpx.Request] = []
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: requests.append(r) or httpx.Response(204))
+    )
+    calls = Calls(
+        "twilio",
+        serializer_options={"account_sid": TWILIO_ACCOUNT, "auth_token": "t"},
+        transport_options={"http_client": client, "authenticate": False},
+    )
+    async with calls, Carrier("twilio", calls.url, token=None) as carrier:
+        await carrier.start()
+        await wait_for(lambda: calls.sessions)
+        assert not calls.transports[0].authenticated
+        await calls.sessions[0].aclose()
+        await carrier.wait_closed()
+    assert requests == []  # an unauthenticated stream never triggers a REST call
+    await client.aclose()
+
+
+async def test_twilio_handshake_signature_is_checked_with_a_public_url() -> None:
+    auth_token = "twilio-auth-token"
+    public = "wss://agent.example.com"
+    calls = Calls("twilio")
+    calls.server = TelephonyServer(
+        calls.server.session_factory,
+        calls.server.agent_factory,
+        provider="twilio",
+        port=0,
+        serializer_options={"account_sid": TWILIO_ACCOUNT, "auth_token": auth_token},
+        public_url=public,
+    )
+    async with calls:
+        for signature in (None, "bogus", twilio_signature("other", public + "/stream")):
+            headers = {"X-Twilio-Signature": signature} if signature else None
+            with pytest.raises(InvalidStatus) as refused:
+                async with Carrier("twilio", calls.url, headers=headers):
+                    pass
+            assert refused.value.response.status_code == 403
+        assert calls.sessions == []
+        for n, url in enumerate((public + "/stream", public + "/stream/"), 1):
+            good = {"X-Twilio-Signature": twilio_signature(auth_token, url)}
+            async with Carrier("twilio", calls.url, headers=good) as carrier:
+                await carrier.start()
+                await wait_for(lambda n=n: len(calls.sessions) == n)  # type: ignore[misc]
