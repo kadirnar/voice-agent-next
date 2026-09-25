@@ -125,7 +125,10 @@ def audio_content_part(
     frame: AudioFrame, audio_format: AudioInputFormat | None = None
 ) -> dict[str, Any]:
     """An ``input_audio`` content part for audio-input chat models (base64 WAV by default)."""
-    return {"type": "input_audio", "input_audio": (audio_format or AudioInputFormat()).encode(frame)}
+    return {
+        "type": "input_audio",
+        "input_audio": (audio_format or AudioInputFormat()).encode(frame),
+    }
 
 
 @dataclass

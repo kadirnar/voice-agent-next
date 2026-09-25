@@ -86,9 +86,7 @@ class DashScopeLLM(OpenAICompatibleLLM):
     API_KEY_ENV = ("DASHSCOPE_API_KEY",)
     # the per-response instructions the cascade adds are merged into the system prompt
     SYSTEM_MESSAGE_POLICY = "merge"
-    AUDIO_INPUT_FORMAT: ClassVar[AudioInputFormat] = AudioInputFormat(
-        "wav", 16_000, data_url=True
-    )
+    AUDIO_INPUT_FORMAT: ClassVar[AudioInputFormat] = AudioInputFormat("wav", 16_000, data_url=True)
     AUDIO_OUTPUT_FORMAT: ClassVar[str] = "wav"  # the only value accepted; chunks are PCM
     NOT_FOUND_HINT = "check the model id and the region of your API key"
 

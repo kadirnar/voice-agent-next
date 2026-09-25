@@ -257,9 +257,7 @@ class OpenAILLM(LLM):
                 "modalities": ["text", "audio"],
                 "audio": {"voice": voice or "alloy", "format": self.AUDIO_OUTPUT_FORMAT},
             }
-        modalities = {**self.DEFAULT_EXTRA, **audio_defaults, **(extra or {})}.get(
-            "modalities"
-        )
+        modalities = {**self.DEFAULT_EXTRA, **audio_defaults, **(extra or {})}.get("modalities")
         audio_output = "audio" in (modalities or ())
         if audio_input is None:
             audio_input = self.AUDIO_INPUT

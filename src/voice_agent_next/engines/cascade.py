@@ -23,7 +23,9 @@ or discarded when the user resumes (see ``docs/concepts/preemptive-generation.md
 
 Half-cascade: with ``stt=None`` and an LLM whose ``capabilities.audio_input`` is True
 (Ultravox, Qwen-Omni, Gemini, gpt-4o-audio...), the user's audio is passed to the LLM
-directly as :class:`~voice_agent_next.chat.AudioContent`.
+directly as :class:`~voice_agent_next.chat.AudioContent`. ``CascadeOptions.input_transcriber``
+adds the user's words to the history (and ``AudioContent.transcript``) after the commit,
+from the audio LLM itself or from a batch STT, without delaying the reply.
 
 Omni models: an LLM whose ``capabilities.audio_output`` is True (LFM2.5-Audio, gpt-audio,
 Qwen-Omni...) speaks for itself. Without a TTS (or with ``CascadeOptions.use_llm_audio``)
@@ -165,6 +167,14 @@ class CascadeOptions:
     the TTS still speaks verbatim text (``say()``, greetings). An audio LLM generates its
     speech with the reply, so in this mode preemptive generation only runs with
     ``preemptive_tts`` (speculative speech is allowed)."""
+    input_transcriber: Any = None
+    """Half-cascade (``stt=None``): where the user's words for the history come from.
+    ``None``: nowhere (the user turn is audio only). ``"llm"``: the audio LLM transcribes
+    each turn in a second request (``llm.transcribe()``: the OpenAI-compatible hosts).
+    Otherwise an STT (instance or registry spec, e.g. ``"faster_whisper/tiny"``) run on the
+    turn's audio. Runs alongside the reply; the transcript fills ``AudioContent.transcript``
+    (older turns can then be sent as text: the LLM's ``audio_history``) and reaches the
+    session as the turn's final ``user_transcript``. Ignored with an STT."""
     speech_rate: float = 14.0
     """Initial estimate of an audio LLM's speaking rate (characters per second, refined from
     its completed replies): truncation uses it to place a barge-in in a reply whose text
@@ -382,6 +392,21 @@ class CascadeEngine(S2SEngine):
             raise ConfigurationError("cascade needs stt=... unless the LLM accepts audio input")
         if stt_obj is None and self.vad is None:
             raise ConfigurationError("an audio-input LLM cascade needs vad=... to segment turns")
+        self.input_transcriber: STT | None = None
+        """The STT of ``CascadeOptions.input_transcriber`` (half-cascade only)."""
+        self.transcribe_with_llm = False
+        """``CascadeOptions.input_transcriber == "llm"`` (half-cascade only)."""
+        transcriber = self.options.input_transcriber
+        if transcriber is not None and stt_obj is None:
+            if transcriber == "llm":
+                if not callable(getattr(self.llm, "transcribe", None)):
+                    raise ConfigurationError(
+                        f"input_transcriber='llm': {type(self.llm).__name__} cannot transcribe "
+                        "audio; use an STT (input_transcriber='faster_whisper/tiny'...)"
+                    )
+                self.transcribe_with_llm = True
+            else:
+                self.input_transcriber = create("stt", transcriber)
         if stt_obj is not None and not stt_obj.capabilities.streaming:
             if self.vad is None:
                 raise ConfigurationError(
@@ -418,7 +443,16 @@ class CascadeEngine(S2SEngine):
     @property
     def components(self) -> list[Any]:
         return [
-            c for c in (self.vad, self.stt, self.turn_detector, self.llm, self.tts) if c is not None
+            c
+            for c in (
+                self.vad,
+                self.stt,
+                self.input_transcriber,
+                self.turn_detector,
+                self.llm,
+                self.tts,
+            )
+            if c is not None
         ]
 
     def _forward_metrics(self, m: Metrics) -> None:
@@ -823,7 +857,13 @@ class CascadeConnection(EngineConnection):
         content: str | AudioContent = AudioContent(audio, None) if use_audio and audio else text
         self.chat_ctx.add_message("user", content, id=item_id)
         self._emit(InputCommitted(item_id=item_id))
-        self._emit(InputTranscript(item_id=item_id, text=text, is_final=True))
+        engine = self._e
+        if isinstance(content, AudioContent) and (
+            engine.input_transcriber is not None or engine.transcribe_with_llm
+        ):  # the transcript follows (the session keeps a pending user item meanwhile)
+            self._tasks.spawn(self._transcribe_input(item_id, content), name="cascade-transcribe")
+        else:
+            self._emit(InputTranscript(item_id=item_id, text=text, is_final=True))
         self._reset_turn()
         if spec is not None:
             if mismatch is None:
@@ -831,6 +871,23 @@ class CascadeConnection(EngineConnection):
                 return
             self._drop_speculation(spec, mismatch)
         await self._start_response()
+
+    async def _transcribe_input(self, item_id: str, content: AudioContent) -> None:
+        """Half-cascade: transcribe a committed user turn for the history."""
+        engine = self._e
+        text, language = "", None
+        try:
+            if engine.input_transcriber is not None:
+                result = await engine.input_transcriber.transcribe(content.frame)
+                text, language = result.text.strip(), result.language
+            else:
+                text = await engine.llm.transcribe(content.frame)  # type: ignore[attr-defined]
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("could not transcribe the user's turn %s", item_id, exc_info=True)
+        content.transcript = text or None
+        self._emit(InputTranscript(item_id=item_id, text=text, is_final=True, language=language))
 
     # --------------------------------------------------------------- speculation
     def _speculate(self, probability: float | None = None, *, text: str | None = None) -> None:
