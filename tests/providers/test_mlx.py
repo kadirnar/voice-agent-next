@@ -29,8 +29,10 @@ from voice_agent_next.providers.mlx_whisper import MLXWhisperSTT
 from voice_agent_next.providers.mock import synth_speech
 from voice_agent_next.registry import get_provider
 from voice_agent_next.stt import StreamAdapter, STTEvent, STTEventType
+from voice_agent_next.stt_guard import HallucinationGuard
 
 from .mlx_fakes import MLXFakes, hf
+from .whisper_helpers import LevelVAD, push_settled, stream_paced
 
 
 def chunks(frame: AudioFrame, step: float = 0.02) -> list[AudioFrame]:
@@ -362,6 +364,132 @@ async def test_whisper_models_do_not_evict_each_other(mlx_fakes: MLXFakes) -> No
     assert mlx_fakes.whisper_loads[1] == (hf("mlx-community/whisper-base.en-mlx"), "float32")
     assert mlx_fakes.whisper_calls[-2]["x"] == 1
     assert mlx_fakes.whisper_calls[-1]["path_or_hf_repo"] == hf("mlx-community/whisper-tiny")
+
+
+def wseg(text: str, **stats: Any) -> dict[str, Any]:
+    """An mlx-whisper segment (a dict, like openai-whisper's)."""
+    fields = {"start": 0.0, "end": 1.0, "tokens": [1, 2, 3], "avg_logprob": -0.2,
+              "no_speech_prob": 0.01, "compression_ratio": 1.4}  # fmt: skip
+    return {"text": text, **fields, **stats}
+
+
+def growing(audio: Any) -> list[dict[str, Any]]:
+    """One word per 0.2 s of audio: interim decodes see the transcript grow."""
+    words = " ".join(f"w{i}" for i in range(max(1, int(len(audio) / 16_000 / 0.2))))
+    return [wseg(f" {words}", end=len(audio) / 16_000)]
+
+
+def interim_calls(fakes: MLXFakes) -> list[dict[str, Any]]:
+    return [c for c in fakes.whisper_calls if c.get("without_timestamps") and c["audio"].any()]
+
+
+def final_calls(fakes: MLXFakes) -> list[dict[str, Any]]:
+    return [c for c in fakes.whisper_calls if not c.get("without_timestamps") and c["audio"].any()]
+
+
+async def test_whisper_hallucination_guard(mlx_fakes: MLXFakes) -> None:
+    mlx_fakes.whisper_segments = [
+        wseg(" Hallo, wie geht's?", avg_logprob=-0.3),
+        wseg(" Untertitel im Auftrag des ZDF für funk, 2017"),
+        wseg(" Das ist gut.", no_speech_prob=0.9, avg_logprob=-1.5),
+    ]
+    stt = MLXWhisperSTT(model="tiny")
+    assert stt.guard == HallucinationGuard()
+    result = await stt.transcribe(speech(1.0))
+    assert result.text == "Hallo, wie geht's?"
+    assert result.confidence == pytest.approx(math.exp(-0.3))  # from the kept segment
+    mlx_fakes.whisper_segments = [wseg(" Субтитры сделал DimaTorzok")]
+    assert (await stt.transcribe(speech(1.0))).text == ""
+    mlx_fakes.whisper_segments = [wseg(" no no no no no no no no thanks")]
+    assert (await stt.transcribe(speech(1.0))).text == "no thanks"  # loop collapsed
+    off = MLXWhisperSTT(model="tiny", hallucination_guard=False)
+    mlx_fakes.whisper_segments = [wseg(" Hallo."), wseg(" Thanks for watching!")]
+    assert (await off.transcribe(speech(1.0))).text == "Hallo. Thanks for watching!"
+    custom = MLXWhisperSTT(model="tiny", hallucination_guard={"artifacts": ["Hallo"]})
+    assert (await custom.transcribe(speech(1.0))).text == "Thanks for watching!"
+    with pytest.raises(ConfigurationError, match="mlx_whisper: hallucination_guard"):
+        MLXWhisperSTT(hallucination_guard={"no_such_rule": 1})
+    with pytest.raises(ConfigurationError, match="interim_interval"):
+        MLXWhisperSTT(interim_interval=0)
+
+
+async def test_whisper_guard_uses_the_vad_confidence(mlx_fakes: MLXFakes) -> None:
+    mlx_fakes.whisper_segments = [wseg(" Danke.")]
+    audio = AudioFrame.concat([speech(0.6), AudioFrame.silence(0.5, 16_000)])
+    for probability, expected in ((0.95, ["Danke."]), (0.45, [])):
+        adapter = StreamAdapter(MLXWhisperSTT(model="tiny"), LevelVAD(probability, activation=0.4))
+        stream = adapter.stream()
+        events = await stream_paced(stream, audio, speed=8.0)
+        finals = [ev.text for _, ev in events if ev.type == STTEventType.FINAL_TRANSCRIPT]
+        assert finals == expected, probability
+        assert [ev.type for _, ev in events].count(STTEventType.END_OF_SPEECH) == 1
+        await adapter.aclose()
+    assert mlx_fakes.threads == {"mlx-test_0"}
+
+
+async def test_whisper_interim_transcripts(mlx_fakes: MLXFakes) -> None:
+    mlx_fakes.whisper_segments = growing
+    stt = MLXWhisperSTT(model="tiny", language="en", interim_results=True, interim_interval=0.2)
+    assert stt.capabilities.interim_results and not stt.capabilities.streaming
+    assert stt.resolved_interim_interval == 0.2
+    assert MLXWhisperSTT(model="tiny").resolved_interim_interval == 0.25
+    adapter = StreamAdapter(stt, LevelVAD())
+    assert adapter.capabilities.interim_results
+    assert not StreamAdapter(MLXWhisperSTT(model="tiny"), LevelVAD()).capabilities.interim_results
+    await adapter.warmup()
+    stream = adapter.stream()
+    silence = AudioFrame.silence(0.3, 16_000)
+    events = await stream_paced(stream, AudioFrame.concat([silence, speech(1.6), silence]))
+    kinds = [ev.type for _, ev in events]
+    interims = [ev.text for _, ev in events if ev.type == STTEventType.INTERIM_TRANSCRIPT]
+    finals = [ev.text for _, ev in events if ev.type == STTEventType.FINAL_TRANSCRIPT]
+    assert kinds[0] == STTEventType.START_OF_SPEECH and kinds[-1] == STTEventType.END_OF_SPEECH
+    assert len(finals) == 1 and 3 <= len(interims) <= 9
+    assert finals[0].startswith(interims[-1])
+    calls = interim_calls(mlx_fakes)
+    assert all(c["temperature"] == 0.0 and not c["word_timestamps"] for c in calls)
+    assert all(c["language"] == "en" for c in calls)
+    (final,) = final_calls(mlx_fakes)
+    assert "without_timestamps" not in final  # the final is decoded as in batch mode
+    assert mlx_fakes.threads == {"mlx-test_0"}  # every decode on the MLX thread
+    await adapter.aclose()
+
+
+async def test_whisper_final_waits_for_an_interim_in_flight(mlx_fakes: MLXFakes) -> None:
+    mlx_fakes.whisper_segments = growing
+    mlx_fakes.whisper_delay = 0.25
+    stt = MLXWhisperSTT(model="tiny", interim_results=True, interim_interval=0.1)
+    assert not stt.parallel_final  # one MLX thread
+    adapter = StreamAdapter(stt, LevelVAD())
+    await adapter.warmup()
+    stream = adapter.stream()
+    events = await stream_paced(stream, speech(0.5))  # the input ends mid-speech
+    kinds = [ev.type for _, ev in events]
+    assert kinds[-2:] == [STTEventType.FINAL_TRANSCRIPT, STTEventType.END_OF_SPEECH]
+    assert STTEventType.INTERIM_TRANSCRIPT not in kinds  # the stale interim was dropped
+    assert len(stream.final_waits) == 1 and stream.final_waits[0] > 0  # type: ignore[attr-defined]
+    await adapter.aclose()
+
+
+async def test_whisper_final_from_interim(mlx_fakes: MLXFakes) -> None:
+    mlx_fakes.whisper_segments = growing
+    stt = MLXWhisperSTT(
+        model="tiny", interim_results=True, interim_interval=0.02, final_from_interim=True
+    )
+    metrics: list[STTMetrics] = []
+    stt.on("metrics", metrics.append)
+    adapter = StreamAdapter(stt, LevelVAD())
+    await adapter.warmup()
+    stream = adapter.stream()
+    events = await push_settled(
+        stream, AudioFrame.concat([speech(0.8), AudioFrame.silence(0.1, 16_000)])
+    )
+    interims = [ev.text for ev in events if ev.type == STTEventType.INTERIM_TRANSCRIPT]
+    finals = [ev.text for ev in events if ev.type == STTEventType.FINAL_TRANSCRIPT]
+    assert finals == interims[-1:] and final_calls(mlx_fakes) == []
+    assert stream.finals_from_interim == 1  # type: ignore[attr-defined]
+    assert len(metrics) == 1
+    await adapter.aclose()
 
 
 async def test_streaming_steps_pace_themselves(mlx_fakes: MLXFakes) -> None:

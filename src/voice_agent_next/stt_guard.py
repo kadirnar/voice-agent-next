@@ -15,22 +15,24 @@ providers apply it by default (``hallucination_guard=True``).
 
 The phrase lists come from public reports of Whisper output on audio without speech:
 
-* ``openai/whisper`` discussions `#928 <https://github.com/openai/whisper/discussions/928>`_
-  (subtitle credits: Amara.org in several languages, SousTitreur, ST'501, QTSS, ZDF/WDR),
-  `#1873 <https://github.com/openai/whisper/discussions/1873>`_ ("Share your
-  hallucinations here": DimaTorzok, 明镜, ご視聴ありがとうございました, CastingWords),
-  `#2412 <https://github.com/openai/whisper/discussions/2412>`_ (Turkish "Altyazı M.K."),
-  `#2608 <https://github.com/openai/whisper/discussions/2608>`_ (Arabic "ترجمة نانسي
-  قنقر", German "Untertitelung des ZDF für funk", Norwegian "Tekstet av Nicolai Winther");
-* ``m-bain/whisperX`` issue `#230 <https://github.com/m-bain/whisperX/issues/230>`_ (German
-  ZDF / Amara.org credits);
-* the `sachaarbonel/whisper-hallucinations
-  <https://huggingface.co/datasets/sachaarbonel/whisper-hallucinations>`_ dataset (MIT):
-  every non-empty output of Whisper on a noise-only corpus, per language (the "thanks for
-  watching" / "subscribe" outros and short thank-yous of every list below);
-* Barański et al., *Investigation of Whisper ASR Hallucinations Induced by Non-Speech
-  Audio*, ICASSP 2025 (`arXiv:2501.11378 <https://arxiv.org/abs/2501.11378>`_), whose
-  "bag of hallucinations" is dominated by the same English outros.
+* openai/whisper discussion 928 (subtitle credits: Amara.org in several languages,
+  SousTitreur, ST'501, QTSS, ZDF/WDR): https://github.com/openai/whisper/discussions/928
+* openai/whisper discussion 1873, "Share your hallucinations here" (DimaTorzok, 明镜,
+  ご視聴ありがとうございました, CastingWords): https://github.com/openai/whisper/discussions/1873
+* openai/whisper discussion 2412 (Turkish "Altyazı M.K."):
+  https://github.com/openai/whisper/discussions/2412
+* openai/whisper discussion 2608 (Arabic "ترجمة نانسي قنقر", German "Untertitelung des
+  ZDF für funk", Norwegian "Tekstet av Nicolai Winther"):
+  https://github.com/openai/whisper/discussions/2608
+* m-bain/whisperX issue 230 (German ZDF and Amara.org credits):
+  https://github.com/m-bain/whisperX/issues/230
+* the sachaarbonel/whisper-hallucinations dataset (MIT): every non-empty output of
+  Whisper on a noise-only corpus, per language; the source of the "thanks for watching" /
+  "subscribe" outros and short thank-yous of the lists below:
+  https://huggingface.co/datasets/sachaarbonel/whisper-hallucinations
+* Barański et al., "Investigation of Whisper ASR Hallucinations Induced by Non-Speech
+  Audio", ICASSP 2025, whose "bag of hallucinations" is dominated by the same English
+  outros: https://arxiv.org/abs/2501.11378
 """
 
 from __future__ import annotations
@@ -241,8 +243,8 @@ ARTIFACT_PATTERNS: tuple[str, ...] = (
     r".*打[赏賞]支持明[镜鏡].*",  # "…打赏支持明镜与点点栏目", simplified or traditional
 )
 """Regular expressions for artifacts whose wording varies (years, names): a segment is
-dropped when one of them matches its whole :func:`normalized <normalize>` text, so patterns are
-written in normalized form (lower case, no accents, ``ı`` as ``i``, punctuation as
+dropped when one of them matches its whole normalized text (:func:`normalize`), so
+patterns are written in normalized form (lower case, no accents, ``ı`` as ``i``, punctuation as
 spaces)."""
 
 
