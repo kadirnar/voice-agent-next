@@ -1,0 +1,341 @@
+# Docker images (docker/Dockerfile) and compose stacks (docker/compose*.yaml).
+#
+# Pull requests that touch them: lint, build both images (the CUDA image is built, not run:
+# no GPU runners), smoke-test the CPU image and run the fully local compose stack end to end.
+# main and v* tags: the same, then push to ghcr.io/kadirnar/voice-agent-next. Pull requests
+# never push.
+name: Docker
+
+on:
+  pull_request:
+    paths:
+      - "docker/**"
+      - ".dockerignore"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/docker.yml"
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/kadirnar/voice-agent-next
+  PUSH: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+  CUDA_EXTRAS: faster-whisper openai kokoro silero smart-turn webrtc resample cuda
+  ONNXRUNTIME_GPU: onnxruntime-gpu[cuda,cudnn]~=1.26.0
+
+jobs:
+  lint:
+    name: hadolint + compose config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: docker/Dockerfile
+      - name: Compose files are valid
+        run: |
+          docker compose -f docker/compose.yaml config --quiet
+          docker compose -f docker/compose.yaml -f docker/compose.gpu.yaml config --quiet
+          docker compose -f docker/compose.telephony.yaml --profile tunnel config --quiet
+      - name: nginx configurations are valid
+        run: |
+          docker run --rm -v "$PWD/docker/nginx/demo.conf:/etc/nginx/conf.d/default.conf:ro" \
+            nginx:1.30-alpine nginx -t
+          docker run --rm -e PUBLIC_HOST=example.trycloudflare.com \
+            -v "$PWD/docker/nginx/telephony.conf.template:/etc/nginx/templates/default.conf.template:ro" \
+            nginx:1.30-alpine nginx -t
+      - name: Container scripts
+        run: |
+          sh -n docker/entrypoint.sh
+          shellcheck docker/entrypoint.sh
+
+  cpu:
+    name: CPU image (build, smoke test, push on main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Build (linux/amd64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: cpu
+          platforms: linux/amd64
+          load: true
+          tags: van:ci
+          cache-from: type=gha,scope=cpu-amd64
+          cache-to: type=gha,mode=max,scope=cpu-amd64
+      - name: Image size
+        run: docker image ls van:ci --format '{{.Repository}}:{{.Tag}} {{.Size}}'
+
+      - name: "Smoke: non-root, van providers, native libraries import"
+        run: |
+          test "$(docker run --rm van:ci id -u)" = 1000
+          docker run --rm -e NO_COLOR=1 van:ci providers
+          docker run --rm van:ci providers --json > /dev/null
+          docker run --rm van:ci python -c "import aiortc, kokoro_onnx, onnxruntime, openai, sherpa_onnx, soxr; print('native libraries OK')"
+      - name: "Smoke: van serve (mock engine): /health, /ready, /metrics, a session"
+        run: |
+          docker run -d --name van -p 8765:8765 van:ci --protocol websocket --engine mock
+          for _ in $(seq 60); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' van)
+            [ "$status" = healthy ] && break
+            [ "$(docker inspect -f '{{.State.Running}}' van)" = true ] || { docker logs van; exit 1; }
+            sleep 2
+          done
+          echo "HEALTHCHECK: $status"; test "$status" = healthy
+          curl -fsS http://127.0.0.1:8765/health; echo
+          curl -fsS http://127.0.0.1:8765/ready; echo
+          curl -fsS http://127.0.0.1:8765/metrics | grep '^van_up'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: "Smoke: a WebSocket call against the container"
+        run: |
+          uv sync
+          uv run python examples/websocket_agent.py client --url ws://127.0.0.1:8765/ \
+            --text "Hello there" --listen 2 --output "$RUNNER_TEMP/reply.wav"
+          test -s "$RUNNER_TEMP/reply.wav"
+      - name: "Smoke: SIGTERM drains and exits 0"
+        run: |
+          docker stop -t 30 van
+          docker logs van 2>&1 | tail -n 20
+          test "$(docker inspect -f '{{.State.ExitCode}}' van)" = 0
+      - name: Container logs
+        if: failure()
+        run: docker logs van || true
+
+      - name: Build with models baked in (BAKE_MODELS=preset:local-cpu)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: cpu
+          platforms: linux/amd64
+          load: true
+          tags: van:baked
+          build-args: BAKE_MODELS=preset:local-cpu
+          cache-from: type=gha,scope=cpu-amd64
+      - name: "Smoke: baked models are complete and load offline"
+        run: |
+          docker image ls van:baked --format '{{.Repository}}:{{.Tag}} {{.Size}}'
+          docker run --rm -e NO_COLOR=1 van:baked models verify sherpa-onnx/zipformer-en-kroko \
+            kokoro/v1.0-fp16 silero/v6.2 smart-turn/smart-turn-v3.2-cpu
+          docker run --rm -e VAN_OFFLINE=1 van:baked python -c "
+          import asyncio
+          from voice_agent_next.registry import create
+
+          async def main():
+              for kind, spec in [('stt', 'sherpa-onnx/zipformer-en-kroko'), ('tts', 'kokoro/v1.0-fp16'), ('vad', 'silero'), ('turn', 'smart_turn')]:
+                  component = create(kind, spec)
+                  warmup = getattr(component, 'warmup', None)
+                  if warmup is not None:
+                      result = warmup()
+                      if asyncio.iscoroutine(result):
+                          await result
+                  print(kind, spec, 'loaded offline')
+
+          asyncio.run(main())
+          "
+
+      - name: Build (linux/arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: cpu
+          platforms: linux/arm64
+          cache-from: type=gha,scope=cpu-arm64
+          cache-to: type=gha,mode=max,scope=cpu-arm64
+
+      - name: Log in to GHCR
+        if: env.PUSH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        if: env.PUSH == 'true'
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+      - name: Push (linux/amd64, linux/arm64)
+        if: env.PUSH == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: cpu
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: |
+            type=gha,scope=cpu-amd64
+            type=gha,scope=cpu-arm64
+
+  cuda:
+    name: CUDA image (build, import check, push on main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Free disk space (the CUDA wheels are several GB)
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af > /dev/null
+          df -h /
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Build (linux/amd64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: cuda
+          platforms: linux/amd64
+          load: true
+          tags: van:cuda
+          build-args: |
+            EXTRAS=${{ env.CUDA_EXTRAS }}
+            ONNXRUNTIME_GPU=${{ env.ONNXRUNTIME_GPU }}
+          cache-from: type=gha,scope=cuda
+          cache-to: type=gha,mode=max,scope=cuda
+      - name: "Smoke (no GPU): van providers, CUDA libraries and runtimes are in place"
+        run: |
+          docker image ls van:cuda --format '{{.Repository}}:{{.Tag}} {{.Size}}'
+          test "$(docker run --rm van:cuda id -u)" = 1000
+          docker run --rm van:cuda providers --json > /dev/null
+          docker run --rm van:cuda python -c "
+          import ctranslate2, faster_whisper, kokoro_onnx, onnxruntime
+          from voice_agent_next import hardware
+
+          providers = onnxruntime.get_available_providers()
+          print('onnxruntime', onnxruntime.__version__, providers)
+          assert 'CUDAExecutionProvider' in providers, providers
+          print('ctranslate2', ctranslate2.__version__)
+          for lib in hardware.find_cuda_libraries(['cublas', 'cudnn', 'cudart'], 12):
+              print(lib.name, lib.path)
+              assert lib.path is not None, lib
+          "
+          docker run --rm -e NO_COLOR=1 van:cuda doctor || true
+
+      - name: Log in to GHCR
+        if: env.PUSH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        if: env.PUSH == 'true'
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+            suffix=-cuda,onlatest=true
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+      - name: Push (linux/amd64)
+        if: env.PUSH == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: cuda
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            EXTRAS=${{ env.CUDA_EXTRAS }}
+            ONNXRUNTIME_GPU=${{ env.ONNXRUNTIME_GPU }}
+          cache-from: type=gha,scope=cuda
+
+  compose:
+    name: compose stack end to end (Ollama + van serve + demos)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      VAN_IMAGE: van:ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Build the CPU image (from the cpu job's cache)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: cpu
+          platforms: linux/amd64
+          load: true
+          tags: van:ci
+          cache-from: type=gha,scope=cpu-amd64
+      - name: docker compose up
+        run: docker compose -f docker/compose.yaml up -d --no-build
+      - name: Both agents become ready (models downloaded, LLM pulled, engines warm)
+        run: |
+          for path in ws/ready webrtc/ready; do
+            for _ in $(seq 180); do
+              curl -fsS "http://127.0.0.1:8080/$path" > /dev/null 2>&1 && break
+              sleep 5
+            done
+            echo "$path: $(curl -sS http://127.0.0.1:8080/$path)"
+            curl -fsS "http://127.0.0.1:8080/$path" > /dev/null
+          done
+          docker compose -f docker/compose.yaml ps -a
+      - name: The demo pages are served
+        run: |
+          curl -fsSL http://127.0.0.1:8080/ | grep -q 'van-ws/1'
+          curl -fsSL http://127.0.0.1:8080/webrtc/ | grep -qi 'webrtc'
+          curl -fsS -o /dev/null -w '%{redirect_url}\n' http://127.0.0.1:8080/websocket/
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: A WebSocket call through nginx reaches Ollama and Kokoro
+        run: |
+          uv sync
+          uv run python examples/websocket_agent.py client --url ws://127.0.0.1:8080/ws/ \
+            --text "Say hello in five words." --listen 20 --output "$RUNNER_TEMP/reply.wav"
+          test -s "$RUNNER_TEMP/reply.wav"
+          ls -l "$RUNNER_TEMP/reply.wav"
+      - name: Compose logs
+        if: always()
+        run: docker compose -f docker/compose.yaml logs --no-color --tail 200
+      - name: docker compose down
+        if: always()
+        run: docker compose -f docker/compose.yaml down -v

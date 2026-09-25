@@ -1,0 +1,103 @@
+# Phone agent on Twilio Media Streams: Ollama + `van serve -p twilio` + a TwiML webhook.
+#
+#   export TWILIO_ACCOUNT_SID=AC... TWILIO_AUTH_TOKEN=...      # or put them in docker/.env
+#   docker compose -f docker/compose.telephony.yaml --profile tunnel up --build
+#   docker compose -f docker/compose.telephony.yaml logs tunnel   # https://<name>.trycloudflare.com
+#
+# Then set the Twilio number's "A call comes in" webhook to https://<public host>/twiml
+# and call the number. Without the `tunnel` profile, put your own TLS proxy in front of
+# port 8080 and set PUBLIC_HOST to its host name. Details: docs/deploy/docker.md.
+name: voice-agent-next-telephony
+
+services:
+  ollama:
+    image: ollama/ollama:${OLLAMA_VERSION:-0.34.4}
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+    restart: unless-stopped
+
+  ollama-pull:
+    image: ollama/ollama:${OLLAMA_VERSION:-0.34.4}
+    environment:
+      OLLAMA_HOST: ollama:11434
+    command: ["pull", "${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+  models:
+    image: ${VAN_IMAGE:-ghcr.io/kadirnar/voice-agent-next:latest}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: cpu
+    command: ["models", "download", "--for", "/config/agent.yaml"]
+    environment:
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}
+    volumes:
+      - models:/models
+      - ./config/telephony.yaml:/config/agent.yaml:ro
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  # One AgentSession per call on the media-stream WebSocket (μ-law 8 kHz, barge-in with
+  # Twilio `clear`). The credentials let the agent hang up through Twilio's REST API.
+  agent:
+    image: ${VAN_IMAGE:-ghcr.io/kadirnar/voice-agent-next:latest}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: cpu
+    command: ["--protocol", "twilio", "--port", "8765", "--config", "/config/agent.yaml",
+              "--max-sessions", "4", "--log-format", "json"]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      VAN_OFFLINE: "1"
+    volumes:
+      - models:/models
+      - ./config/telephony.yaml:/config/agent.yaml:ro
+    ports:
+      - "127.0.0.1:8765:8765" # /ready and /metrics for local monitoring
+    depends_on:
+      models:
+        condition: service_completed_successfully
+      ollama-pull:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # GET/POST /twiml answers the call with <Connect><Stream url="wss://PUBLIC_HOST/stream">;
+  # /stream is proxied to the agent.
+  web:
+    image: nginx:${NGINX_VERSION:-1.30-alpine}
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:-} # empty: the Host header the tunnel or proxy forwards
+    volumes:
+      - ./nginx/telephony.conf.template:/etc/nginx/templates/default.conf.template:ro
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      - agent
+    restart: unless-stopped
+
+  # Optional public HTTPS/WSS URL without an account: `--profile tunnel`.
+  tunnel:
+    image: cloudflare/cloudflared:${CLOUDFLARED_VERSION:-2026.9.3}
+    command: ["tunnel", "--no-autoupdate", "--url", "http://web:80"]
+    depends_on:
+      - web
+    profiles: ["tunnel"]
+    restart: unless-stopped
+
+volumes:
+  models:
+  ollama:

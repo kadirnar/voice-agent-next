@@ -1016,11 +1016,17 @@ def models_for_config(config: Any) -> Requirements:
 
 
 def models_for(target: str) -> Requirements:
-    """Resolve a ``--for`` target: a config file, ``kind=spec[,kind=spec...]``, or a spec.
+    """Resolve a ``--for`` target: a config file, ``preset:NAME``, ``kind=spec[,...]``, or a spec.
 
     A bare spec (``kokoro/v1.0-int8``, ``sherpa-onnx``) selects matching catalog models of
     every kind; without a model id, the provider's default model of each kind.
+    ``preset:local-cpu`` selects every model of a preset (failover members included), e.g.
+    to bake them into a Docker image.
     """
+    if target.startswith("preset:"):
+        from .presets import get_preset
+
+        return models_for_config(get_preset(target.removeprefix("preset:").strip()).app_config())
     path = Path(target).expanduser()
     if path.suffix.lower() in (".yaml", ".yml", ".toml", ".json") or path.is_file():
         return models_for_config(path)

@@ -1,0 +1,13 @@
+# The agent served by docker/compose.yaml (mounted at /config/agent.yaml).
+# `extends` starts from the `local-cpu` preset (docs/presets.md): sherpa-onnx streaming STT,
+# Ollama, Kokoro, Silero VAD and Smart Turn, all on the CPU. Change anything below.
+extends: local-cpu
+
+# The model the `ollama-pull` service fetches (OLLAMA_MODEL in the compose file).
+llm: ollama/${OLLAMA_MODEL:-LiquidAI/lfm2.5-1.2b-instruct}
+
+agent:
+  instructions: >-
+    You are a friendly, concise voice assistant running fully offline in Docker.
+    Answer in one or two short sentences.
+  greeting: Hi! I run entirely on this machine. What can I do for you?
