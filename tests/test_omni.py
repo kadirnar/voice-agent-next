@@ -39,6 +39,7 @@ from voice_agent_next.providers.mock import (
 )
 from voice_agent_next.tools import FunctionTool
 from voice_agent_next.transports import LoopbackTransport
+from voice_agent_next.utils.clock import sleep_for
 
 RATE = 24_000
 CPS = 15.0  # the fake model speaks 15 characters per second
@@ -104,7 +105,7 @@ class _OmniStream(LLMStream):
         llm: OmniLLM = self._llm  # type: ignore[assignment]
         reply = llm.replies.pop(0) if llm.replies else "Hello there."
         if llm.ttfb:
-            await asyncio.sleep(llm.ttfb)
+            await sleep_for(llm.ttfb)  # never short (Windows timers)
         words = re.findall(r"\S+\s*", reply)
         offset = 0.0
         audio: list[float] = []
@@ -214,9 +215,9 @@ async def test_llm_speech_goes_to_the_speaker_and_its_text_to_the_transcript() -
     # metrics: the turn and the engine measure the first *audio*
     [turn] = rec.turn_metrics()
     assert turn.voice_to_voice is not None and turn.response_ttfb is not None
-    assert turn.response_ttfb >= 0.03  # the fake 50 ms TTFB; Windows timers are coarse (15.6 ms)
+    assert turn.response_ttfb >= 0.05  # the fake 50 ms TTFB
     engine_m = [m for m in rec.of("metrics") if isinstance(m, EngineMetrics)]
-    assert engine_m and engine_m[0].ttfb is not None and engine_m[0].ttfb >= 0.03
+    assert engine_m and engine_m[0].ttfb is not None and engine_m[0].ttfb >= 0.05
     llm_m = [m for m in rec.of("metrics") if isinstance(m, LLMMetrics)]
     assert llm_m and llm_m[0].ttfb is not None and llm_m[0].ttft is not None
     assert llm_m[0].ttft <= llm_m[0].ttfb  # the text comes first
