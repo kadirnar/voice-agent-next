@@ -399,7 +399,8 @@ class SonioxSTT(STT):
 
     def _client(self) -> httpx.AsyncClient:
         if self._http is None:
-            self._http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=self.connect_timeout))
+            timeout = httpx.Timeout(30.0, connect=self.connect_timeout)
+            self._http = httpx.AsyncClient(timeout=timeout)
             self._owns_http = True
         return self._http
 
@@ -536,7 +537,7 @@ class SonioxStream(STTStream):
             await asyncio.wait({receiver}, timeout=stt.close_timeout)
             self._raise_task_error(receiver, sender)
             if not receiver.done():
-                logger.warning("Soniox: no 'finished' %.1fs after the end of audio", stt.close_timeout)
+                logger.warning("Soniox: no 'finished' %.1fs after the audio", stt.close_timeout)
             self._finish_session()
         finally:
             self._closing = True
