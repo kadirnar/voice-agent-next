@@ -237,7 +237,8 @@ and waits for the final transcript. A batch-only recognizer can be streamed thro
 | `wer_pct`, `cer_pct` | per-utterance distributions (%) |
 | `rtfx` | Σ audio / Σ processing time (batch: `transcribe()` duration; streaming: first chunk → final). Only meaningful in batch mode or with `--realtime-factor 0` |
 | `ttfs_ms` | **final latency**: end of audio → final transcript. Streaming: the `end_input()`/`flush()` call → the last `FINAL_TRANSCRIPT` (Pipecat's TTFS, with the end of the file as the VAD stop); batch: the `transcribe()` duration. The STT's share of a voice agent's response time |
-| `first_partial_ms` | streaming: capture start of the first chunk → first non-empty interim transcript |
+| `first_partial_ms` | streaming: **speech onset** → first non-empty interim transcript. The onset is found in the utterance by the reference VAD of the latency tracks (first 10 ms frame ≥ −40 dBFS starting ≥ 100 ms of speech, `speech_onset_ms`) and placed at its capture time (unpaced: the delivery of its chunk), so leading silence does not count |
+| `first_partial_from_audio_ms` | streaming: capture start of the first chunk → first non-empty interim (the definition `first_partial_ms` had before; kept for comparisons with older runs) |
 | `interim_revision_rate` | streaming: share of interim updates that rewrite already-shown words instead of appending (the last word may still grow). 0 = interims only grow |
 | `processing_ms`, `rtf` | per-utterance processing time and processing / audio |
 

@@ -434,9 +434,9 @@ def test_small_baseline_metrics_have_absolute_floors(
     def ci(v: float) -> tuple[float, float]:
         return (v * 0.99, v * 1.01)
 
-    assert compare_metric("m", metric(base, ci(base)), metric(current, ci(current)), rule).status == (
-        status
-    )
+    assert compare_metric(
+        "m", metric(base, ci(base)), metric(current, ci(current)), rule
+    ).status == (status)
 
 
 def test_the_latency_rule_alone_misses_a_30ms_loop_lag_regression() -> None:
