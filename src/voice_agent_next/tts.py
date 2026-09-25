@@ -198,6 +198,9 @@ class _AudioEmitter:
         self._cancelled = False
         self._aligner: WordAligner | None = None
         """Maps word timings on normalized text back to the original words."""
+        self._metrics_enabled = True
+        """``False`` when a wrapper reports this request's usage itself (e.g. the
+        :class:`SentenceStreamAdapter` for its per-sentence streams), so it is counted once."""
 
     def _push_audio(
         self, data: bytes | AudioFrame, *, words: list[WordTiming] | None = None
@@ -248,6 +251,8 @@ class _AudioEmitter:
             self._events.send_nowait(item)
 
     def _emit_metrics(self) -> None:
+        if not self._metrics_enabled:
+            return
         ttfb = None
         if self._first_audio_time is not None:
             ttfb = self._first_audio_time - (self._first_text_time or self._start_time)
@@ -431,7 +436,12 @@ class SentenceStreamAdapter(SynthesizeStream):
         super().__init__(tts, voice=voice)
 
     def _start(self, sentence: str) -> ChunkedStream | None:
-        return self._tts.synthesize(sentence, voice=self.voice) if sentence else None
+        if not sentence:
+            return None
+        stream = self._tts.synthesize(sentence, voice=self.voice)
+        # this stream reports the whole request's usage: the per-sentence streams stay quiet
+        stream._metrics_enabled = False
+        return stream
 
     async def _play_sentence(self, stream: ChunkedStream, on_chunk: Callable[[], None]) -> None:
         """Forward one sentence's audio (silence-trimmed) and words onto this stream."""

@@ -392,10 +392,11 @@ def test_cli_records_a_baseline_and_gates_a_run(smoke: RunResults, tmp_path: Pat
     assert "Regression gate" in text and "**PASS**" in text and "Framework overhead" in text
     assert json.loads((smoke.directory / "gate.json").read_text(encoding="utf-8"))["passed"]
 
-    # a baseline 100 ms faster than this run: the overhead regressed
+    # a baseline 100 ms faster than this run: v2v regressed (an overhead baseline cannot be
+    # made faster than 0 ms: the gate reads a negative overhead as 0)
     metrics = data["entries"][key]["metrics"]
-    value = metrics["e2e.engine.overhead_ms"]["value"]
-    metrics["e2e.engine.overhead_ms"].update(value=value - 100.0, ci95=None)
+    value = metrics["e2e.engine.v2v_ms"]["value"]
+    metrics["e2e.engine.v2v_ms"].update(value=value - 100.0, ci95=None)
     base.write_text(json.dumps(data), encoding="utf-8")
     failed = runner.invoke(
         app, ["bench", "overhead", "--from-run", run_dir, "--baseline", str(base),

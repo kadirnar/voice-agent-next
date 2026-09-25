@@ -668,6 +668,8 @@ class _FallbackChunkedStream(ChunkedStream):
     async def _attempt(self, i: int, fb: FallbackTTS, heard: list[bool]) -> None:
         chain = fb._chain
         inner = chain.providers[i].synthesize(self.text, voice=self.voice)
+        # quiet when a wrapper (the sentence adapter) reports this request's usage itself
+        inner._metrics_enabled = self._metrics_enabled
         rs = StreamResampler(fb.sample_rate, fb.channels)
         timeout = fb.first_audio_timeout
         deadline = None if timeout is None else now() + timeout

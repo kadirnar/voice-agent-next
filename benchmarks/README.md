@@ -748,8 +748,11 @@ conditions and up to ~5 ms with injected delays. Most of it is asyncio timer lat
 chunk the caller delivers ends up to 1 ms late (`delivery_lag_ms`). Session, transport
 and engine plumbing take well under a millisecond. On Windows with Python < 3.13, asyncio
 timers are ~16 ms coarse, so expect larger lag and jitter numbers there. A timer can also
-fire up to one tick early, so a mock delay can come in short and a single turn's
-`overhead_ms` can be slightly negative. That is why the gate keeps one baseline per OS.
+fire up to one tick early, so a mock delay can come in short and `overhead_ms` can come
+out negative (on the Windows runners the p50 of a condition swings between about −23 and
++11 ms from run to run). Reports keep the measured values; the gate reads a negative
+overhead as 0, since the framework cannot add less than nothing. That is also why the
+gate keeps one baseline (and, for Windows, a wider overhead floor) per OS.
 
 ### Tiers
 
@@ -779,7 +782,8 @@ own OS. Without an entry, the job reports and does not gate.
 
 | Rule | Metrics (statistic) | A metric fails when it got worse by |
 | --- | --- | --- |
-| `latency` | `e2e.overhead_ms`, `e2e.<condition>.overhead_ms`, `e2e.<condition>.v2v_ms`, `e2e.frame_jitter_ms`, `flush.flush_ms` (p50); `e2e.loop_lag_ms` (p99) | more than **10 %** and more than **30 ms**, with non-overlapping 95 % CIs |
+| `overhead` | `e2e.overhead_ms`, `e2e.<condition>.overhead_ms` (p50; values below 0 read as 0) | more than **50 %** and more than an absolute floor of **5 ms** (**20 ms** on Windows, an entry override), with non-overlapping 95 % CIs |
+| `latency` | `e2e.<condition>.v2v_ms`, `e2e.frame_jitter_ms`, `flush.flush_ms` (p50); `e2e.loop_lag_ms` (p99) | more than **10 %** and more than **30 ms**, with non-overlapping 95 % CIs |
 | `micro` | `micro.*_us` (median) | more than **200 %** (3×) and more than **5 µs**: runner hardware varies |
 
 Everything else (CPU, memory, capacity, spans) is reported but not gated. A gated metric
@@ -787,7 +791,14 @@ that a section should have produced but did not (e.g. every turn missed) fails a
 `missing`. Medians over many turns and batches keep a slow turn on a shared runner from
 failing the job. With `--retries 1`, a failure also re-runs the failing section: a
 metric fails only if it regresses again. Rules live in the baseline file and can be
-tuned there.
+tuned there: `rules` for all runners, an entry's `rules` for one runner kind (both are
+kept when the baseline is updated).
+
+The overhead is a few milliseconds, so the `latency` rule's 30 ms would let a tenfold
+regression through (2.7 → 32 ms). Against 45 CI runs per OS, the `overhead` rule failed
+none of them (every run judged against every other as the baseline), and caught a
++30 ms regression of every condition on Linux (a +8 ms one on four of five) and on
+Windows in 96–100 % of the pairs.
 
 **Reading the result.** The job summary shows the verdict and a table (baseline, this
 run, change, threshold, status: `regressed`, `missing`, `improved`, `new` or `ok`),

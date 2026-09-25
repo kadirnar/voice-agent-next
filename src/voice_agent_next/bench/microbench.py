@@ -24,12 +24,11 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-import numpy as np
-
 from ..audio.codecs import alaw_decode, alaw_encode, mulaw_decode, mulaw_encode
 from ..audio.frame import AudioFrame
 from ..audio.resample import Backend, Resampler
 from ..audio.silence import SilenceTrimmer
+from ..metrics import percentile
 from ..providers.energy import EnergyVAD
 from ..providers.mock import synth_speech
 from ..text.filters import tts_clean
@@ -86,7 +85,7 @@ class MicroResult:
     info: dict[str, Any] = field(default_factory=dict)
 
     def _q(self, q: float) -> float:
-        return float(np.percentile(np.asarray(self.per_op_us, dtype=np.float64), q))
+        return percentile(self.per_op_us, q)
 
     @property
     def median_us(self) -> float:
