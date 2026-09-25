@@ -1305,7 +1305,7 @@ def _check_api_key(
             if inspect.isawaitable(result):
                 result = await result
             if result is not None:
-                return result  # type: ignore[no-any-return]
+                return result
         if keys.authorized(request.headers.get_all):
             return None
         logger.info("refused a WebSocket client without a valid API key")

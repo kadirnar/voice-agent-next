@@ -93,13 +93,16 @@ def vonage_ncco(
     headers: Mapping[str, Any] | None = None,
     secret: str | None = None,
     call_id: str | None = None,
+    authorization: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """An NCCO that connects the call to a WebSocket endpoint (``audio/l16``).
 
     ``headers`` come back in the ``websocket:connected`` message
     (``transport.call.custom_parameters``). ``secret`` / ``call_id`` (the answer webhook's
     ``uuid``) add a ``uuid`` header and the stream token: Vonage does not identify the call
-    in ``websocket:connected`` otherwise.
+    in ``websocket:connected`` otherwise. ``authorization`` is the endpoint's
+    ``authorization`` object: ``{"type": "vonage"}`` makes Vonage sign the WebSocket
+    upgrade with a JWT (checked by a server given the signature secret).
     """
     if secret is not None and call_id:
         headers = {**(headers or {}), "uuid": call_id}
@@ -111,6 +114,8 @@ def vonage_ncco(
     }
     if headers:
         endpoint["headers"] = dict(headers)
+    if authorization:
+        endpoint["authorization"] = dict(authorization)
     return [{"action": "connect", "endpoint": [endpoint]}]
 
 

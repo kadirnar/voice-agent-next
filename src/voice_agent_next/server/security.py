@@ -40,16 +40,16 @@ from ..utils.ids import new_id
 from ..utils.log import logger
 
 __all__ = [
-    "KEY_SUBPROTOCOL",
-    "ApiKeys",
     "DEFAULT_IDLE_TIMEOUT",
     "DEFAULT_MAX_SESSIONS",
     "DEFAULT_MAX_SESSION_DURATION",
     "INBOX_HIGH",
     "INBOX_LOW",
+    "KEY_SUBPROTOCOL",
     "MAX_SEND_BUFFER",
     "OUTBOX_HIGH",
     "OUTBOX_LOW",
+    "ApiKeys",
     "OriginPolicy",
     "exposure_warning",
     "generate_api_key",
