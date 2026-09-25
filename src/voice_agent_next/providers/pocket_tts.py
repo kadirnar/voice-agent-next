@@ -54,7 +54,7 @@ from ..registry import register_provider
 from ..stt import WordTiming
 from ..text.normalize import EnglishNormalizer, TextNormalizer
 from ..text.sentences import SentenceSegmenter
-from ..tts import TTS, ChunkedStream, NormalizeOption, SynthesizedAudio
+from ..tts import TTS, ChunkedStream, NormalizeOption, SynthesizedAudio, TTSCapabilities
 from ..utils.clock import now
 from ..utils.deps import is_installed, require
 from ..utils.download import cache_dir
@@ -333,6 +333,8 @@ class PocketTTS(TTS):
             voice=default_voice,
             clean_text=clean_text,
             normalize=normalize,
+            # estimated timings (see estimate_word_timings)
+            capabilities=TTSCapabilities(word_timestamps=word_timings),
         )
         self.temperature = temperature
         self.sampler_decode_steps = sampler_decode_steps

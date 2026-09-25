@@ -1040,7 +1040,7 @@ async def test_synthesize_uses_the_dialogue_endpoint_for_v3() -> None:
          RateLimitError, True, "concurrent_limit_exceeded"),
         (422, {"detail": [{"loc": ["body", "text"], "msg": "field required",
                            "type": "missing"}]}, ProviderError, False, "body.text: field required"),
-        (500, {"detail": "Internal error"}, ProviderError, True, "Internal error"),
+        (500, {"detail": "Internal error"}, ProviderConnectionError, True, "Internal error"),
     ],
 )  # fmt: skip
 async def test_synthesize_maps_http_errors(

@@ -157,12 +157,14 @@ def test_opus_encoder_buffers_partial_frames() -> None:
 def test_endpoint_urls_and_query() -> None:
     opts = EngineOptions()
     assert MoshiEngine().endpoint(opts) == "ws://localhost:8998/api/chat"
-    assert MoshiEngine(url="https://box:9000").endpoint(opts) == "wss://box:9000/api/chat"
-    assert MoshiEngine(url="127.0.0.1:8998").endpoint(opts) == "ws://127.0.0.1:8998/api/chat"
-    url = MoshiEngine(url="ws://h/custom/chat?x=1", text_temperature=0.6, seed=7).endpoint(opts)
+    assert MoshiEngine(base_url="https://box:9000").endpoint(opts) == "wss://box:9000/api/chat"
+    assert MoshiEngine(base_url="127.0.0.1:8998").endpoint(opts) == "ws://127.0.0.1:8998/api/chat"
+    url = MoshiEngine(base_url="ws://h/custom/chat?x=1", text_temperature=0.6, seed=7).endpoint(
+        opts
+    )
     assert url == ("ws://h/custom/chat?x=1&text_temperature=0.6&text_seed=7&audio_seed=7&seed=7")
     with pytest.raises(ConfigurationError):
-        MoshiEngine(url="ftp://h").endpoint(opts)
+        MoshiEngine(base_url="ftp://h").endpoint(opts)
     with pytest.raises(ConfigurationError):
         MoshiEngine(frame_duration=0.05)
 
@@ -189,7 +191,7 @@ def test_registry_and_capabilities() -> None:
 
 
 def test_personaplex_prompts_in_query() -> None:
-    engine = PersonaPlexEngine(url="ws://h:1", voice="NATM1")
+    engine = PersonaPlexEngine(base_url="ws://h:1", voice="NATM1")
     url = engine.endpoint(EngineOptions(instructions="You work for Acme & Co."))
     assert url == "ws://h:1/api/chat?voice_prompt=NATM1.pt&text_prompt=You+work+for+Acme+%26+Co."
     url = engine.endpoint(EngineOptions(voice="custom.wav"))
@@ -201,7 +203,7 @@ def test_personaplex_prompts_in_query() -> None:
 @pytest.mark.parametrize("flavor", ["python", "rust"])
 async def test_handshake_flavors(fake: Callable[..., Any], flavor: str) -> None:
     server = await fake(flavor=flavor)
-    conn = await connect(MoshiEngine(url=server.url))
+    conn = await connect(MoshiEngine(base_url=server.url))
     try:
         if flavor == "rust":
             assert conn.server_version == (0, 0)
@@ -215,7 +217,7 @@ async def test_handshake_flavors(fake: Callable[..., Any], flavor: str) -> None:
 
 
 async def test_connection_refused_is_a_connection_error() -> None:
-    engine = MoshiEngine(url="ws://127.0.0.1:9", connect_timeout=5)
+    engine = MoshiEngine(base_url="ws://127.0.0.1:9", connect_timeout=5)
     with pytest.raises(ProviderConnectionError, match=r"moshi\.server"):
         await engine.connect(EngineOptions())
 
@@ -223,18 +225,18 @@ async def test_connection_refused_is_a_connection_error() -> None:
 async def test_busy_server_times_out_waiting_for_the_handshake(fake: Callable[..., Any]) -> None:
     server = await fake(handshake=False)
     with pytest.raises(ProviderTimeoutError, match="one conversation at a time"):
-        await MoshiEngine(url=server.url, connect_timeout=0.5).connect(EngineOptions())
+        await MoshiEngine(base_url=server.url, connect_timeout=0.5).connect(EngineOptions())
 
 
 async def test_http_rejection_maps_to_library_errors(fake: Callable[..., Any]) -> None:
     server = await fake(reject_status=403)
     with pytest.raises(AuthenticationError):
-        await MoshiEngine(url=server.url).connect(EngineOptions())
+        await MoshiEngine(base_url=server.url).connect(EngineOptions())
 
 
 async def test_personaplex_sends_the_prompts(fake: Callable[..., Any]) -> None:
     server = await fake(require_prompts=True, greeting="Hello")
-    engine = PersonaPlexEngine(url=server.url)
+    engine = PersonaPlexEngine(base_url=server.url)
     conn = await connect(engine, instructions="You are Alex, an astronaut.", voice="VARF3")
     await conn.aclose()
     assert server.connection.query == {
@@ -242,13 +244,13 @@ async def test_personaplex_sends_the_prompts(fake: Callable[..., Any]) -> None:
         "text_prompt": "You are Alex, an astronaut.",
     }
     with pytest.raises(ProviderConnectionError):  # the plain Moshi engine sends no prompts
-        await MoshiEngine(url=server.url).connect(EngineOptions())
+        await MoshiEngine(base_url=server.url).connect(EngineOptions())
 
 
 # ------------------------------------------------------------------------ events
 async def test_greeting_and_reply_events(fake: Callable[..., Any]) -> None:
     server = await fake(greeting="Hi there how are you", replies=["Sure thing my friend"])
-    engine = MoshiEngine(url=server.url)
+    engine = MoshiEngine(base_url=server.url)
     metrics: list[EngineMetrics] = []
     engine.on("metrics", metrics.append)
     conn = await connect(engine)
@@ -290,11 +292,12 @@ async def test_greeting_and_reply_events(fake: Callable[..., Any]) -> None:
     assert metrics[1].ttfb is not None and metrics[1].ttfb >= 0
     assert metrics[1].output_text_tokens == 4
     assert metrics[1].output_audio_tokens >= 13
+    assert all(m.tokens_estimated for m in metrics)  # derived from durations
 
 
 async def test_user_talking_over_the_agent_is_left_to_the_model(fake: Callable[..., Any]) -> None:
     server = await fake(greeting=" ".join(["word"] * 16), replies=["Go on"], yield_after=0.4)
-    conn = await connect(MoshiEngine(url=server.url))
+    conn = await connect(MoshiEngine(base_url=server.url))
     events = Events(conn)
     await wait_for(lambda: len(events.of(ResponseText)) >= 2)
     # the user talks over the greeting: no InputSpeechStarted while the agent speaks
@@ -317,7 +320,7 @@ async def test_user_talking_over_the_agent_is_left_to_the_model(fake: Callable[.
 
 async def test_report_overlap_reports_speech_over_the_agent(fake: Callable[..., Any]) -> None:
     server = await fake(greeting=" ".join(["word"] * 16), yield_after=5.0)
-    conn = await connect(MoshiEngine(url=server.url, report_overlap=True))
+    conn = await connect(MoshiEngine(base_url=server.url, report_overlap=True))
     events = Events(conn)
     await wait_for(lambda: len(events.of(ResponseText)) >= 2)
     await speak(conn, 0.5, realtime=True)
@@ -331,7 +334,7 @@ async def test_cancel_mutes_the_agent_until_its_next_pause(fake: Callable[..., A
     server = await fake(
         greeting=" ".join(["word"] * 12), replies=["Second reply here"], words_per_second=8
     )
-    conn = await connect(MoshiEngine(url=server.url))
+    conn = await connect(MoshiEngine(base_url=server.url))
     events = Events(conn)
     await wait_for(lambda: len(events.of(ResponseText)) >= 2)
     await conn.interrupt()
@@ -355,7 +358,7 @@ async def test_text_only_controls_are_ignored(
     fake: Callable[..., Any], caplog: pytest.LogCaptureFixture
 ) -> None:
     server = await fake()
-    conn = await connect(MoshiEngine(url=server.url))
+    conn = await connect(MoshiEngine(base_url=server.url))
     await conn.send_text("hello")
     await conn.create_response()
     await conn.say("verbatim")
@@ -368,7 +371,7 @@ async def test_text_only_controls_are_ignored(
 
 async def test_server_error_message_is_reported(fake: Callable[..., Any]) -> None:
     server = await fake()
-    conn = await connect(MoshiEngine(url=server.url))
+    conn = await connect(MoshiEngine(base_url=server.url))
     events = Events(conn)
     await server.send_error("model overloaded")
     await wait_for(lambda: bool(events.of(EngineErrorEvent)))
@@ -382,7 +385,7 @@ async def test_server_error_message_is_reported(fake: Callable[..., Any]) -> Non
 # ---------------------------------------------------------------------- reconnects
 async def test_reconnects_after_a_drop(fake: Callable[..., Any]) -> None:
     server = await fake(greeting=" ".join(["word"] * 20), flavor="rust")
-    conn = await connect(MoshiEngine(url=server.url))
+    conn = await connect(MoshiEngine(base_url=server.url))
     events = Events(conn)
     await wait_for(lambda: len(events.of(ResponseText)) >= 2)
     await server.drop()
@@ -398,7 +401,7 @@ async def test_reconnects_after_a_drop(fake: Callable[..., Any]) -> None:
 
 async def test_step_limit_close_reconnects(fake: Callable[..., Any]) -> None:
     server = await fake(max_steps=10)  # the Rust server closes after max_steps
-    conn = await connect(MoshiEngine(url=server.url))
+    conn = await connect(MoshiEngine(base_url=server.url))
     events = Events(conn)
     await silence(conn, 1.0)
     await wait_for(lambda: conn.connections >= 2)
@@ -409,7 +412,7 @@ async def test_step_limit_close_reconnects(fake: Callable[..., Any]) -> None:
 
 async def test_gives_up_when_reconnecting_is_disabled(fake: Callable[..., Any]) -> None:
     server = await fake()
-    conn = await connect(MoshiEngine(url=server.url, reconnect=False))
+    conn = await connect(MoshiEngine(base_url=server.url, reconnect=False))
     events = Events(conn)
     await server.drop()
     await events.close()  # the connection closes itself
@@ -420,7 +423,9 @@ async def test_gives_up_when_reconnecting_is_disabled(fake: Callable[..., Any]) 
 
 async def test_gives_up_after_failed_reconnects(fake: Callable[..., Any]) -> None:
     server = await fake()
-    conn = await connect(MoshiEngine(url=server.url, max_reconnect_attempts=1, connect_timeout=2))
+    conn = await connect(
+        MoshiEngine(base_url=server.url, max_reconnect_attempts=1, connect_timeout=2)
+    )
     events = Events(conn)
     server.reject_status = 503
     await server.drop()
@@ -438,7 +443,7 @@ async def test_session_full_duplex_conversation(fake: Callable[..., Any]) -> Non
     server = await fake(
         greeting="Hello there", replies=["Nice to meet you", "Sure go ahead"], yield_after=0.4
     )
-    session = AgentSession(MoshiEngine(url=server.url))
+    session = AgentSession(MoshiEngine(base_url=server.url))
     seen: dict[str, list[Any]] = {"interrupted": [], "metrics": [], "agent_transcript": []}
     for name, items in seen.items():
         session.on(name, items.append)
@@ -494,7 +499,7 @@ async def test_real_moshi_server() -> None:
     url = os.environ.get("MOSHI_URL")
     if not url:
         pytest.skip("set MOSHI_URL to a running moshi server")
-    conn = await connect(MoshiEngine(url=url))
+    conn = await connect(MoshiEngine(base_url=url))
     events = Events(conn)
     await silence(conn, 3.0, realtime=True)
     await speak(conn, 1.0, realtime=True)

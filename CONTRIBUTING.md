@@ -33,10 +33,21 @@ Rules:
 
 * **Importable without optional dependencies.** Never import a third-party SDK at module top level; call `voice_agent_next.utils.require("module", extra="<extra>")` inside `__init__`/methods. `van providers` imports every provider module and CI checks it.
 * Register every component with `@register_provider(kind, name, default_model=..., env=(...), extra=..., requires=(...), local=...)` and set the `provider = "<name>"` class attribute.
-* Constructors take keyword arguments only and must accept `model: str | None = None`.
+* Constructors take keyword arguments only and must accept `model: str | None = None`. Use the standard option names where they apply: `language`, `device` (`"auto"`, `"cpu"`, `"cuda"`... or a list of ONNX Runtime execution providers), `base_url`, `timeout` (one HTTP request), `connect_timeout`, `extra` (extra request-body fields), `headers`, `extra_params` (extra URL query parameters), `extra_config` (extra session-configuration fields). Keep a renamed option working through `providers/_options.py` (`renamed()` / `deprecated()`), which emits a `DeprecationWarning`. `tests/providers/test_option_names.py` checks the registry.
 * Implement the base-class hooks: `STT._recognize/_create_stream`, `LLM._chat`, `TTS._synthesize/_create_stream`, `VAD._new_inference`, `TurnDetector._predict`, `S2SEngine.connect`. Base classes already handle resampling, metrics, and error propagation.
-* API keys come from constructor args first, then the documented env vars. Never log secrets.
-* Map provider failures to `voice_agent_next.errors` (401/403 -> `AuthenticationError`, 429 -> `RateLimitError`, network -> `ProviderConnectionError`).
+* API keys come from constructor args first, then the documented env vars. Never log secrets. A missing key raises `MissingAPIKeyError` (a `ConfigurationError`) before any request.
+* Map provider failures to `voice_agent_next.errors`. HTTP and WebSocket-handshake statuses go through `errors.for_status()` (add provider-specific cases, e.g. an exhausted quota, before it):
+
+  | status | error | retryable |
+  |---|---|---|
+  | 401, 403 | `AuthenticationError` | no |
+  | 429 | `RateLimitError` | yes (pass `retryable=False` for an exhausted quota) |
+  | 408, 504 | `ProviderTimeoutError` | yes |
+  | other 5xx | `ProviderConnectionError` | yes |
+  | 409 | `ProviderError` | yes |
+  | other 4xx | `ProviderError` | no |
+
+  Network failures without a status are `ProviderConnectionError` (or `ProviderTimeoutError`), an invalid URL is a `ConfigurationError`. WebSocket providers open connections with `providers/_ws.py` (`ws_connect`, which maps all of these, `close_ws`, `raise_task_error`).
 * Add the dependency extra to `pyproject.toml` (alphabetical within its section).
 * Add `docs/providers/<name>.md` (setup, models, options, latency notes).
 

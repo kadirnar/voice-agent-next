@@ -125,7 +125,12 @@ class EOTMetrics:
 
 @dataclass(slots=True, kw_only=True)
 class EngineMetrics:
-    """One response of a speech-to-speech engine."""
+    """One response of a speech-to-speech engine.
+
+    Token counts are the provider's own when it reports them. ``tokens_estimated`` marks
+    counts derived locally (Moshi/PersonaPlex: Mimi frames from the audio duration). Engines
+    billed by time report no tokens: GPT-Live's usage is ``connection.usage_seconds``.
+    """
 
     provider: str
     model: str
@@ -139,6 +144,8 @@ class EngineMetrics:
     output_audio_tokens: int = 0
     cached_tokens: int = 0
     cancelled: bool = False
+    tokens_estimated: bool = False
+    """The token counts are derived locally rather than reported by the provider."""
     timestamp: float = field(default_factory=_ts)
     type: Literal["engine"] = "engine"
 

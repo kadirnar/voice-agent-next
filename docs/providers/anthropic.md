@@ -38,7 +38,7 @@ llm = create("llm", "claude/claude-sonnet-5", max_tokens=512)
 llm:
   provider: anthropic/claude-haiku-4-5
   max_tokens: 512
-  extra_params:
+  extra:
     metadata: {user_id: "caller-123"}
 ```
 
@@ -47,7 +47,7 @@ llm:
 | Model | Notes for voice |
 |---|---|
 | `claude-haiku-4-5` (default) | Fastest Claude: 98.0 % pass at 637 ms p50 TTFAT. No thinking by default. $1 / $5 per 1M tokens. |
-| `claude-sonnet-5` | 93.0 % at 1,204 ms. Adaptive thinking is on by default; lower latency with `extra_params={"output_config": {"effort": "low"}}`. |
+| `claude-sonnet-5` | 93.0 % at 1,204 ms. Adaptive thinking is on by default; lower latency with `extra={"output_config": {"effort": "low"}}`. |
 | `claude-sonnet-4-6` | Accepts `temperature`. Thinking is off unless requested. |
 | `claude-opus-5`, `claude-opus-4-8` | Most capable, but slow for real-time turns. |
 
@@ -68,8 +68,8 @@ Any model id the API accepts works; the list above is only a suggestion.
 | `timeout` | `30.0` | Seconds per request phase (connect is capped at 5 s). Between SSE events this acts as an inactivity timeout. |
 | `max_retries` | `1` | SDK retries (connection errors, 408/409/429/5xx) before the stream starts. The SDK obeys `retry-after`, which can be long; use `0` behind a failover chain. |
 | `keepalive_expiry` | `120.0` | Seconds an idle connection stays pooled. httpx's default of 5 s would add a TLS handshake to most turns. |
-| `extra_params` | `{}` | Extra request-body fields sent on every request, e.g. `{"output_config": {"effort": "low"}}`, `{"thinking": {...}}`, `{"metadata": {...}}`, `{"top_k": 5}`, `{"stop_sequences": [...]}`. The per-call `extra=` dict overrides them. |
-| `extra_headers` | `{}` | Extra HTTP headers, e.g. `{"anthropic-beta": "..."}`. |
+| `extra` | `{}` | Extra request-body fields sent on every request, e.g. `{"output_config": {"effort": "low"}}`, `{"thinking": {...}}`, `{"metadata": {...}}`, `{"top_k": 5}`, `{"stop_sequences": [...]}`. The per-call `extra=` dict overrides them. (`extra_params` is a deprecated alias.) |
+| `headers` | `{}` | Extra HTTP headers, e.g. `{"anthropic-beta": "..."}`. (`extra_headers` is a deprecated alias.) |
 | `client` | — | A pre-built async SDK client (`AsyncAnthropicBedrockMantle`, `AsyncAnthropicVertex`, `AsyncAnthropicFoundry`, `AsyncAnthropicAWS`...). The connection options above are then ignored and the client is not closed by `aclose()`. Use that platform's model ids. |
 | `http_client` | — | An `httpx2.AsyncClient` (proxies, custom transports). |
 
@@ -145,7 +145,7 @@ separately.
 
 Thinking and signature deltas are never forwarded, so the reasoning is never spoken. On
 models that think by default (Sonnet 5, Opus 5 and newer), control latency with
-`extra_params={"output_config": {"effort": "low"}}` rather than by turning thinking off.
+`extra={"output_config": {"effort": "low"}}` rather than by turning thinking off.
 Thinking tokens count towards `max_tokens`. See also [Limitations](#limitations).
 
 ## Errors

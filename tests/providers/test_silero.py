@@ -248,7 +248,7 @@ def test_session_options(fake_ort: FakeOrt, model_file: Path) -> None:
 def test_force_cpu(fake_ort: FakeOrt, model_file: Path) -> None:
     fake_ort.providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
     SileroVAD(model_path=model_file).stream()
-    SileroVAD(model_path=model_file, force_cpu=False).stream()
+    SileroVAD(model_path=model_file, device="auto").stream()
     assert [s.providers for s in fake_ort.sessions] == [
         ["CPUExecutionProvider"],
         ["CUDAExecutionProvider", "CPUExecutionProvider"],
@@ -550,6 +550,6 @@ async def test_real_model_loads_offline_once_downloaded(
 
 @pytest.mark.model
 async def test_real_model_without_force_cpu(jfk: AudioFrame) -> None:
-    vad = SileroVAD(force_cpu=False)  # every available execution provider
+    vad = SileroVAD(device="auto")  # every available execution provider
     await vad.warmup()
     assert len(of_type(run_stream(vad, jfk), VADEventType.START_OF_SPEECH)) == 4

@@ -23,6 +23,7 @@ from typing import Any
 from ..engine import EngineOptions
 from ..registry import register_provider
 from ..utils.log import logger
+from ._options import renamed
 from .moshi import MoshiEngine
 
 __all__ = ["DEFAULT_MODEL", "DEFAULT_TEXT_PROMPT", "DEFAULT_VOICE", "VOICES", "PersonaPlexEngine"]
@@ -57,7 +58,8 @@ class PersonaPlexEngine(MoshiEngine):
         voice: voice prompt (``"NATF2"`` or a file name such as ``"NATF2.pt"``/``"x.wav"``
             in the server's voice directory); ``EngineOptions.voice`` wins.
         text_prompt: role prompt used when the agent has no instructions.
-        url: server origin (default ``wss://localhost:8998``).
+        base_url: server origin (default ``wss://localhost:8998``). (``url`` is a
+            deprecated alias.)
         **kwargs: every :class:`MoshiEngine` option.
     """
 
@@ -70,10 +72,12 @@ class PersonaPlexEngine(MoshiEngine):
         model: str | None = None,
         voice: str | None = None,
         text_prompt: str | None = None,
+        base_url: str | None = None,
         url: str | None = None,
         **kwargs: Any,
     ) -> None:
-        super().__init__(model=model or DEFAULT_MODEL, url=url or DEFAULT_URL, **kwargs)
+        base_url = renamed("PersonaPlexEngine", "base_url", base_url, "url", url)
+        super().__init__(model=model or DEFAULT_MODEL, base_url=base_url or DEFAULT_URL, **kwargs)
         self.voice = voice or DEFAULT_VOICE
         self.text_prompt = text_prompt or DEFAULT_TEXT_PROMPT
 

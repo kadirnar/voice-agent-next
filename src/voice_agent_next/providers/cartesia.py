@@ -34,12 +34,12 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from ..audio.frame import AudioFrame
 from ..errors import (
-    AuthenticationError,
     ConfigurationError,
+    MissingAPIKeyError,
     ProviderConnectionError,
     ProviderError,
     ProviderTimeoutError,
-    RateLimitError,
+    for_status,
 )
 from ..registry import register_provider
 from ..stt import STT, STTCapabilities, STTEvent, STTEventType, STTStream, Transcript, WordTiming
@@ -55,6 +55,7 @@ from ..utils.aio import Chan, cancel_and_wait
 from ..utils.clock import now
 from ..utils.ids import new_id
 from ..utils.log import logger
+from ._ws import body_text, close_ws, raise_reader_error, ws_connect
 
 if TYPE_CHECKING:
     import httpx
@@ -85,7 +86,7 @@ _MAX_MESSAGE_BYTES = 16 * 2**20
 def _resolve_api_key(api_key: str | None) -> str:
     key = api_key or os.environ.get("CARTESIA_API_KEY")
     if not key:
-        raise ConfigurationError(
+        raise MissingAPIKeyError(
             "Cartesia needs an API key: pass api_key=... or set CARTESIA_API_KEY"
         )
     return key
@@ -112,14 +113,7 @@ def _param(value: float) -> str:
 
 
 def _error_for_status(status: int | None, message: str) -> ProviderError:
-    if status in (401, 403):
-        return AuthenticationError(message, provider=_PROVIDER, status_code=status)
-    if status == 429:
-        return RateLimitError(message, provider=_PROVIDER, status_code=status)
-    if status in (408, 504):
-        return ProviderTimeoutError(message, provider=_PROVIDER, status_code=status)
-    retryable = status is not None and status >= 500
-    return ProviderError(message, provider=_PROVIDER, retryable=retryable, status_code=status)
+    return for_status(status, message, provider=_PROVIDER)
 
 
 def _api_error(msg: Mapping[str, Any]) -> ProviderError:
@@ -149,51 +143,16 @@ def _http_error(status: int, body: str) -> ProviderError:
 async def _ws_connect(
     url: str, headers: Mapping[str, str], *, open_timeout: float
 ) -> ClientConnection:
-    from websockets.asyncio.client import connect
-    from websockets.exceptions import InvalidHandshake, InvalidStatus, InvalidURI
-
-    try:
-        return await connect(
-            url,
-            additional_headers=dict(headers),
-            open_timeout=open_timeout,
-            max_size=_MAX_MESSAGE_BYTES,
-        )
-    except InvalidStatus as exc:
-        body = exc.response.body or b""
-        raise _http_error(exc.response.status_code, body.decode("utf-8", "replace")) from exc
-    except TimeoutError as exc:
-        raise ProviderTimeoutError(
-            f"timed out connecting to Cartesia ({url})", provider=_PROVIDER
-        ) from exc
-    except (OSError, InvalidHandshake, InvalidURI) as exc:
-        raise ProviderConnectionError(
-            f"cannot connect to Cartesia ({url}): {exc}", provider=_PROVIDER
-        ) from exc
-
-
-async def _close_ws(ws: ClientConnection) -> None:
-    with contextlib.suppress(Exception):
-        async with asyncio.timeout(2.0):
-            await ws.close()
-
-
-async def _raise_task_error(
-    reader: asyncio.Task[Any], writer: asyncio.Task[Any], *, grace: float = 0.5
-) -> None:
-    """Raise the error of ``reader`` or else ``writer`` (both are retrieved).
-
-    When the writer fails because the server hung up, the reader usually receives the
-    server's explanation (an ``error`` message) right after: give it ``grace`` seconds so
-    users see "invalid model" rather than "connection closed".
-    """
-    writer_failed = writer.done() and not writer.cancelled() and writer.exception() is not None
-    if writer_failed and not reader.done():
-        await asyncio.wait((reader,), timeout=grace)
-    errors = [t.exception() for t in (reader, writer) if t.done() and not t.cancelled()]
-    for error in errors:
-        if error is not None:
-            raise error
+    return await ws_connect(
+        url,
+        provider=_PROVIDER,
+        target=f"Cartesia ({url})",
+        name="Cartesia",
+        http_error=lambda r: _http_error(r.status_code, body_text(r)),
+        headers=headers,
+        open_timeout=open_timeout,
+        max_size=_MAX_MESSAGE_BYTES,
+    )
 
 
 def _closed_error(what: str, exc: BaseException | None = None) -> ProviderConnectionError:
@@ -540,7 +499,7 @@ class _TTSConnection:
 
     async def aclose(self) -> None:
         self.closed = True
-        await _close_ws(self.ws)
+        await close_ws(self.ws)
         await cancel_and_wait(self._reader)
 
 
@@ -596,7 +555,7 @@ class _CartesiaSynthesizeStream(SynthesizeStream):
         player = asyncio.create_task(self._play(segments), name="cartesia-tts-play")
         try:
             await asyncio.wait((feeder, player), return_when=asyncio.FIRST_EXCEPTION)
-            await _raise_task_error(player, feeder)
+            await raise_reader_error(player, feeder)
         finally:
             segments.close()
             await cancel_and_wait(feeder, player)
@@ -911,7 +870,7 @@ class _CartesiaSTTStream(STTStream):
         receiver = asyncio.create_task(self._recv_loop(ws), name="cartesia-stt-recv")
         try:
             await asyncio.wait((sender, receiver), return_when=asyncio.FIRST_COMPLETED)
-            await _raise_task_error(receiver, sender)
+            await raise_reader_error(receiver, sender)
             if not sender.done():
                 raise _closed_error("STT")  # the server ended the stream while audio was flowing
             try:  # all audio sent and `close` requested: collect the last results
@@ -923,7 +882,7 @@ class _CartesiaSTTStream(STTStream):
                 )
         finally:
             await cancel_and_wait(sender, receiver)
-            await _close_ws(ws)
+            await close_ws(ws)
 
     async def _send_loop(self, ws: ClientConnection) -> None:
         from websockets.exceptions import ConnectionClosed
