@@ -43,6 +43,11 @@ can ever happen during a call. Later starts use the volumes and work without net
 The ops routes of both agents are also reachable through `web`: `/ws/health`, `/ws/ready`,
 `/ws/metrics`, and the same under `/webrtc/`.
 
+The agents accept browser pages from `http://localhost:*` only
+([Origin allow-list](serving.md#who-may-connect-the-origin-allow-list)). To open the demos
+from another host name (an `https://` name on your LAN, for example), set
+`VAN_ALLOWED_ORIGINS=https://agent.example.lan` (space-separated for several).
+
 ### Change the agent
 
 Edit `docker/config/local-cpu.yaml`. It `extends` the [`local-cpu` preset](../presets.md), so
@@ -136,8 +141,8 @@ IMAGE=ghcr.io/kadirnar/voice-agent-next
 # the offline mock engine over WebSocket (the default command)
 docker run --rm -p 8765:8765 $IMAGE
 
-# OpenAI Realtime protocol in front of a cloud engine
-docker run --rm -p 8000:8000 -e OPENAI_API_KEY $IMAGE \
+# OpenAI Realtime protocol in front of a cloud engine: clients must send VAN_SERVER_API_KEY
+docker run --rm -p 8000:8000 -e OPENAI_API_KEY -e VAN_SERVER_API_KEY $IMAGE \
   -p openai-realtime --engine openai/gpt-realtime
 
 # the local-cpu stack, with Ollama running on the host
@@ -149,6 +154,12 @@ docker run --rm $IMAGE providers                             # any van command
 docker run --rm $IMAGE models download --for preset:local-cpu --dry-run
 docker run --rm --gpus all $IMAGE:latest-cuda doctor         # is the GPU used?
 ```
+
+The entrypoint binds `0.0.0.0` inside the container, so the
+[secure defaults](serving.md#listening-beyond-this-machine) apply: `-p openai-realtime`
+needs `--api-key` or `VAN_SERVER_API_KEY` (or `--insecure` behind an authenticating proxy),
+and the other protocols log a warning. Browser pages from other origins than `localhost`
+need `--allowed-origin` (or `VAN_ALLOWED_ORIGINS`, space-separated).
 
 `van serve` drains on `SIGTERM` ([graceful drain](serving.md#graceful-drain)). Give
 `docker stop -t` (or the Kubernetes `terminationGracePeriodSeconds`) more time than

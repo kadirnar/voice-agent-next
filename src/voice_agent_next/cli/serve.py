@@ -11,6 +11,12 @@ worker processes sharing the port (``--workers``), graceful drain (``--drain-tim
 ``/health``, ``/ready`` and ``/metrics`` endpoints. See ``docs/deploy/serving.md`` and
 ``docs/deploy/realtime-server.md``.
 
+Secure by default: only this machine's pages and native clients may connect
+(``--allowed-origin`` adds browser origins), sessions are limited (``--max-sessions`` 64,
+``--max-session-duration`` 1 h, ``--idle-timeout`` 5 min), and ``--protocol
+openai-realtime`` refuses to listen beyond this machine without ``--api-key`` unless
+``--insecure`` is given (the other protocols have no built-in authentication: they warn).
+
 The command is built in steps: :func:`build_models` (OpenAI Realtime) or
 :func:`build_app_config` (the other protocols) turn the engine options into what is
 served, :func:`build_served` turns that and :class:`ServeOptions` into a
@@ -49,6 +55,9 @@ _CONFIG_SUFFIXES = (".yaml", ".yml", ".toml", ".json")
 _NAMED = re.compile(r"^([A-Za-z0-9][\w.:\-]*)=(.+)$", re.S)
 _DEFAULT_PORTS = {"openai-realtime": 8000, "webrtc": 8080}
 _CONFIG_ERROR_EXIT = 2
+_DEFAULT_MAX_SESSIONS = 64  # voice_agent_next.server.security.DEFAULT_MAX_SESSIONS
+_DEFAULT_MAX_SESSION_DURATION = 3600.0
+_DEFAULT_IDLE_TIMEOUT = 300.0
 
 
 @dataclass
@@ -59,10 +68,16 @@ class ServeOptions:
     host: str = "127.0.0.1"
     port: int = 8000
     api_keys: list[str] = field(default_factory=list)
-    max_sessions: int | None = None
+    allowed_origins: list[str] = field(default_factory=list)
+    """Browser origins allowed besides this machine's pages (``*``: any)."""
+    insecure: bool = False
+    """Allow listening beyond this machine without authentication."""
+    max_sessions: int | None = _DEFAULT_MAX_SESSIONS
     accept_any_model: bool | None = None
     warmup: bool = True
-    max_session_duration: float | None = None
+    max_session_duration: float | None = _DEFAULT_MAX_SESSION_DURATION
+    idle_timeout: float | None = _DEFAULT_IDLE_TIMEOUT
+    """Close sessions after this many seconds without client messages (``None``: never)."""
     prewarm: int = 0
     """Prewarmed engines (connections) kept ready per model."""
     engine_per_session: bool = False
@@ -345,7 +360,9 @@ def build_served(
         return build_realtime_served(
             models, host=options.host, port=options.port, api_keys=options.api_keys or None,
             max_sessions=options.max_sessions, accept_any_model=options.accept_any_model,
-            max_session_duration=options.max_session_duration, **pool,
+            max_session_duration=options.max_session_duration,
+            idle_timeout=options.idle_timeout, allowed_origins=options.allowed_origins,
+            **pool,
         )  # fmt: skip
     if options.protocol in AGENT_PROTOCOLS:
         if options.api_keys:
@@ -356,7 +373,9 @@ def build_served(
         return build_agent_served(
             options.protocol, build_app_config(sources),
             engine_per_session=options.engine_per_session, max_sessions=options.max_sessions,
-            host=options.host, port=options.port, **pool,
+            host=options.host, port=options.port, allowed_origins=options.allowed_origins,
+            max_session_duration=options.max_session_duration,
+            idle_timeout=options.idle_timeout, **pool,
         )  # fmt: skip
     raise ConfigurationError(
         f"unknown protocol {options.protocol!r}; expected one of {', '.join(PROTOCOLS)}"
@@ -376,7 +395,8 @@ def build_server(models: dict[str, Any], options: ServeOptions) -> Any:
     return build_realtime_served(
         models, host=options.host, port=options.port, api_keys=options.api_keys or None,
         max_sessions=options.max_sessions, accept_any_model=options.accept_any_model,
-        max_session_duration=options.max_session_duration, prewarm=options.prewarm,
+        max_session_duration=options.max_session_duration, idle_timeout=options.idle_timeout,
+        allowed_origins=options.allowed_origins, prewarm=options.prewarm,
         preconnect=options.preconnect, max_idle=options.prewarm_max_idle,
         warmup=options.warmup,
     ).server  # fmt: skip
@@ -402,6 +422,8 @@ def _banner(served: Any, options: ServeOptions, workers: int = 1) -> None:
         extra.append(f"models: {', '.join(models)}")
     if options.protocol == "openai-realtime":
         extra.append("bearer token" if options.api_keys else "no authentication")
+    if options.allowed_origins:
+        extra.append(f"origins: {', '.join(options.allowed_origins)}")
     if options.prewarm:
         extra.append(f"prewarm {options.prewarm}")
     if options.max_sessions:
@@ -439,11 +461,45 @@ def _worker_main(sources: SourceOptions, options: ServeOptions, index: int) -> N
     )
 
 
+def check_exposure(options: ServeOptions) -> str | None:
+    """Refuse (return the error) or warn about listening beyond this machine unauthenticated.
+
+    ``openai-realtime`` has bearer-token authentication, so a non-loopback bind without
+    ``--api-key`` is refused unless ``--insecure`` says the network or a proxy protects the
+    server. The other protocols have no built-in authentication (telephony providers and
+    WebRTC peers cannot send a key): they get a warning, unless ``--insecure``.
+    """
+    from ..server.security import is_loopback_host
+
+    if options.insecure or is_loopback_host(options.host):
+        return None
+    if options.protocol == "openai-realtime":
+        if options.api_keys:
+            return None
+        return (
+            f"refusing to serve openai-realtime on {options.host} without authentication: "
+            "anyone who can reach the port could use (and pay for) the engines. Pass "
+            "--api-key KEY (or VAN_SERVER_API_KEY), bind --host 127.0.0.1, or add "
+            "--insecure if a firewall or an authenticating proxy protects the port."
+        )
+    console.print(
+        f"[yellow]warning: {escape(options.protocol)} on {escape(options.host)} has no "
+        "authentication: anyone who can reach the port can open sessions. Put an "
+        "authenticating proxy in front (see docs/deploy/serving.md), or pass --insecure to "
+        "silence this warning.[/yellow]"
+    )
+    return None
+
+
 def run(sources: SourceOptions, options: ServeOptions) -> int:
     """Run ``van serve``: one process, or a supervisor and ``options.workers`` workers."""
     from ..errors import VoiceAgentError
     from ..server.serving import free_port, reuse_port_supported, run_served, run_workers
 
+    refusal = check_exposure(options)
+    if refusal is not None:
+        console.print(f"[red]error:[/red] {escape(refusal)}")
+        return _CONFIG_ERROR_EXIT
     _configure_logging(options)
     workers = options.workers
     if workers > 1 and not reuse_port_supported():
@@ -566,13 +622,33 @@ def serve(
             "--api-key",
             envvar="VAN_SERVER_API_KEY",
             help="openai-realtime: require this bearer token (repeatable). Default: no "
-            "authentication.",
+            "authentication (then only loopback binds are allowed; see --insecure).",
         ),
     ] = None,
-    max_sessions: Annotated[
-        int | None,
-        typer.Option(min=1, help="Maximum concurrent sessions per process (then: busy)"),
+    allowed_origin: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allowed-origin",
+            envvar="VAN_ALLOWED_ORIGINS",
+            help="Browser origin allowed to connect, e.g. https://app.example.com or "
+            "https://*.example.com (repeatable; * allows any). Always allowed: this "
+            "machine's pages (http://localhost:*) and clients sending no Origin.",
+        ),
     ] = None,
+    insecure: Annotated[
+        bool,
+        typer.Option(
+            "--insecure",
+            help="Allow listening beyond this machine without authentication (a firewall "
+            "or an authenticating proxy protects the port).",
+        ),
+    ] = False,
+    max_sessions: Annotated[
+        int,
+        typer.Option(
+            min=0, help="Maximum concurrent sessions per process, then busy (0: no limit)"
+        ),
+    ] = _DEFAULT_MAX_SESSIONS,
     prewarm: Annotated[
         int,
         typer.Option(min=0, help="Prewarmed engines (open connections) kept ready per model"),
@@ -616,8 +692,16 @@ def serve(
         ),
     ] = None,
     max_session_duration: Annotated[
-        float | None, typer.Option(min=1.0, help="Close sessions after this many seconds")
-    ] = None,
+        float,
+        typer.Option(min=0.0, help="Close sessions after this many seconds (0: no limit)"),
+    ] = _DEFAULT_MAX_SESSION_DURATION,
+    idle_timeout: Annotated[
+        float,
+        typer.Option(
+            min=0.0,
+            help="Close sessions after this many seconds without client messages (0: never)",
+        ),
+    ] = _DEFAULT_IDLE_TIMEOUT,
     warmup: Annotated[
         bool, typer.Option("--warmup/--no-warmup", help="Warm engines up before serving")
     ] = True,
@@ -638,6 +722,8 @@ def serve(
 
         van serve -p websocket --preset local-cpu --max-sessions 8 --workers 4
 
+        van serve -p websocket --allowed-origin https://app.example.com
+
         van serve -p twilio --config agent.yaml --host 0.0.0.0 --port 8765
     """
     if ctx.invoked_subcommand is not None:
@@ -652,10 +738,13 @@ def serve(
         host=host,
         port=_DEFAULT_PORTS.get(proto, 8765) if port is None else port,
         api_keys=[k for k in (api_key or []) if k],
-        max_sessions=max_sessions,
+        allowed_origins=[o for o in (allowed_origin or []) if o.strip()],
+        insecure=insecure,
+        max_sessions=max_sessions or None,
         accept_any_model=any_model,
         warmup=warmup,
-        max_session_duration=max_session_duration,
+        max_session_duration=max_session_duration or None,
+        idle_timeout=idle_timeout or None,
         prewarm=prewarm,
         engine_per_session=engine_per_session,
         preconnect=preconnect,

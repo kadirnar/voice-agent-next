@@ -238,14 +238,23 @@ On barge-in, the server sends `clear`, then a final `transcript` for the interru
 | `unsupported_codec` | yes | 1002 | `codec` is not `pcm_s16le` |
 | `server_busy` | yes | 1013 | Another client holds a standalone transport, or `max_sessions` is reached. Try again later. |
 | `internal_error` | yes | 1011 | The session could not be created or started (e.g. a missing API key) |
+| `session_refused` (or the factory's code) | yes | 1008 | A factory raised `SessionRefused`; `message` says why |
 | `session_error` | per `fatal` | 1000 when the session then ends | The session reported an error (engine, tool...) |
+| `session_expired` | yes | 1000 | The session reached `max_session_duration` (default one hour) |
+| `session_idle` | yes | 1000 | No client message for `idle_timeout` seconds (default 300) |
 | `invalid_message` | no | none | A malformed message after the handshake. The connection stays open. |
 | `text_failed` | no | none | Typed input could not be processed |
+| `rate_limited` | no | none | More than 8 typed messages wait for a reply |
 
 Either side may close at any time. When the client closes, the session ends with reason
 `user_disconnected`. When the session ends (the agent hangs up, or a fatal engine error), the
-server closes with 1000. Shutting the server down closes every connection with 1001.
-`message` fields contain exception text, which helps during development.
+server closes with 1000. Shutting the server down closes every connection with 1001. A
+client that does not read what it is sent is closed with 1008 once 32 MiB are queued for it
+(`max_send_buffer`).
+
+`internal_error`, `session_error` and `text_failed` carry a generic `message` and an
+`error_id` (`err_...`): exception text never reaches clients. The server logs the details
+under the same id. The handshake and `invalid_message` errors describe the client's mistake.
 
 ### Versioning
 
@@ -292,7 +301,7 @@ server = await serve_websocket(
     host="127.0.0.1",
     port=8765,
     max_sessions=20,
-    origins=["https://app.example.com"],
+    allowed_origins=["https://app.example.com"],
 )
 print(server.url, server.port, server.sessions)
 await server.serve_forever()  # or: async with WebSocketAgentServer(...) as server: ...
@@ -315,11 +324,21 @@ def agent_factory(transport: WebSocketServerTransport) -> Agent:
     return Agent("You are a concierge.", language=meta.get("language"))
 ```
 
-Options: `max_sessions` (refuse extra clients with 1013) and `forward_events`, plus the
-per-connection transport options (`input_sample_rate`, `output_sample_rate`, `frame_duration`,
-`hello_timeout`). Any other keyword goes to `websockets.asyncio.server.serve`, for example
-`ssl`, `origins`, `process_request`, `ping_interval` or `max_size`. Compression is off by
-default, because PCM barely compresses and deflate adds latency.
+Options:
+
+* `max_sessions`: refuse extra clients with 1013 (default 64, `None`: no limit);
+* `max_session_duration` / `idle_timeout`: end sessions after this many seconds, or after
+  this many seconds without a client message (defaults 3600 and 300, `None`: never);
+* `allowed_origins`: browser origins allowed besides this machine's pages and clients
+  without an `Origin` header (see [Security](#security-and-deployment));
+* `forward_events`;
+* the per-connection transport options (`input_sample_rate`, `output_sample_rate`,
+  `frame_duration`, `hello_timeout`, `max_send_buffer`).
+
+Any other keyword goes to `websockets.asyncio.server.serve`, for example `ssl`,
+`process_request`, `ping_interval` or `max_size`. Passing `origins` (the `websockets`
+allow-list) replaces `allowed_origins`. Compression is off by default, because PCM barely
+compresses and deflate adds latency.
 
 ### `SessionBridge`
 
@@ -350,13 +369,22 @@ headphones there.
 * The default `host` is `127.0.0.1`. To accept remote clients, bind `0.0.0.0` behind TLS:
   pass `ssl=` or terminate TLS at a reverse proxy. Pages served over `https://` can only
   connect to `wss://` URLs.
-* Browsers send an `Origin` header. Pass `origins=[...]` so that other websites cannot open
-  sessions from your users' browsers (cross-site WebSocket hijacking). Each session may hold a
-  paid engine connection.
+* Browsers send an `Origin` header. By default only pages from this machine
+  (`http://localhost:*`...) and clients without an `Origin` may connect; other websites get
+  HTTP 403, so they cannot open sessions from your users' browsers (cross-site WebSocket
+  hijacking). Each session may hold a paid engine connection. Add your app's origin with
+  `allowed_origins=["https://app.example.com"]` (`van serve --allowed-origin`).
 * Authenticate before the upgrade in `process_request`, using a token in the query string or a
-  cookie. Alternatively, authenticate in a factory with `transport.hello["metadata"]`: raising
-  there refuses the client with `internal_error`.
-* Use `max_sessions` to bound concurrent sessions.
+  cookie. Alternatively, authenticate in a factory with `transport.hello["metadata"]`: raise
+  `voice_agent_next.errors.SessionRefused("invalid token")` there to refuse the client with
+  that message (close code 1008). Other exceptions reach the client as `internal_error`
+  without details.
+* A non-loopback `host` without a `process_request` hook logs a warning: nothing
+  authenticates the clients.
+* Sessions are bounded by default: `max_sessions` (64), `max_session_duration` (one hour)
+  and `idle_timeout` (five minutes). A client that floods audio is slowed down by TCP
+  backpressure (the server stops reading above 4 MiB of queued input), and a client that
+  never reads is disconnected (1008) once `max_send_buffer` (32 MiB) is queued for it.
 * Proxies must pass WebSocket upgrades through without buffering. The server pings every 20 s,
   so idle timeouts above that keep connections alive.
 

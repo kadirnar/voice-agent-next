@@ -302,7 +302,7 @@ async def test_max_sessions_refuses_extra_clients() -> None:
         assert second.of("error")[0]["code"] == "server_busy"
 
 
-async def test_session_factory_failure_is_reported() -> None:
+async def test_session_factory_failure_is_reported(caplog: pytest.LogCaptureFixture) -> None:
     def broken() -> AgentSession:
         raise RuntimeError("no engine for you")
 
@@ -311,7 +311,12 @@ async def test_session_factory_failure_is_reported() -> None:
         await client.handshake()
         assert await client.wait_closed() == 1011
         (error,) = client.of("error")
-        assert error["code"] == "internal_error" and "no engine for you" in error["message"]
+        assert error["code"] == "internal_error" and error["fatal"] is True
+        # the client gets a generic message with a correlation id, the log the details
+        assert "no engine for you" not in json.dumps(error)
+        assert error["error_id"].startswith("err_") and error["error_id"] in error["message"]
+        logged = [r.getMessage() for r in caplog.records if error["error_id"] in r.getMessage()]
+        assert logged and "no engine for you" in logged[0]
 
 
 @pytest.mark.parametrize(

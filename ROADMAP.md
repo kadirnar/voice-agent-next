@@ -41,7 +41,7 @@ Native speech-to-speech engines, cloud and local.
 - [x] #11 OpenAI Realtime engine (WebSocket) with compatibility profiles (Azure, xAI, Qwen-Omni, vLLM, Speaches…) `P0`
 - [x] #12 Gemini Live engine (BidiGenerateContent) with session resumption and non-blocking tools `P0`
 - [x] #13 Moshi / PersonaPlex full-duplex engine (local moshi-server protocol) `P1`
-- [ ] #14 Audio-input LLMs for half-cascades (gpt-audio, Qwen-Omni, vLLM-Omni, llama.cpp audio) `P1`
+- [x] #14 Audio-input LLMs for half-cascades (gpt-audio, Qwen-Omni, vLLM-Omni, llama.cpp audio) `P1`
 - [x] #15 OpenAI GPT-Live engine (Live protocol, full-duplex, delegation) `P1`
 - [x] #16 Amazon Nova 2 Sonic engine (Bedrock bidirectional stream, 8-min rotation) `P2`
 - [x] #17 Engine session rotation & reconnect with context carry-over `P1`
@@ -119,5 +119,5 @@ Work proceeds in **waves**: every wave takes the highest-priority issues whose d
 - **Wave 2 (done):** sherpa-onnx streaming STT/TTS (#9), AssemblyAI (#20), ElevenLabs (#21), Gemini LLM/TTS (#23), OpenAI STT/TTS (#24), speculative generation (#27), recording + tracing (#29), failover (#30), telephony (#35), OpenAI-Realtime-compatible server (#36), overhead track + CI gate (#40), GPU/hardware backends (#49).
 - **Wave 3 (done):** presets (#8), async tools (#28), WebRTC (#34), model manager (#48), Pocket TTS (#76), Moonshine (#77), omni models / LFM2.5-Audio (#75), Moshi (#13), session rotation (#17), dynamic endpointing (#31), handoffs (#32), `van serve` pool (#37), Docker (#38), ASR/TTS/turn-taking tracks (#41–#43), docs site (#46), examples (#47), `van doctor` (#50), GPU TTS (#79), Soniox/Speechmatics (#25), text normalization (#105); CI stabilization on Windows/macOS (#114).
 - **Wave 4 (done):** turn-taking quality (#113) and semantic end-of-turn fusion (#124), MLX on Apple Silicon (#10), GPT-Live (#15), Nova 2 Sonic (#16), NeMo-Speech.cpp (#78), T5 quality + T6 tool-use tracks (#44, #45), release automation (#51).
-- **Next:** CI flake hunt, the preset default for fused turn detection, a larger local LLM default (T5/T6 show the 1.2B model is the quality bottleneck), and the first public release when the owner decides.
+- **Wave 5 (in progress): hardening from a full codebase audit.** Telephony auth and ID validation (#133, P0), OpenAI key scoping (#134), a failure-safe session lifecycle (#135), cascade robustness (#136), exact TTS usage and a real overhead gate (#137), resampler/PCM correctness (#138), secure-by-default serving (#139); then the provider refactor (#140), config/DX (#141) and failure-path tests (#142).
 - **Lessons that shaped the process:** agents commit and push work in progress (an API limit once killed half a wave; the recovered agents resumed from their pushed branches), Windows CI runs on every PR (two merged PRs had Windows-only test races), and the benchmark drives the backlog (the first local run found a 0.9 s win in how the first sentence is split for TTS).

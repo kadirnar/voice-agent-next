@@ -32,8 +32,11 @@ What the server does (see ``docs/deploy/realtime-server.md`` for the event mappi
   send ``OpenAI-Beta: realtime=v1`` (or a beta-shaped ``session.update``);
 * optional bearer-token authentication (``Authorization: Bearer``, ``api-key`` or the
   browser ``openai-insecure-api-key.<key>`` subprotocol; constant-time comparison);
-* a concurrent session limit, backpressure in both directions, ``GET /health`` and
-  ``GET /v1/models``, clean shutdown (clients are closed with 1001, engines closed).
+* secure defaults: browser pages from other websites are refused (``Origin`` allow-list,
+  ``allowed_origins``), sessions are limited in number, duration and idle time, and
+  clients get generic error messages with a correlation id (details go to the logs);
+* backpressure in both directions, ``GET /health`` and ``GET /v1/models``, clean shutdown
+  (clients are closed with 1001, engines closed).
 
 The client plays the audio, so it — not the server — knows what the user heard: barge-in
 truncation arrives from the client as ``conversation.item.truncate``, exactly like with
@@ -64,6 +67,15 @@ from ..utils.clock import now
 from ..utils.log import logger
 from ._protocol import Dialect, SessionConfig
 from ._session import RealtimeSession
+from .security import (
+    DEFAULT_IDLE_TIMEOUT,
+    DEFAULT_MAX_SESSION_DURATION,
+    DEFAULT_MAX_SESSIONS,
+    MAX_SEND_BUFFER,
+    OriginPolicy,
+    exposure_warning,
+    header_origin,
+)
 
 __all__ = [
     "EngineFactory",
@@ -184,18 +196,27 @@ class RealtimeServer:
             rejecting the connection (HTTP 404), for clients with a hard-coded model name
             (``gpt-realtime``...). ``None`` (default): only when a single model is served.
         host / port: listening address (``port=0`` picks a free port; see :attr:`port`).
-        api_keys: accepted bearer tokens (``None``: no authentication). Compared in
-            constant time; never logged.
-        max_sessions: refuse clients beyond this many live sessions (HTTP 503).
+        api_keys: accepted bearer tokens (``None``: no authentication — a warning is
+            logged when the server listens beyond this machine). Compared in constant
+            time; never logged.
+        allowed_origins: browser origins allowed besides this machine's own pages
+            (``http://localhost:*``...) and clients without an ``Origin`` header; others
+            get HTTP 403. See :class:`~voice_agent_next.server.security.OriginPolicy`
+            (``"https://app.example.com"``, ``"https://*.example.com"``, ``"*"``).
+        max_sessions: refuse clients beyond this many live sessions (HTTP 503; default
+            64, ``None``: no limit).
         warmup: ``engine.warmup()`` shared engines before accepting clients.
         max_session_duration: close sessions after this many seconds with a
-            ``session_expired`` error, like OpenAI (``None``: no limit).
+            ``session_expired`` error, like OpenAI (default one hour; ``None``: no limit).
+        idle_timeout: close sessions after this many seconds without a client event with
+            a ``session_idle`` error (default 5 minutes; ``None``: never).
         max_message_size: largest client message accepted, in bytes.
         max_send_buffer: bytes of server events queued for a client that does not read
             them before the connection is closed (1008).
         engine_connect_timeout: seconds to wait for ``engine.connect()``.
         serve_options: extra ``websockets.asyncio.server.serve`` arguments, e.g. ``ssl``
-            (TLS) or ``origins`` (browser origin allow-list).
+            (TLS). Passing ``origins`` (the ``websockets`` allow-list) replaces
+            ``allowed_origins``.
     """
 
     def __init__(
@@ -209,11 +230,13 @@ class RealtimeServer:
         host: str = "127.0.0.1",
         port: int = 8000,
         api_keys: str | Sequence[str] | None = None,
-        max_sessions: int | None = None,
+        allowed_origins: str | Sequence[str] | None = (),
+        max_sessions: int | None = DEFAULT_MAX_SESSIONS,
         warmup: bool = True,
-        max_session_duration: float | None = None,
+        max_session_duration: float | None = DEFAULT_MAX_SESSION_DURATION,
+        idle_timeout: float | None = DEFAULT_IDLE_TIMEOUT,
         max_message_size: int = 16 * 2**20,
-        max_send_buffer: int = 32 * 2**20,
+        max_send_buffer: int = MAX_SEND_BUFFER,
         engine_connect_timeout: float = 30.0,
         **serve_options: Any,
     ) -> None:
@@ -231,6 +254,16 @@ class RealtimeServer:
             raise ConfigurationError(f"default_model {self.default_model!r} is not served")
         if max_sessions is not None and max_sessions < 1:
             raise ConfigurationError("max_sessions must be >= 1")
+        for option, value in (
+            ("max_session_duration", max_session_duration),
+            ("idle_timeout", idle_timeout),
+        ):
+            if value is not None and value <= 0:
+                raise ConfigurationError(f"{option} must be > 0 (None: no limit)")
+        try:
+            self.origin_policy = OriginPolicy(allowed_origins)
+        except ValueError as exc:
+            raise ConfigurationError(str(exc)) from None
         keys = [api_keys] if isinstance(api_keys, str) else list(api_keys or [])
         if any(not isinstance(k, str) or not k for k in keys):
             raise ConfigurationError("api_keys must be non-empty strings")
@@ -243,6 +276,7 @@ class RealtimeServer:
         self.max_sessions = max_sessions
         self.warmup = warmup
         self.max_session_duration = max_session_duration
+        self.idle_timeout = idle_timeout
         self.max_message_size = max_message_size
         self.max_send_buffer = max_send_buffer
         self.engine_connect_timeout = engine_connect_timeout
@@ -323,6 +357,11 @@ class RealtimeServer:
             self.port = int(sock.getsockname()[1])
             break
         self._started_at = now()
+        warning = exposure_warning(
+            self.host, authenticated=bool(self._keys), what="the OpenAI Realtime server"
+        )
+        if warning is not None:
+            logger.warning(warning)
         logger.info(
             "serving %s on %s/realtime (models: %s)", PROTOCOL, self.url, ", ".join(self.models)
         )
@@ -378,6 +417,12 @@ class RealtimeServer:
         if self._closing:
             return _error_response(connection, HTTPStatus.SERVICE_UNAVAILABLE, "server_closing",
                                    "The server is shutting down.")  # fmt: skip
+        if not self._origin_allowed(request):
+            return _error_response(
+                connection, HTTPStatus.FORBIDDEN, "origin_not_allowed",
+                "This origin may not connect to this server.",
+                error_type="invalid_request_error",
+            )  # fmt: skip
         if not self._authorized(request):
             return _error_response(
                 connection, HTTPStatus.UNAUTHORIZED, "invalid_api_key",
@@ -398,6 +443,18 @@ class RealtimeServer:
             response.headers["Retry-After"] = "1"
             return response
         return None
+
+    def _origin_allowed(self, request: Request) -> bool:
+        if "origins" in self.serve_options:  # the websockets allow-list decides
+            return True
+        origin = header_origin(request.headers.get_all("Origin"))
+        if self.origin_policy.allows(origin):
+            return True
+        logger.warning(
+            "refused a Realtime client from origin %r (allowed_origins / --allowed-origin)",
+            origin,
+        )
+        return False
 
     def _authorized(self, request: Request) -> bool:
         if not self._keys:
