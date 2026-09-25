@@ -1199,3 +1199,23 @@ async def test_fresh_session_is_seeded_with_the_carry_over_strategy(
     ]  # fmt: skip
     (m,) = metrics
     assert not m.planned and not m.resumed and m.carried_items == 2
+
+
+async def test_audio_split_mid_sample_is_reassembled(fake: Callable[..., Any]) -> None:
+    """Odd-length ``inlineData`` chunks: the partial sample is carried, never dropped (#138)."""
+    import base64
+
+    import numpy as np
+
+    server = await fake()
+    conn, events = await connect(server)
+    samples = (np.arange(-300, 300) * 53).astype(np.int16)
+    raw = samples.tobytes()
+    for a, b in [(0, 101), (101, 102), (102, 555), (555, len(raw))]:
+        inline = {"mimeType": "audio/pcm;rate=24000", "data": base64.b64encode(raw[a:b]).decode()}
+        await server.send({"serverContent": {"modelTurn": {"parts": [{"inlineData": inline}]}}})
+    await server.send({"serverContent": {"turnComplete": True}})
+    await events.wait(lambda: bool(events.of(ResponseDone)))
+    await conn.aclose()
+    got = b"".join(a.frame.data for a in events.of(ResponseAudio))
+    np.testing.assert_array_equal(np.frombuffer(got, dtype=np.int16), samples)
