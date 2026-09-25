@@ -446,6 +446,43 @@ async def test_tts_native_stream_replays_unsynthesized_text() -> None:
     await tts.aclose()
 
 
+async def test_tts_native_stream_drains_the_resampler_per_segment() -> None:
+    """Segment ends *drain* the resampler (#157): the provider's audio is resampled as one
+    continuous stream (no filter restart from silence at each segment, exact sample count)
+    instead of being flushed and reset per segment."""
+    from voice_agent_next.audio.resample import StreamResampler
+
+    texts = ["One.", "Two is longer.", "Three!"]
+
+    async def run(tts: Any) -> list[Any]:
+        stream = tts.stream()
+        for text in texts:
+            stream.push_text(text)
+            stream.flush()
+        stream.end_input()
+        items = [a async for a in stream]
+        await tts.aclose()
+        return items
+
+    source = await run(MockTTS(model="b", streaming=True, sample_rate=16_000))
+    rs = StreamResampler(24_000)
+    expected = b""
+    for a in source:
+        expected += rs.push(a.frame).data if a.frame else b""
+        if a.is_final:
+            expected += rs.drain().data
+    got_items = await run(
+        FallbackTTS([MockTTS(model="b", streaming=True, sample_rate=16_000)], sample_rate=24_000)
+    )
+    got = b"".join(a.frame.data for a in got_items if a.frame)
+    assert len(got) == len(expected)
+    # same samples up to rounding (soxr's output depends slightly on the chunking)
+    import numpy as np
+
+    diff = np.frombuffer(got, np.int16).astype(int) - np.frombuffer(expected, np.int16)
+    assert np.abs(diff).max() <= 2
+
+
 async def test_tts_native_stream_does_not_switch_mid_segment() -> None:
     backup = MockTTS(model="b", streaming=True)
     tts = FallbackTTS([FlakyTTS("midstream", model="a", streaming=True), backup])

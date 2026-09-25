@@ -814,7 +814,9 @@ class _FallbackSynthesizeStream(SynthesizeStream):
                         self.served_by = chain.labels[i]
                 _forward_audio(self, rs, a.frame, _shift(a.words, offset))
                 if a.is_final:
-                    tail = rs.flush()
+                    # the provider's stream goes on: keep the filter history so the next
+                    # segment continues seamlessly and the sample count never drifts
+                    tail = rs.drain()
                     if tail:
                         self._push_audio(tail)
                     self._end_segment()
