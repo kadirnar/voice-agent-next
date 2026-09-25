@@ -367,7 +367,9 @@ async def test_billed_seconds_are_reported_per_response(fake: Callable[..., Any]
     await conn.aclose()
     await events.close()
     (first, usage1), (second, usage2) = seen[:2]
-    assert first.billed_seconds > 0 and second.billed_seconds > 0
+    # usage arrives once per second of session time: a quick first response may see none
+    # yet (its time is then attributed to the next one), but the total is never lost
+    assert first.billed_seconds + second.billed_seconds > 0
     assert first.billed_seconds == pytest.approx(usage1)
     assert second.billed_seconds == pytest.approx(usage2 - usage1)
     summary = UsageSummary()
