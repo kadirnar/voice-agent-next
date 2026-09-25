@@ -137,6 +137,7 @@ __all__ = [
     "OpenAILiveEngine",
     "OpenAILiveSessionEngine",
     "live_url",
+    "seed_items",
 ]
 
 DEFAULT_MODEL: Final = "gpt-live-1"
