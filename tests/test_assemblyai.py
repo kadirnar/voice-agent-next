@@ -787,7 +787,8 @@ async def test_transcribe_uses_the_sync_api() -> None:
     [
         (401, {"detail": "Invalid API key"}, AuthenticationError, False),
         (429, {"detail": "Too many requests"}, RateLimitError, True),
-        (503, {"error_code": "capacity_exceeded", "message": "at capacity"}, ProviderError, True),
+        (503, {"error_code": "capacity_exceeded", "message": "at capacity"}, ProviderConnectionError,
+         True),
         (413, {"error_code": "audio_too_large", "message": "too long"}, ProviderError, False),
         (504, {"error_code": "inference_timeout", "message": "deadline"}, ProviderTimeoutError,
          True),

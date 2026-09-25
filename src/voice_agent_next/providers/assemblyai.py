@@ -24,7 +24,6 @@ See ``docs/providers/assemblyai.md``.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 from collections.abc import Mapping, Sequence
@@ -32,8 +31,8 @@ from typing import Any, Literal
 from urllib.parse import urlencode
 
 import httpx
-from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus, InvalidURI
+from websockets.asyncio.client import ClientConnection
+from websockets.exceptions import ConnectionClosed
 
 from ..audio.frame import AudioFrame
 from ..errors import (
@@ -43,6 +42,7 @@ from ..errors import (
     ProviderError,
     ProviderTimeoutError,
     RateLimitError,
+    for_status,
 )
 from ..metrics import STTMetrics
 from ..registry import register_provider
@@ -50,6 +50,7 @@ from ..stt import STT, STTCapabilities, STTEvent, STTEventType, STTStream, Trans
 from ..utils.aio import ChanClosed, cancel_and_wait
 from ..utils.ids import new_id
 from ..utils.log import logger
+from ._ws import close_ws, raise_task_error, ws_connect
 
 __all__ = ["AssemblyAISTT", "AssemblyAIStream"]
 
@@ -191,14 +192,7 @@ def _code_error(code: int | None, reason: str) -> ProviderError:
 
 def _http_error(status: int, detail: str) -> ProviderError:
     message = f"AssemblyAI returned HTTP {status}" + (f": {detail}" if detail else "")
-    if status in (401, 403):
-        return AuthenticationError(message, provider=PROVIDER, status_code=status)
-    if status == 429:
-        return RateLimitError(message, provider=PROVIDER, status_code=status)
-    if status == 504:
-        return ProviderTimeoutError(message, provider=PROVIDER, status_code=status)
-    retryable = status >= 500 or status == 408
-    return ProviderError(message, provider=PROVIDER, status_code=status, retryable=retryable)
+    return for_status(status, message, provider=PROVIDER)
 
 
 def _error_detail(body: bytes | bytearray | str | None) -> str:
@@ -610,27 +604,16 @@ async def _connect(stt: AssemblyAISTT, url: str) -> ClientConnection:
         url = f"{url}&{urlencode({'token': stt.token})}"
     else:
         headers = stt._headers()
-    try:
-        return await connect(
-            url,
-            additional_headers=headers,
-            open_timeout=stt.connect_timeout,
-            close_timeout=2.0,
-            compression=None,  # PCM audio does not compress; save the CPU
-        )
-    except InvalidStatus as exc:
-        response = exc.response
-        raise _http_error(response.status_code, _error_detail(response.body)) from exc
-    except InvalidURI as exc:
-        raise ConfigurationError(f"invalid AssemblyAI URL: {exc}") from exc
-    except TimeoutError as exc:
-        raise ProviderTimeoutError(
-            "timed out connecting to the AssemblyAI streaming API", provider=PROVIDER
-        ) from exc
-    except (OSError, InvalidHandshake) as exc:
-        raise ProviderConnectionError(
-            f"could not connect to the AssemblyAI streaming API: {exc}", provider=PROVIDER
-        ) from exc
+    return await ws_connect(
+        url,
+        provider=PROVIDER,
+        target="the AssemblyAI streaming API",
+        name="AssemblyAI",
+        http_error=lambda r: _http_error(r.status_code, _error_detail(r.body)),
+        headers=headers,
+        open_timeout=stt.connect_timeout,
+        compression=None,  # PCM audio does not compress; save the CPU
+    )
 
 
 class AssemblyAIStream(STTStream):
@@ -702,14 +685,14 @@ class AssemblyAIStream(STTStream):
         sender = asyncio.create_task(self._send_loop(ws), name="assemblyai-stt-send")
         try:
             await asyncio.wait({receiver, sender}, return_when=asyncio.FIRST_COMPLETED)
-            self._raise_task_error(receiver, sender)
+            raise_task_error(receiver, sender)
             if not sender.done():  # the server ended the session while audio was flowing
                 raise self._server_error or ProviderConnectionError(
                     "AssemblyAI closed the streaming session unexpectedly", provider=PROVIDER
                 )
             # Terminate sent: AssemblyAI flushes the last Turn(s), then sends Termination
             await asyncio.wait({receiver}, timeout=stt.close_timeout)
-            self._raise_task_error(receiver, sender)
+            raise_task_error(receiver, sender)
             if not receiver.done():
                 logger.warning(
                     "AssemblyAI: no Termination %.1fs after Terminate", stt.close_timeout
@@ -720,15 +703,7 @@ class AssemblyAIStream(STTStream):
             if self._grace is not None:
                 await cancel_and_wait(self._grace)
             await cancel_and_wait(sender, receiver)
-            with contextlib.suppress(Exception):
-                await ws.close()
-
-    def _raise_task_error(self, *tasks: asyncio.Task[None]) -> None:
-        for task in tasks:
-            if task.done() and not task.cancelled():
-                exc = task.exception()
-                if exc is not None:
-                    raise exc
+            await close_ws(ws)
 
     async def _send_loop(self, ws: ClientConnection) -> None:
         # With inactivity_timeout set, AssemblyAI ends sessions that receive nothing.

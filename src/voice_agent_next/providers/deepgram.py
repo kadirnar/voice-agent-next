@@ -25,7 +25,6 @@ or ``DEEPGRAM_API_KEY``. See ``docs/providers/deepgram.md``.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import re
@@ -36,13 +35,10 @@ from typing import Any, Literal
 from urllib.parse import urlencode
 
 import httpx
-from websockets.asyncio.client import ClientConnection, connect
+from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import (
     ConnectionClosed,
     ConnectionClosedError,
-    InvalidHandshake,
-    InvalidStatus,
-    InvalidURI,
 )
 from websockets.protocol import State
 
@@ -55,6 +51,7 @@ from ..errors import (
     ProviderError,
     ProviderTimeoutError,
     RateLimitError,
+    for_status,
 )
 from ..metrics import STTMetrics
 from ..registry import register_provider
@@ -64,6 +61,7 @@ from ..utils.aio import BackgroundTasks, ChanClosed, cancel_and_wait
 from ..utils.clock import now
 from ..utils.ids import new_id
 from ..utils.log import logger
+from ._ws import close_ws, ws_connect
 
 __all__ = ["DeepgramSTT", "DeepgramTTS"]
 
@@ -187,12 +185,7 @@ def _error_detail(
 
 def _http_error(status: int, detail: str) -> ProviderError:
     message = f"Deepgram returned HTTP {status}" + (f": {detail}" if detail else "")
-    if status in (401, 403):
-        return AuthenticationError(message, provider=PROVIDER, status_code=status)
-    if status == 429:
-        return RateLimitError(message, provider=PROVIDER, status_code=status)
-    retryable = status >= 500 or status == 408
-    return ProviderError(message, provider=PROVIDER, status_code=status, retryable=retryable)
+    return for_status(status, message, provider=PROVIDER)
 
 
 def _close_error(exc: ConnectionClosed, what: str) -> ProviderError:
@@ -232,28 +225,16 @@ def _task_error(tasks: Sequence[asyncio.Task[None]], what: str) -> BaseException
 
 
 async def _open_websocket(url: str, api_key: str, *, timeout: float, what: str) -> ClientConnection:
-    try:
-        ws = await connect(
-            url,
-            additional_headers={"Authorization": f"Token {api_key}"},
-            open_timeout=timeout,
-            close_timeout=2.0,
-            compression=None,  # PCM audio does not compress; save the CPU
-        )
-    except InvalidStatus as exc:
-        response = exc.response
-        detail = _error_detail(response.body, response.headers)
-        raise _http_error(response.status_code, detail) from exc
-    except InvalidURI as exc:
-        raise ConfigurationError(f"invalid Deepgram URL: {exc}") from exc
-    except TimeoutError as exc:
-        raise ProviderTimeoutError(
-            f"timed out connecting to the Deepgram {what} API", provider=PROVIDER
-        ) from exc
-    except (OSError, InvalidHandshake) as exc:
-        raise ProviderConnectionError(
-            f"could not connect to the Deepgram {what} API: {exc}", provider=PROVIDER
-        ) from exc
+    ws = await ws_connect(
+        url,
+        provider=PROVIDER,
+        target=f"the Deepgram {what} API",
+        name="Deepgram",
+        http_error=lambda r: _http_error(r.status_code, _error_detail(r.body, r.headers)),
+        headers={"Authorization": f"Token {api_key}"},
+        open_timeout=timeout,
+        compression=None,  # PCM audio does not compress; save the CPU
+    )
     request_id = ws.response.headers.get("dg-request-id") if ws.response else None
     logger.debug("Deepgram %s connected (request_id=%s)", what, request_id)
     return ws
@@ -492,7 +473,7 @@ class _DeepgramStream(STTStream):
                 raise error
         finally:
             await cancel_and_wait(sender, receiver)
-            await ws.close()
+            await close_ws(ws)
 
     async def _send_loop(self, ws: ClientConnection) -> None:
         interval = self._keepalive_interval()
@@ -764,8 +745,7 @@ class _SpeakConnection:
         )
 
     async def aclose(self) -> None:
-        with contextlib.suppress(Exception):
-            await self.ws.close()
+        await close_ws(self.ws)
 
 
 @register_provider(
