@@ -4,7 +4,8 @@ How voice-agent-next versions, changelogs and PyPI releases work, and the one-ti
 the repository owner does before the first release. Releases are **tag-driven**: pushing a
 `v<version>` tag runs [`.github/workflows/release.yml`](../.github/workflows/release.yml),
 which builds, verifies and publishes. Nothing is published from a branch, a pull request or
-a manual run.
+a manual run. Pull requests that touch `pyproject.toml`, `cliff.toml` or the workflow run
+its build and verification jobs (without macOS unless labelled `ci:full`).
 
 ## Versioning
 

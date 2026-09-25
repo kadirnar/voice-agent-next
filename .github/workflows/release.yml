@@ -9,6 +9,8 @@ name: Release
 # * Run it manually (Actions > Release > Run workflow): a dry run. Everything except the PyPI
 #   upload and the GitHub Release; the notes are in the job summary and every file is an
 #   artifact. Tick `testpypi` to also upload to TestPyPI (environment `testpypi`).
+# * Pull requests that change the packaging: the same build and checks, never a publish
+#   (macOS only with the `ci:full` label, as in ci.yml).
 
 on:
   push:
@@ -19,10 +21,16 @@ on:
         description: "Also upload to TestPyPI (needs a version not on TestPyPI yet)"
         type: boolean
         default: false
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - ".github/workflows/release.yml"
+      - "cliff.toml"
+      - "pyproject.toml"
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -41,6 +49,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -77,6 +86,21 @@ jobs:
             fi
           fi
           echo "Version **$version** ($GITHUB_EVENT_NAME on \`$GITHUB_REF_NAME\`)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verification matrix
+        id: matrix
+        env:
+          SKIP_MACOS: >-
+            ${{ github.event_name == 'pull_request' &&
+            !contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+        shell: bash
+        run: |
+          include='{"os":"ubuntu-latest","python":"3.11"},{"os":"ubuntu-latest","python":"3.14"}'
+          include+=',{"os":"windows-latest","python":"3.12"}'
+          if [[ "$SKIP_MACOS" != "true" ]]; then
+            include+=',{"os":"macos-latest","python":"3.12"}'
+          fi
+          echo "matrix={\"include\":[$include]}" >> "$GITHUB_OUTPUT"
 
       # --no-sources: build exactly what PyPI users get, ignoring [tool.uv.sources]
       - name: Build
@@ -158,12 +182,7 @@ jobs:
     timeout-minutes: 10
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-latest, python: "3.11" }
-          - { os: ubuntu-latest, python: "3.14" }
-          - { os: macos-latest, python: "3.12" }
-          - { os: windows-latest, python: "3.12" }
+      matrix: ${{ fromJSON(needs.build.outputs.matrix) }}
     env:
       VERSION: ${{ needs.build.outputs.version }}
       PYTHONUTF8: "1"
