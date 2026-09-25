@@ -715,6 +715,22 @@ async def test_final_waits_for_a_decode_in_flight_and_drops_its_result(
     await adapter.aclose()
 
 
+async def test_second_replica_runs_the_final_next_to_an_interim_decode(
+    backend: FakeBackend,
+) -> None:
+    backend.segments = growing_text
+    backend.decode_delay = 0.25
+    _, adapter = whisper_adapter(backend, interim_results=True, interim_interval=0.1, num_workers=2)
+    await adapter.warmup()
+    stream = adapter.stream()
+    events = await stream_paced(stream, speech(0.5))
+    assert stream.final_waits == [0.0]
+    kinds = [ev.type for _, ev in events]
+    assert kinds[-2:] == [STTEventType.FINAL_TRANSCRIPT, STTEventType.END_OF_SPEECH]
+    assert STTEventType.INTERIM_TRANSCRIPT not in kinds
+    await adapter.aclose()
+
+
 async def test_interim_failure_does_not_break_the_final(
     backend: FakeBackend, caplog: pytest.LogCaptureFixture
 ) -> None:

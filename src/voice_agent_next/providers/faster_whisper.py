@@ -395,7 +395,8 @@ class _WhisperAdapterStream(STTStream):
       threshold (pauses, the trailing silence before END_OF_SPEECH): a decode that starts
       on the last voiced window has the VAD's ``min_silence_duration`` to finish before
       the final one is needed. A decode still running when the utterance ends is awaited
-      and its result discarded (a CTranslate2 call cannot be interrupted).
+      and its result discarded (a CTranslate2 call cannot be interrupted), unless
+      ``num_workers >= 2``: then the final runs on the second model replica meanwhile.
     * **VAD-aware hallucination guard**: the mean speech probability of the utterance's
       speech windows is passed to :class:`HallucinationGuard`.
     """
@@ -519,13 +520,14 @@ class _WhisperAdapterStream(STTStream):
 
     async def _finish(self, frames: list[AudioFrame]) -> None:
         segment_id = self._segment_id
-        self._live = None
-        step, self._step = self._step, None
-        if step is not None and not step.done():
+        self._live = None  # a decode in flight is now stale: its result is dropped
+        step = self._step
+        if step is not None and not step.done() and self._whisper.num_workers < 2:
+            # one model replica: the final would queue behind the decode anyway
             t0 = now()
             await asyncio.wait({step})
             self.final_waits.append(now() - t0)
-        else:
+        else:  # idle, or a second replica runs the final next to the interim decode
             self.final_waits.append(0.0)
         vad_confidence = self._vad_confidence
         self._segment_id = new_id("seg_")

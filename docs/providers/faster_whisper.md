@@ -11,7 +11,7 @@ multilingual recognizer of voice-agent-next.
 | Class | `voice_agent_next.providers.faster_whisper.FasterWhisperSTT` |
 | Extra | `pip install 'voice-agent-next[faster-whisper]'` (or `uv sync --extra faster-whisper`) |
 | Credentials | none (models are public on the Hugging Face Hub) |
-| Capabilities | batch only: no interim results; word timestamps (opt-in); language detection (multilingual models) |
+| Capabilities | batch recognizer; behind a VAD: interim results (opt-in), hallucination guard; word timestamps (opt-in); language detection (multilingual models) |
 | Platforms | Linux, Windows (CPU, CUDA); macOS (CPU) |
 
 ## Usage
@@ -81,6 +81,9 @@ converted model (`model="/models/whisper-ct2"`). Downloads go to the Hugging Fac
 | `download_root` | `None` | model cache directory (default: the Hugging Face cache) |
 | `local_files_only` | `False` | never download; `VAN_OFFLINE=1` (and `HF_HUB_OFFLINE=1`) imply it |
 | `transcribe_options` | `{}` | extra `WhisperModel.transcribe()` arguments (`temperature`, `no_speech_threshold`, `task`...), applied last |
+| `interim_results` | `False` | behind a VAD, re-decode the utterance while the user speaks and emit interim transcripts (see [Partial transcripts](#partial-transcripts)) |
+| `interim_interval` | `None` | seconds of new speech between interim decodes; `None` = 0.25 s on CUDA, 0.5 s on the CPU |
+| `hallucination_guard` | `True` | drop segments that are probably not speech (see [Hallucination guard](#hallucination-guard)); `False`, or a mapping / `HallucinationGuard` to configure it |
 
 `Transcript.confidence` is `exp(mean token log-probability)` over the utterance, and
 `start_time` / `end_time` are relative to the start of the utterance audio.
