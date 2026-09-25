@@ -537,11 +537,17 @@ class LevelVAD(VAD):
 
     provider = "level"
 
-    def __init__(self, probability: float = 0.95, *, min_silence: float = 0.25) -> None:
+    def __init__(
+        self, probability: float = 0.95, *, min_silence: float = 0.25, activation: float = 0.5
+    ) -> None:
         super().__init__(
             sample_rate=16_000,
             window_samples=320,
-            options=VADOptions(min_speech_duration=0.06, min_silence_duration=min_silence),
+            options=VADOptions(
+                activation_threshold=activation,
+                min_speech_duration=0.06,
+                min_silence_duration=min_silence,
+            ),
         )
         self.probability = probability
 
@@ -794,13 +800,13 @@ def seg(text: str, **kwargs: Any) -> FakeSegment:
         (seg(" Thank you."), None, None),
         (seg(" Thank you.", no_speech_prob=0.3), None, "suspect phrase on weak evidence"),
         (seg(" Thank you.", avg_logprob=-0.9), None, "suspect phrase on weak evidence"),
-        (seg(" Thank you."), 0.55, "suspect phrase on weak evidence"),
+        (seg(" Thank you."), 0.45, "suspect phrase on weak evidence"),
         (seg(" Thank you."), 0.95, None),
         # Whisper's no-speech rule, extended with the VAD
         (seg(" Hello there.", no_speech_prob=0.7, avg_logprob=-1.2), None, "no speech"),
         (seg(" Hello there.", no_speech_prob=0.7, avg_logprob=-0.3), None, None),
-        (seg(" Hello there.", no_speech_prob=0.7, avg_logprob=-0.3), 0.5, "no speech"),
-        (seg(" Hello there.", no_speech_prob=0.3, avg_logprob=-0.3), 0.5, None),
+        (seg(" Hello there.", no_speech_prob=0.7, avg_logprob=-0.3), 0.45, "no speech"),
+        (seg(" Hello there.", no_speech_prob=0.3, avg_logprob=-0.3), 0.45, None),
         (seg(" la la la la la la la", compression_ratio=3.1), None, "repetitive"),
     ],
 )
@@ -840,8 +846,9 @@ async def test_guard_filters_transcripts(backend: FakeBackend) -> None:
 async def test_guard_uses_the_vad_confidence_in_the_adapter(backend: FakeBackend) -> None:
     backend.segments = [seg(" Thank you.")]
     audio = AudioFrame.concat([speech(0.6), AudioFrame.silence(0.5, 16_000)])
-    for probability, expected in ((0.95, ["Thank you."]), (0.6, [])):
-        _, adapter = whisper_adapter(backend, LevelVAD(probability))
+    # a VAD barely above its (low) activation threshold is unsure: weak evidence
+    for probability, expected in ((0.95, ["Thank you."]), (0.45, [])):
+        _, adapter = whisper_adapter(backend, LevelVAD(probability, activation=0.4))
         stream = adapter.stream()
         events = await stream_paced(stream, audio, speed=8.0)
         finals = [ev.text for _, ev in events if ev.type == STTEventType.FINAL_TRANSCRIPT]
@@ -853,9 +860,9 @@ async def test_guard_uses_the_vad_confidence_in_the_adapter(backend: FakeBackend
 
 def test_guard_configuration(backend: FakeBackend) -> None:
     custom = FasterWhisperSTT(
-        hallucination_guard={"vad_threshold": 0.5, "artifacts": ["Goodbye, everyone!"]}
+        hallucination_guard={"vad_threshold": 0.8, "artifacts": ["Goodbye, everyone!"]}
     )
-    assert custom.guard.vad_threshold == 0.5
+    assert custom.guard.vad_threshold == 0.8
     assert custom.guard.artifacts == ("goodbye everyone",)  # normalized
     assert custom.guard.reason(seg(" Goodbye everyone.")) == "known artifact"
     guard = HallucinationGuard(no_speech_threshold=0.3)

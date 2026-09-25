@@ -112,7 +112,7 @@ class HallucinationGuard:
     compression_ratio_threshold: float | None = 2.4
     suspect_no_speech_threshold: float | None = 0.2
     suspect_log_prob_threshold: float | None = -0.8
-    vad_threshold: float | None = 0.7
+    vad_threshold: float | None = 0.5
     max_ngram: int = 4
     max_ngram_repeats: int | None = 4
     artifacts: tuple[str, ...] = ARTIFACT_PHRASES
