@@ -41,11 +41,13 @@ MIN_INTERIM_AUDIO = 0.3
 class WhisperBackend(Protocol):
     """The provider side of :class:`WhisperAdapterStream`."""
 
-    provider: str
     model: str
     capabilities: STTCapabilities
     word_timestamps: bool
     final_from_interim: bool
+
+    @property
+    def provider(self) -> str: ...
 
     @property
     def resolved_interim_interval(self) -> float: ...
