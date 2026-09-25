@@ -1114,28 +1114,8 @@ class WebSocketAgentServer:
 
     async def _watchdog(self, transport: WebSocketServerTransport) -> str:
         """Returns (after telling the client) once the session is too old or idle."""
-        started = now()
-        limit, idle = self.max_session_duration, self.idle_timeout
-        while True:
-            t = now()
-            waits = [1.0]
-            if limit is not None:
-                if t - started >= limit:
-                    code = "session_expired"
-                    message = f"The session reached its maximum duration of {limit:g} seconds."
-                    break
-                waits.append(started + limit - t)
-            if idle is not None:
-                idle_for = transport.idle_time()
-                if idle_for >= idle:
-                    code = "session_idle"
-                    message = f"The session was closed after {idle:g} seconds without messages."
-                    break
-                waits.append(idle - idle_for)
-            await asyncio.sleep(min(waits) + 0.001)
-        logger.info("WebSocket session %s: %s", transport.session_id, code)
-        transport.send_message_nowait(
-            {"type": "error", "code": code, "message": message, "fatal": True}
+        code = await _session_watchdog(
+            transport, self.max_session_duration, self.idle_timeout, what="WebSocket"
         )
         transport.close_reason = code.replace("_", " ")
         return code
@@ -1291,6 +1271,37 @@ def _check_origin(
         return response
 
     return process_request
+
+
+async def _session_watchdog(
+    transport: Any, limit: float | None, idle: float | None, *, what: str
+) -> str:
+    """Returns ``"session_expired"`` or ``"session_idle"`` (after sending the client that
+    error) once the session is older than ``limit`` seconds or ``transport.idle_time()``
+    reaches ``idle``."""
+    started = now()
+    while True:
+        t = now()
+        waits = [1.0]
+        if limit is not None:
+            if t - started >= limit:
+                code = "session_expired"
+                message = f"The session reached its maximum duration of {limit:g} seconds."
+                break
+            waits.append(started + limit - t)
+        if idle is not None:
+            idle_for = transport.idle_time()
+            if idle_for >= idle:
+                code = "session_idle"
+                message = f"The session was closed after {idle:g} seconds without messages."
+                break
+            waits.append(idle - idle_for)
+        await asyncio.sleep(min(waits) + 0.001)
+    logger.info("%s session %s: %s", what, transport.session_id, code)
+    transport.send_message_nowait(
+        {"type": "error", "code": code, "message": message, "fatal": True}
+    )
+    return code
 
 
 def _check_api_key(

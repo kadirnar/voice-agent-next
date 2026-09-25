@@ -49,14 +49,22 @@ import numpy as np
 from ..audio.frame import AudioFormat, AudioFrame
 from ..audio.resample import StreamResampler, resample
 from ..errors import SessionRefused, TransportError
-from ..server.security import DEFAULT_MAX_SESSIONS, report_error
+from ..server.security import (
+    DEFAULT_IDLE_TIMEOUT,
+    DEFAULT_MAX_SESSION_DURATION,
+    DEFAULT_MAX_SESSIONS,
+    ApiKeys,
+    OriginPolicy,
+    exposure_warning,
+    report_error,
+)
 from ..utils.aio import BackgroundTasks, Chan, cancel_and_wait, wait_first
 from ..utils.clock import now
 from ..utils.deps import require
 from ..utils.ids import new_id
 from ..utils.log import logger
 from .base import Transport, TransportCapabilities
-from .websocket import SessionBridge, _dumps, _url_host, _wants_transport
+from .websocket import SessionBridge, _dumps, _session_watchdog, _url_host, _wants_transport
 
 if TYPE_CHECKING:
     from ..session.agent import Agent
@@ -362,6 +370,7 @@ class WebRTCTransport(Transport):
         self._in_resampler = StreamResampler(input_sample_rate, 1)
         self._out_resampler = StreamResampler(OPUS_RATE, 1)
         self._signaling: _SignalingServer | None = None
+        self._last_received = now()
 
     # ------------------------------------------------------------------ properties
     @property
@@ -374,6 +383,10 @@ class WebRTCTransport(Transport):
     def connected(self) -> bool:
         """ICE and DTLS are connected and the peer has not left."""
         return self._connected.is_set() and not self._disconnected.is_set()
+
+    def idle_time(self) -> float:
+        """Seconds since the peer last sent anything (audio or a data-channel message)."""
+        return max(0.0, now() - self._last_received)
 
     @property
     def sent_duration(self) -> float:
@@ -604,6 +617,7 @@ class WebRTCTransport(Transport):
                 self._on_disconnected()
 
     def _on_text(self, text: str) -> None:
+        self._last_received = now()
         try:
             message = json.loads(text)
         except ValueError:
@@ -655,6 +669,7 @@ class WebRTCTransport(Transport):
         try:
             while True:
                 frame = await track.recv()
+                self._last_received = now()
                 if self._input.closed:
                     continue
                 audio = self._in_resampler.push(av_frame_to_audio(frame))
@@ -753,6 +768,19 @@ class WebRTCAgentServer:
         ice_transport_policy: ``"relay"`` forces TURN relaying on both peers.
         max_sessions: answer ``503`` beyond this many live peers (default 64; ``None``:
             no limit).
+        max_session_duration: end sessions after this many seconds with a
+            ``session_expired`` error on the data channel (default one hour; ``None``: no
+            limit).
+        idle_timeout: end sessions after this many seconds in which the peer sent neither
+            audio nor data-channel messages, with a ``session_idle`` error (default 5
+            minutes; ``None``: never). A connected microphone track never idles.
+        allowed_origins: browser origins that may ``POST /offer`` besides this machine's
+            own pages, the server's own origin (its ``index_html`` page) and clients without
+            an ``Origin`` header; others get HTTP 403. ``cors_origins`` are allowed too.
+            See :class:`~voice_agent_next.server.security.OriginPolicy`.
+        api_keys: require one of these keys as ``Authorization: Bearer <key>`` on
+            ``POST /offer`` and ``GET /config`` (which may hold TURN credentials); HTTP 401
+            otherwise. Default: none.
         forward_events: send transcripts, state changes, metrics and errors to clients.
         index_html: page served at ``GET /`` (e.g. the browser demo).
         cors_origins: origins allowed to call the endpoints from another page (``"*"`` = any).
@@ -779,8 +807,25 @@ class WebRTCAgentServer:
         cors_origins: Sequence[str] = (),
         ssl: ssl_module.SSLContext | None = None,
         serve_http: bool = True,
+        max_session_duration: float | None = DEFAULT_MAX_SESSION_DURATION,
+        idle_timeout: float | None = DEFAULT_IDLE_TIMEOUT,
+        allowed_origins: str | Sequence[str] | None = (),
+        api_keys: str | Sequence[str] | None = None,
         **transport_options: Any,
     ) -> None:
+        for option, value in (
+            ("max_session_duration", max_session_duration),
+            ("idle_timeout", idle_timeout),
+        ):
+            if value is not None and value <= 0:
+                raise ValueError(f"{option} must be > 0 (None: no limit)")
+        origins = (
+            [allowed_origins] if isinstance(allowed_origins, str) else list(allowed_origins or ())
+        )
+        self.origin_policy = OriginPolicy([*origins, *cors_origins])
+        self.api_keys = ApiKeys(api_keys)
+        self.max_session_duration = max_session_duration
+        self.idle_timeout = idle_timeout
         self.session_factory = session_factory
         self.agent_factory = agent_factory
         self.host = host
@@ -810,6 +855,8 @@ class WebRTCAgentServer:
                 index_html=index_html,
                 cors_origins=cors_origins,
                 ssl=ssl,
+                origin_policy=self.origin_policy,
+                api_keys=self.api_keys,
             )
             if serve_http
             else None
@@ -842,6 +889,11 @@ class WebRTCAgentServer:
             await self._http.start()
             self.port = self._http.port
             logger.info("serving voice agents over WebRTC; signalling on %s", self.url)
+            warning = exposure_warning(
+                self.host, authenticated=bool(self.api_keys), what="the WebRTC server"
+            )
+            if warning is not None:
+                logger.warning(warning)
 
     async def serve_forever(self) -> None:
         """Serve until :meth:`aclose` is called or this coroutine is cancelled."""
@@ -917,7 +969,22 @@ class WebRTCAgentServer:
             if self.forward_events:
                 bridge = SessionBridge(session, transport)
             await session.start(agent, transport)
-            await wait_first(session.wait_closed(), transport.wait_disconnected())
+            waits: list[Awaitable[Any]] = [session.wait_closed(), transport.wait_disconnected()]
+            watchdog: asyncio.Task[str] | None = None
+            if self.max_session_duration is not None or self.idle_timeout is not None:
+                watchdog = asyncio.ensure_future(
+                    _session_watchdog(
+                        transport, self.max_session_duration, self.idle_timeout, what="WebRTC"
+                    )
+                )
+                waits.append(watchdog)
+            try:
+                await wait_first(*waits)
+            finally:
+                if watchdog is not None and not watchdog.done():
+                    await cancel_and_wait(watchdog)
+            if watchdog is not None and watchdog.done() and not watchdog.cancelled():
+                reason = watchdog.result()
         except SessionRefused as exc:
             logger.info("WebRTC session %s refused: %s", transport.session_id, exc)
             reason = "refused"
@@ -1013,8 +1080,12 @@ class _SignalingServer:
         offer_path: str = "/offer",
         config_path: str = "/config",
         request_timeout: float = 10.0,
+        origin_policy: OriginPolicy | None = None,
+        api_keys: ApiKeys | None = None,
     ) -> None:
         self.on_offer = on_offer
+        self.origin_policy = origin_policy if origin_policy is not None else OriginPolicy()
+        self.api_keys = api_keys if api_keys is not None else ApiKeys()
         self.host = host
         self.port = port
         self.ice_config = ice_config
@@ -1084,6 +1155,8 @@ class _SignalingServer:
         path = path.split("?", 1)[0]
         if method == "OPTIONS":
             return _Response(HTTPStatus.NO_CONTENT)
+        if path in (self.offer_path, self.config_path):
+            self._check_client(headers)
         if path == self.offer_path:
             if method != "POST":
                 raise _HttpError(HTTPStatus.METHOD_NOT_ALLOWED, "use POST")
@@ -1111,6 +1184,21 @@ class _SignalingServer:
             return _Response(HTTPStatus.OK, self.index_html.encode(), "text/html; charset=utf-8")
         raise _HttpError(HTTPStatus.NOT_FOUND, "not found")
 
+    def _check_client(self, headers: dict[str, str]) -> None:
+        """The Origin allow-list (HTTP 403), then the API key (HTTP 401)."""
+        origin = headers.get("origin")
+        if not (self.origin_policy.allows(origin) or _same_origin(origin, headers.get("host"))):
+            logger.warning(
+                "refused a WebRTC offer from origin %r (allowed_origins / --allowed-origin)",
+                origin,
+            )
+            raise _HttpError(HTTPStatus.FORBIDDEN, "This origin may not connect to this server.")
+        if not self.api_keys.authorized(lambda name: _header_values(headers, name)):
+            raise _HttpError(
+                HTTPStatus.UNAUTHORIZED,
+                "Incorrect or missing API key (send 'Authorization: Bearer <key>').",
+            )
+
     def _encode(self, response: _Response, origin: str | None) -> bytes:
         lines = [
             f"HTTP/1.1 {response.status.value} {response.status.phrase}",
@@ -1125,7 +1213,7 @@ class _SignalingServer:
             lines += [
                 f"Access-Control-Allow-Origin: {allowed}",
                 "Access-Control-Allow-Methods: GET, POST, OPTIONS",
-                "Access-Control-Allow-Headers: Content-Type",
+                "Access-Control-Allow-Headers: Content-Type, Authorization",
                 "Vary: Origin",
             ]
         return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + response.body
@@ -1140,6 +1228,26 @@ class _SignalingServer:
 
 def _json_response(status: HTTPStatus, payload: dict[str, Any]) -> _Response:
     return _Response(status, _dumps(payload).encode())
+
+
+def _header_values(headers: Mapping[str, str], name: str) -> list[str]:
+    value = headers.get(name.lower())
+    return [value] if value is not None else []
+
+
+def _same_origin(origin: str | None, host: str | None) -> bool:
+    """``origin`` is this server's own origin (a page it served, e.g. ``index_html``):
+    its ``host[:port]`` is the request's ``Host``. Browsers set both; other clients are not
+    what the Origin check protects against."""
+    if not origin or not host:
+        return False
+    scheme, sep, rest = origin.strip().partition("://")
+    if not sep or scheme.lower() not in ("http", "https"):
+        return False
+    netloc = rest.rstrip("/").lower()
+    default = ":443" if scheme.lower() == "https" else ":80"
+    host = host.strip().lower()
+    return netloc == host or netloc + default == host or netloc == host.removesuffix(default)
 
 
 async def _read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, str], bytes]:
