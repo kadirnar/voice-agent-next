@@ -40,7 +40,19 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.12"
-      - run: uv sync
+      # the extras CI tests too: all of them on Linux (as the `test-extras` job), the
+      # WebRTC transport on Windows and macOS
+      - name: System audio library (sounddevice)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libportaudio2
+      - name: uv sync
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            uv sync --all-extras --no-extra cuda --no-extra chatterbox --no-extra qwen-tts
+          else
+            uv sync --extra webrtc
+          fi
       - name: pytest
         shell: bash
         continue-on-error: true
