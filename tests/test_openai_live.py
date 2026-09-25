@@ -325,7 +325,7 @@ async def test_greeting_reply_and_transcripts(fake: Callable[..., Any]) -> None:
     kinds = events.kinds()
     assert kinds.count("response_started") == 2
     first_reply = kinds.index("response_started", kinds.index("response_done"))
-    assert "input_speech_started" in kinds[: first_reply]
+    assert "input_speech_started" in kinds[:first_reply]
     assert kinds[first_reply - 2 : first_reply] == ["input_committed", "input_transcript"]
     final = [e for e in events.of(InputTranscript) if e.is_final]
     assert final and final[-1].text == "I am Ada"
@@ -562,9 +562,7 @@ async def test_expired_session_reconnects_with_history(fake: Callable[..., Any])
 
 async def test_dropped_connection_reconnects(fake: Callable[..., Any]) -> None:
     server = await fake()
-    conn = await engine_for(server, rotation=RotationPolicy(backoff=0.05)).connect(
-        EngineOptions()
-    )
+    conn = await engine_for(server, rotation=RotationPolicy(backoff=0.05)).connect(EngineOptions())
     events = Events(conn)
     await server.drop()
     await wait_for(lambda: len(server.sessions) == 2 and bool(server.sessions[1].config))
