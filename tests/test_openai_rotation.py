@@ -238,8 +238,8 @@ async def test_tools_in_flight_block_rotation_and_survive_a_drop() -> None:
         assert server.events("conversation.item.create")[-1]["item"]["type"] == (
             "function_call_output"
         )
-        await asyncio.sleep(0.4)  # the pending rotation was satisfied by the reconnect
-        assert len(metrics) == 1
+        await asyncio.sleep(0.4)  # the pending rotation was satisfied by the reconnect:
+        assert len(metrics) == 1 and len(server.handshakes) == 3  # no new standby either
 
 
 async def test_carry_over_strategy_is_pluggable() -> None:
