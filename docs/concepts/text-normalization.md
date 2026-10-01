@@ -172,6 +172,16 @@ from voice_agent_next.text import normalize_text, tts_clean
 options = CascadeOptions(text_filter=lambda s: normalize_text(tts_clean(s)))
 ```
 
+In a YAML/TOML config, `cascade.text_filter` takes the import path of a `str -> str`
+function, or a list of them applied left to right (`null` turns the filter off):
+
+```yaml
+cascade:
+  text_filter:
+    - voice_agent_next.text.filters:tts_clean
+    - my_package.speech:expand_units      # your own function, after the default cleanup
+```
+
 The transcript and the chat history then show the spoken form too, so
 `TTS(normalize=True)` is usually the better choice.
 

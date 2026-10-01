@@ -16,10 +16,10 @@ from typing import Any, Literal
 
 import yaml
 
-from ..app import build_agent
+from ..app import build_agent, cascade_options
 from ..config import AppConfig, ComponentSpec, expand_env, read_config_file, resolve_extends
 from ..engine import S2SEngine
-from ..engines.cascade import CascadeEngine, CascadeOptions
+from ..engines.cascade import CascadeEngine
 from ..errors import ConfigurationError
 from ..registry import create
 from ..session import Agent, SessionOptions
@@ -166,7 +166,7 @@ class BenchSystem:
             return engine
         return CascadeEngine(
             stt=cfg.stt, llm=cfg.llm, tts=cfg.tts, vad=cfg.vad,
-            turn_detector=cfg.turn_detector, options=CascadeOptions(**cfg.cascade),
+            turn_detector=cfg.turn_detector, options=cascade_options(cfg),
         )  # fmt: skip
 
     def build_agent(self) -> Agent:
