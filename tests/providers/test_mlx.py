@@ -32,7 +32,7 @@ from voice_agent_next.stt import StreamAdapter, STTEvent, STTEventType
 from voice_agent_next.stt_guard import HallucinationGuard
 
 from .mlx_fakes import MLXFakes, hf
-from .whisper_helpers import LevelVAD, push_settled, stream_paced
+from .whisper_helpers import LevelVAD, push_settled, stream_paced, without_closing_flush
 
 
 def chunks(frame: AudioFrame, step: float = 0.02) -> list[AudioFrame]:
@@ -416,10 +416,10 @@ async def test_whisper_hallucination_guard(mlx_fakes: MLXFakes) -> None:
 async def test_whisper_guard_uses_the_vad_confidence(mlx_fakes: MLXFakes) -> None:
     mlx_fakes.whisper_segments = [wseg(" Danke.")]
     audio = AudioFrame.concat([speech(0.6), AudioFrame.silence(0.5, 16_000)])
-    for probability, expected in ((0.95, ["Danke."]), (0.45, [])):
+    for probability, expected in ((0.95, ["Danke."]), (0.45, [""])):  # "": dropped
         adapter = StreamAdapter(MLXWhisperSTT(model="tiny"), LevelVAD(probability, activation=0.4))
         stream = adapter.stream()
-        events = await stream_paced(stream, audio, speed=8.0)
+        events = without_closing_flush(await stream_paced(stream, audio, speed=8.0))
         finals = [ev.text for _, ev in events if ev.type == STTEventType.FINAL_TRANSCRIPT]
         assert finals == expected, probability
         assert [ev.type for _, ev in events].count(STTEventType.END_OF_SPEECH) == 1
@@ -439,7 +439,8 @@ async def test_whisper_interim_transcripts(mlx_fakes: MLXFakes) -> None:
     await adapter.warmup()
     stream = adapter.stream()
     silence = AudioFrame.silence(0.3, 16_000)
-    events = await stream_paced(stream, AudioFrame.concat([silence, speech(1.6), silence]))
+    audio = AudioFrame.concat([silence, speech(1.6), silence])
+    events = without_closing_flush(await stream_paced(stream, audio))
     kinds = [ev.type for _, ev in events]
     interims = [ev.text for _, ev in events if ev.type == STTEventType.INTERIM_TRANSCRIPT]
     finals = [ev.text for _, ev in events if ev.type == STTEventType.FINAL_TRANSCRIPT]

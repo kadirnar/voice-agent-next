@@ -237,6 +237,40 @@ async def test_a_late_final_of_the_pending_turn_replaces_its_interim_text(
     assert rec.finals() == ["one two three"]
 
 
+async def test_an_utterance_without_text_does_not_drop_the_next_turns(
+    closing: list[EngineConnection],
+) -> None:
+    # a batch STT behind the VAD: the first utterance decodes to nothing (a hallucination
+    # guard dropped it). Its flush must still be answered: an unanswered one times out and
+    # takes the next turn's final as its late answer, and so on (#165)
+    stt = MockSTT(transcripts=["", "one", "two", "three"], streaming=False)
+    _, conn, rec, _ = await open_cascade(stt=stt, final_transcript_timeout=0.3)
+    closing.append(conn)
+    for _ in range(4):
+        await utterance(conn)
+        await asyncio.sleep(0.8)  # longer than the timeout: a late flush would be recorded
+    await wait_for(lambda: len(rec.finals()) == 3, 5)
+    assert rec.finals() == ["one", "two", "three"]
+    assert not conn._late_flushes
+
+
+async def test_a_late_empty_final_answers_its_own_flush(
+    closing: list[EngineConnection],
+) -> None:
+    # the decode takes longer than the cascade waits: the empty final of the first
+    # utterance arrives late and consumes that flush, not the next turn's final
+    stt = MockSTT(transcripts=["", "one"], streaming=False, latency=0.5)
+    _, conn, rec, _ = await open_cascade(
+        stt=stt, final_transcript_timeout=0.2, min_endpointing_delay=0.8
+    )
+    closing.append(conn)
+    await utterance(conn)
+    await wait_for(lambda: stt._i == 1 and not conn._late_flushes, 5)
+    await utterance(conn)
+    await wait_for(lambda: rec.finals(), 5)
+    assert rec.finals() == ["one"]
+
+
 # ---------------------------------------------------------------- STT stream that ends
 class EndingSTT(STT):
     """A streaming STT whose provider closes the stream after ``frames`` audio frames."""

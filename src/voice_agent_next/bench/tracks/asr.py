@@ -167,6 +167,7 @@ class AsrItem(BaseModel):
     interim_updates: int = 0
     interim_revisions: int = 0
     finals: int = 0
+    """Final transcripts with text (streaming; an empty final only answers a flush)."""
     timed_out: bool = False
     error: str | None = None
 
@@ -262,7 +263,9 @@ async def _recognize_streaming(
         with contextlib.suppress(asyncio.CancelledError):
             await consumer
         await stream.aclose()
-    rec.finals = len(finals)
+    # an empty final answers a flush without speech (the VAD-cut adapters): it still
+    # times the flush, but is not a transcript
+    rec.finals = sum(1 for _, text in finals if text)
     rec.text = " ".join(text for _, text in finals if text)
     if finals:
         t_final = finals[-1][0]
