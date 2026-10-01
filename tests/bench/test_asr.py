@@ -37,6 +37,7 @@ from voice_agent_next.bench.text_norm import (
 from voice_agent_next.bench.tracks.asr import (
     AsrItem,
     AsrOptions,
+    _recognize_streaming,
     _revisions,
     asr_markdown_table,
     render_asr_report,
@@ -44,7 +45,9 @@ from voice_agent_next.bench.tracks.asr import (
 )
 from voice_agent_next.bench.wer import EditCounts, corpus_rate, edit_counts, word_counts
 from voice_agent_next.cli.main import app
+from voice_agent_next.providers.energy import EnergyVAD
 from voice_agent_next.providers.mock import MockSTT
+from voice_agent_next.stt import StreamAdapter
 from voice_agent_next.utils.download import DownloadError
 
 from .helpers import concat, silence, tone
@@ -477,6 +480,16 @@ async def test_streaming_needs_a_vad_for_batch_only_recognizers(tmp_path: Path) 
     )  # fmt: skip
     assert results.manifest.system["stt"]["stream_adapter"] is True
     assert results.summary.rates["wer"] == 0
+
+
+async def test_the_empty_final_of_the_closing_flush_is_not_a_transcript() -> None:
+    # the VAD ends the utterance in the trailing silence: end_input()'s flush then gets an
+    # empty final of its own, which times the flush but is no transcript
+    adapter = StreamAdapter(MockSTT(transcripts=["hello"], streaming=False), EnergyVAD())
+    audio = concat(tone(0.6, 16_000), silence(0.8, 16_000))
+    rec = await _recognize_streaming(adapter, audio, "en", AsrOptions(realtime_factor=0))
+    assert rec.text == "hello" and rec.finals == 1
+    assert rec.ttfs_s is not None and not rec.timed_out
 
 
 async def test_failures_are_reported_not_scored(tmp_path: Path) -> None:

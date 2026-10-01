@@ -43,7 +43,7 @@ from voice_agent_next.stt import StreamAdapter, STTEventType
 from voice_agent_next.utils.download import DownloadError, download
 from voice_agent_next.vad import VAD
 
-from .whisper_helpers import LevelVAD, push_settled, stream_paced
+from .whisper_helpers import LevelVAD, push_settled, stream_paced, without_closing_flush
 
 # ------------------------------------------------------------------------ fakes
 
@@ -517,7 +517,7 @@ async def test_streams_through_stream_adapter_with_a_vad(backend: FakeBackend) -
     for frame in chunks(silence) + chunks(speech(0.8)) + chunks(silence):
         stream.push_audio(frame)
     stream.end_input()
-    events = [e async for e in stream]
+    events = without_closing_flush([e async for e in stream])
     kinds = [e.type for e in events]
     assert [e.text for e in events if e.type == STTEventType.FINAL_TRANSCRIPT] == [TEXT]
     assert kinds.count(STTEventType.START_OF_SPEECH) == 1
@@ -588,7 +588,8 @@ async def test_interim_transcripts_while_speaking(backend: FakeBackend) -> None:
     await adapter.warmup()
     silence = AudioFrame.silence(0.3, 16_000)
     stream = adapter.stream()
-    events = await stream_paced(stream, AudioFrame.concat([silence, speech(1.6), silence]))
+    audio = AudioFrame.concat([silence, speech(1.6), silence])
+    events = without_closing_flush(await stream_paced(stream, audio))
     kinds = [ev.type for _, ev in events]
     interims = [ev for _, ev in events if ev.type == STTEventType.INTERIM_TRANSCRIPT]
     finals = [ev for _, ev in events if ev.type == STTEventType.FINAL_TRANSCRIPT]
@@ -638,7 +639,9 @@ async def test_no_interim_decode_during_silence_so_the_final_does_not_wait(
     await adapter.warmup()
     stream = adapter.stream()
     silence = AudioFrame.silence(1.0, 16_000)  # long pause: interims must not continue
-    events = await stream_paced(stream, AudioFrame.concat([speech(1.0), silence]))
+    events = without_closing_flush(
+        await stream_paced(stream, AudioFrame.concat([speech(1.0), silence]))
+    )
 
     assert stream.final_waits == [0.0]  # the model was idle when the utterance ended
     speech_end = 1.0  # a decode started in the pause would cover part of it
@@ -753,8 +756,10 @@ async def test_interim_failure_does_not_break_the_final(
     stt._transcribe_sync = flaky  # type: ignore[method-assign]
     stream = adapter.stream()
     with caplog.at_level(logging.WARNING, logger="voice_agent_next"):
-        events = await stream_paced(
-            stream, AudioFrame.concat([speech(0.8), AudioFrame.silence(0.5, 16_000)])
+        events = without_closing_flush(
+            await stream_paced(
+                stream, AudioFrame.concat([speech(0.8), AudioFrame.silence(0.5, 16_000)])
+            )
         )
     assert [ev.text for _, ev in events if ev.type == STTEventType.FINAL_TRANSCRIPT] == [TEXT]
     assert "interim decode failed" in caplog.text
@@ -847,16 +852,55 @@ async def test_guard_filters_transcripts(backend: FakeBackend) -> None:
 async def test_guard_uses_the_vad_confidence_in_the_adapter(backend: FakeBackend) -> None:
     backend.segments = [seg(" Thank you.")]
     audio = AudioFrame.concat([speech(0.6), AudioFrame.silence(0.5, 16_000)])
-    # a VAD barely above its (low) activation threshold is unsure: weak evidence
-    for probability, expected in ((0.95, ["Thank you."]), (0.45, [])):
+    # a VAD barely above its (low) activation threshold is unsure: weak evidence (the
+    # dropped utterance still gets its final, an empty one)
+    for probability, expected in ((0.95, ["Thank you."]), (0.45, [""])):
         _, adapter = whisper_adapter(backend, LevelVAD(probability, activation=0.4))
         stream = adapter.stream()
-        events = await stream_paced(stream, audio, speed=8.0)
+        events = without_closing_flush(await stream_paced(stream, audio, speed=8.0))
         finals = [ev.text for _, ev in events if ev.type == STTEventType.FINAL_TRANSCRIPT]
         assert finals == expected, probability
         kinds = [ev.type for _, ev in events]  # the VAD's segment is still reported
         assert kinds.count(STTEventType.END_OF_SPEECH) == 1
         await adapter.aclose()
+
+
+@pytest.mark.parametrize("interim_results", [False, True])
+async def test_an_utterance_the_guard_drops_gets_an_empty_final(
+    backend: FakeBackend, interim_results: bool
+) -> None:
+    # the cascade waits for a final after each flush: without one it would take the next
+    # utterance's final as the late answer and drop it (#165)
+    backend.segments = [seg(" Thanks for watching!")]
+    _, adapter = whisper_adapter(backend, interim_results=interim_results, interim_interval=0.1)
+    stream = adapter.stream()
+    audio = AudioFrame.concat([speech(0.6), AudioFrame.silence(0.5, 16_000)])
+    events = without_closing_flush(await stream_paced(stream, audio, speed=4.0))
+    S, F, E = (
+        STTEventType.START_OF_SPEECH,
+        STTEventType.FINAL_TRANSCRIPT,
+        STTEventType.END_OF_SPEECH,
+    )
+    assert [(ev.type, ev.text) for _, ev in events] == [(S, ""), (F, ""), (E, "")]
+    assert len({ev.segment_id for _, ev in events}) == 1
+    final = events[1][1].transcript
+    assert final is not None and final.language == "en"
+    await adapter.aclose()
+
+
+async def test_a_flush_without_speech_is_answered(backend: FakeBackend) -> None:
+    _, adapter = whisper_adapter(backend, language="tr-TR")
+    stream = adapter.stream()
+    for frame in chunks(AudioFrame.silence(0.3, 16_000)):
+        stream.push_audio(frame)
+    stream.flush()
+    event = await asyncio.wait_for(stream.__anext__(), 5)
+    assert event.type == STTEventType.FINAL_TRANSCRIPT and event.segment_id is None
+    assert event.transcript is not None and event.transcript.text == ""
+    assert event.transcript.language == "tr"
+    assert final_calls(backend) == []  # nothing was decoded
+    await stream.aclose()
+    await adapter.aclose()
 
 
 def test_guard_configuration(backend: FakeBackend) -> None:

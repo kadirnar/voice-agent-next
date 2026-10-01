@@ -337,10 +337,12 @@ class STTStream(ABC):
 class StreamAdapter(STT):
     """Makes a batch-only :class:`STT` streamable by segmenting audio with a :class:`VAD`.
 
-    Emits START_OF_SPEECH / END_OF_SPEECH from the VAD and one FINAL_TRANSCRIPT per
-    detected utterance (or per :meth:`STTStream.flush`). A recognizer may run its own
-    stream over the VAD's segments instead (:meth:`STT._create_adapter_stream`), e.g. to
-    add interim transcripts; then ``capabilities.interim_results`` is the wrapped one's.
+    Emits START_OF_SPEECH / END_OF_SPEECH from the VAD and one FINAL_TRANSCRIPT, possibly
+    empty, per detected utterance and per :meth:`STTStream.flush` (a flush during speech
+    ends the utterance; one without speech gets an empty final): the cascade waits for an
+    answer to every flush. A recognizer may run its own stream over the VAD's segments
+    instead (:meth:`STT._create_adapter_stream`), e.g. to add interim transcripts; then
+    ``capabilities.interim_results`` is the wrapped one's. It follows the same contract.
     """
 
     def __init__(self, stt: STT, vad: VAD) -> None:
@@ -381,12 +383,14 @@ class _AdapterStream(STTStream):
         self._adapter = adapter
         super().__init__(adapter, language=language)
 
-    async def _transcribe(self, frames: list[AudioFrame], segment_id: str) -> None:
-        if not frames:
-            return
-        transcript = await self._adapter.wrapped.transcribe(frames, language=self._language)
-        if transcript.text.strip():
-            self._emit(STTEvent(STTEventType.FINAL_TRANSCRIPT, transcript, segment_id))
+    async def _transcribe(self, frames: list[AudioFrame], segment_id: str | None) -> None:
+        """Emit the final transcript of ``frames``, even an empty one (nothing was said,
+        or the recognizer dropped it): a pending flush waits for it."""
+        if frames:
+            transcript = await self._adapter.wrapped.transcribe(frames, language=self._language)
+        else:
+            transcript = Transcript(text="", language=self._language)
+        self._emit(STTEvent(STTEventType.FINAL_TRANSCRIPT, transcript, segment_id))
 
     async def _run(self) -> None:
         from .vad import VADEventType
@@ -405,6 +409,8 @@ class _AdapterStream(STTStream):
             if self.is_flush(item):
                 if vad_stream.speaking:
                     await finish_current()
+                else:  # no utterance to end: answer the flush anyway
+                    await self._transcribe([], None)
                 continue
             assert isinstance(item, AudioFrame)
             for ev in vad_stream.push_audio(item):

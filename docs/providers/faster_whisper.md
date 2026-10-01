@@ -28,7 +28,8 @@ print(transcript.text, transcript.language, transcript.confidence)
 Whisper transcribes complete utterances. In a cascade it needs a VAD: `CascadeEngine`
 automatically wraps batch recognizers in `voice_agent_next.stt.StreamAdapter`, which cuts
 the input into utterances at VAD end-of-speech and transcribes each one (one
-`FINAL_TRANSCRIPT` per utterance, plus `START_OF_SPEECH` / `END_OF_SPEECH` from the VAD).
+`FINAL_TRANSCRIPT` per utterance, plus `START_OF_SPEECH` / `END_OF_SPEECH` from the VAD; a
+flush without speech gets an empty final, see [the flush contract](../concepts/cascade.md#the-flush-contract)).
 
 ```yaml
 # agent.yaml
@@ -317,8 +318,9 @@ unsure. Energy-based VADs report lower probabilities than neural ones on real sp
 noise; with 0.5 no real utterance of the benchmark below was dropped for a weak VAD. A
 user who says "Thank you." clearly keeps their transcript; the same words decoded from a
 keyboard click that barely crossed the VAD threshold are dropped. When the whole utterance is dropped,
-the adapter still reports the VAD's `START_OF_SPEECH` / `END_OF_SPEECH` but no final
-transcript, like any utterance without words.
+the adapter still reports the VAD's `START_OF_SPEECH` / `END_OF_SPEECH`, with an empty final
+transcript between them, like any utterance without words: the cascade waits for that final
+after its flush and commits nothing.
 
 The guard lives in `voice_agent_next.stt_guard` and is shared with
 [`mlx_whisper`](mlx.md#stt-whisper-mlx_whisper). Every threshold is configurable, and

@@ -71,7 +71,7 @@ class WhisperBackend(Protocol):
 
 class WhisperAdapterStream(STTStream):
     """Like the adapter's own stream, the VAD cuts the input into utterances and each one
-    gets one final transcript. In addition:
+    gets one final transcript, possibly empty (as does a flush without speech). In addition:
 
     * **interim transcripts** (``interim_results=True``): while the VAD reports speech, the
       utterance so far is re-decoded in the background whenever enough new speech has
@@ -139,6 +139,13 @@ class WhisperAdapterStream(STTStream):
                     if vad_stream.speaking:
                         await self._finish(vad_stream.speech_frames())
                         vad_stream.reset()
+                    else:  # no utterance to end: answer the flush anyway
+                        self._emit(
+                            STTEvent(
+                                STTEventType.FINAL_TRANSCRIPT,
+                                Transcript(text="", language=whisper_language(self._language)),
+                            )
+                        )
                     continue
                 assert isinstance(item, AudioFrame)
                 for ev in vad_stream.push_audio(item):
@@ -257,8 +264,10 @@ class WhisperAdapterStream(STTStream):
             self._report(frames, now() - t0, None)
         else:
             transcript = await self._final(frames, vad_confidence)
-        if transcript is not None and transcript.text.strip():
-            self._emit(STTEvent(STTEventType.FINAL_TRANSCRIPT, transcript, segment_id))
+        if transcript is None:
+            transcript = Transcript(text="", language=whisper_language(self._language))
+        # even an empty final (the guard dropped everything): a pending flush waits for it
+        self._emit(STTEvent(STTEventType.FINAL_TRANSCRIPT, transcript, segment_id))
         self._emit(STTEvent(STTEventType.END_OF_SPEECH, segment_id=segment_id))
 
     async def _final(self, frames: list[AudioFrame], vad_confidence: float | None) -> Transcript:

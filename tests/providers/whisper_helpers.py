@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from voice_agent_next import AudioFrame, VADOptions
+from voice_agent_next.stt import STTEventType
 from voice_agent_next.vad import VAD
 
 
@@ -99,3 +100,13 @@ async def push_settled(stream: Any, audio: AudioFrame, *, timeout: float = 10.0)
     stream.end_input()
     await consumer
     return events
+
+
+def without_closing_flush(events: list[Any]) -> list[Any]:
+    """``events`` (``(audio time, event)`` pairs or events) without the last one, which must
+    be the empty final that answers the closing flush (``end_input()`` after the VAD ended
+    the last utterance: every flush gets a final)."""
+    last = events[-1][1] if isinstance(events[-1], tuple) else events[-1]
+    assert last.type == STTEventType.FINAL_TRANSCRIPT, last
+    assert last.text == "" and last.segment_id is None, last
+    return events[:-1]

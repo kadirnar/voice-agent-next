@@ -140,6 +140,50 @@ async def test_stream_adapter_makes_batch_stt_streamable() -> None:
     assert [e.type for e in events].count(STTEventType.START_OF_SPEECH) == 2
 
 
+async def test_stream_adapter_answers_every_utterance_and_flush_with_a_final() -> None:
+    # the cascade waits for a final after each flush: an utterance the recognizer drops
+    # ("") and a flush without speech get an empty one (#165)
+    batch = MockSTT(transcripts=["", "hi"], streaming=False)
+    adapter = StreamAdapter(batch, EnergyVAD(options=VADOptions(min_silence_duration=0.3)))
+    stream = adapter.stream()
+    for f in chunks(synth_speech(0.6, 16_000)) + chunks(silence(0.5)):
+        stream.push_audio(f)
+    stream.flush()  # the VAD already ended the utterance
+    for f in chunks(synth_speech(0.6, 16_000)):
+        stream.push_audio(f)
+    stream.end_input()  # ends the second utterance: no extra final
+    events = [e async for e in stream]
+    S, F, E = (
+        STTEventType.START_OF_SPEECH,
+        STTEventType.FINAL_TRANSCRIPT,
+        STTEventType.END_OF_SPEECH,
+    )
+    assert [(e.type, e.text) for e in events] == [
+        (S, ""), (F, ""), (E, ""), (F, ""), (S, ""), (F, "hi"), (E, "")
+    ]  # fmt: skip
+    first, flushed = events[1], events[3]
+    assert first.segment_id == events[0].segment_id == events[2].segment_id
+    assert flushed.segment_id is None and flushed.transcript is not None
+    assert flushed.transcript.language == "en"
+    assert events[4].segment_id not in (None, first.segment_id)
+
+
+async def test_stream_adapter_answers_a_flush_without_speech() -> None:
+    adapter = StreamAdapter(MockSTT(streaming=False), EnergyVAD())
+    metrics: list[STTMetrics] = []
+    adapter.on("metrics", metrics.append)
+    stream = adapter.stream()
+    for f in chunks(silence(0.4)):
+        stream.push_audio(f)
+    stream.flush()
+    event = await asyncio.wait_for(stream.__anext__(), 5)
+    assert event.type == STTEventType.FINAL_TRANSCRIPT and event.text == ""
+    # the flush's own latency (nothing was decoded), not a span until the next utterance
+    assert [m.streamed for m in metrics] == [True]
+    stream.end_input()
+    assert [(e.type, e.text) async for e in stream] == [(STTEventType.FINAL_TRANSCRIPT, "")]
+
+
 # ------------------------------------------------------------------------------- LLM
 
 

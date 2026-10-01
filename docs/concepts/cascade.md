@@ -51,6 +51,21 @@ The same in a config file: `stt:`, `llm:`, `tts:`, `vad:`, `turn_detector:` and 
 With a non-streaming TTS, the `SentenceStreamAdapter` synthesizes sentence by sentence
 with one sentence of prefetch, which gives the same alignment.
 
+## The flush contract
+
+At every candidate end of turn the cascade flushes the STT stream (`STTStream.flush()`) and
+waits up to `final_transcript_timeout` for a `FINAL_TRANSCRIPT`. An STT stream answers
+each flush with at least one final, an **empty** one when there was nothing to transcribe:
+the utterance decoded to no words (a [hallucination guard](../providers/faster_whisper.md#hallucination-guard)
+dropped it), or the flush came without speech. The VAD-cut `StreamAdapter` streams (batch
+recognizers such as faster-whisper) emit one final, possibly empty, per utterance and per
+flush. An empty final adds nothing to the turn.
+
+A flush that gets no final in time falls back to the interim text, and the final that
+arrives later is taken as its late answer: it belongs to that turn only and is dropped if
+the turn was already committed. An STT that left a flush unanswered would therefore lose
+the next turn's transcript, so a custom STT must answer every flush too.
+
 ## Turn signals from the STT
 
 Some STTs decide the end of turn themselves (Deepgram Flux, AssemblyAI Universal-Streaming,
