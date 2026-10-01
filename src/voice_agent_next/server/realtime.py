@@ -142,8 +142,9 @@ def engine_from_config(config: Any) -> RealtimeModel:
     """A :class:`RealtimeModel` from an agent config (:class:`~voice_agent_next.config.AppConfig`,
     a mapping, or a YAML/TOML/JSON file path): its ``engine`` or cascade components, plus
     the agent's instructions, voice and language as session defaults."""
+    from ..app import cascade_options
     from ..config import AppConfig, load_config
-    from ..engines.cascade import CascadeEngine, CascadeOptions
+    from ..engines.cascade import CascadeEngine
 
     cfg = config if isinstance(config, AppConfig) else load_config(config)
     engine: S2SEngine
@@ -152,7 +153,7 @@ def engine_from_config(config: Any) -> RealtimeModel:
     else:
         engine = CascadeEngine(
             stt=cfg.stt, llm=cfg.llm, tts=cfg.tts, vad=cfg.vad,
-            turn_detector=cfg.turn_detector, options=CascadeOptions(**cfg.cascade),
+            turn_detector=cfg.turn_detector, options=cascade_options(cfg),
         )  # fmt: skip
     if cfg.agent.tools:
         logger.warning(

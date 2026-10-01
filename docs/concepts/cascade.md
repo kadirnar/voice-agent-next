@@ -79,7 +79,7 @@ AgentSession(llm="google/gemini-3.8-flash", tts="cartesia", vad="silero")
 | `dictation`, `dictation_min_delay`, `dictation_max_delay`, `dictation_threshold` | off, 1 s, 5 s, `None` | Long pauses expected; switch at runtime with `session.update_endpointing(dictation=True)` ([dictation mode](endpointing.md#dictation-mode)) |
 | `final_transcript_timeout` | 1.0 s | Max wait for the STT's final transcript after flushing (falls back to the interim text) |
 | `stt_reconnect`, `stt_reconnect_attempts`, `stt_reconnect_backoff`, `stt_reconnect_buffer` | `None` (the STT's `capabilities.reconnect`), 3, 0.25 s, 10 s | [Reopen an STT stream](#stt-reconnects) that ends or drops |
-| `text_filter` | `tts_clean` | Applied to each sentence before TTS |
+| `text_filter` | `tts_clean` | Applied to each sentence before TTS. In a config file: an import path (`"my_pkg.filters:clean"`), a list of them (applied left to right) or `null` (no filter) |
 | `first_sentence_min_chars` / `first_sentence_max_chars` | 4 / 40 | Shape the first spoken chunk for fast first audio |
 | `max_history_items` | `None` | Truncate the LLM context (the system prompt is always kept) |
 | `turn_audio_prefix` | 0.5 s | Audio kept before speech start for the turn detector / audio LLM |

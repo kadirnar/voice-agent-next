@@ -391,7 +391,8 @@ def build_agent_served(
 
 def engine_from_app_config(cfg: Any) -> S2SEngine:
     """The engine of an :class:`~voice_agent_next.config.AppConfig` (engine or cascade)."""
-    from ..engines.cascade import CascadeEngine, CascadeOptions
+    from ..app import cascade_options
+    from ..engines.cascade import CascadeEngine
     from ..registry import create
 
     if cfg.engine is not None:
@@ -399,7 +400,7 @@ def engine_from_app_config(cfg: Any) -> S2SEngine:
         return engine
     return CascadeEngine(
         stt=cfg.stt, llm=cfg.llm, tts=cfg.tts, vad=cfg.vad, turn_detector=cfg.turn_detector,
-        options=CascadeOptions(**cfg.cascade),
+        options=cascade_options(cfg),
     )  # fmt: skip
 
 
