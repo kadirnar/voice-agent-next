@@ -343,6 +343,14 @@ stt:
 `hallucination_guard=False` returns Whisper's output unchanged. Dropped segments are
 logged at DEBUG level (`voice_agent_next` logger) with the rule that dropped them.
 
+The guard judges every decode, interim ones included. `filter(segments, *, vad_confidence,
+interim)` tells it which kind it is: `interim=True` for an interim decode of an utterance
+still in progress, `False` for the final (or a batch) decode. The built-in rules ignore
+it; a custom guard that acts on the transcript itself (a subclass, or a wrapper set as
+`stt.guard`, e.g. a wake-word gate) can keep interims and decide on the final decode, so
+that it does not refuse an utterance before its keyword is heard. Such a guard must
+accept the `interim` keyword.
+
 ### Multilingual phrase lists
 
 Texts are compared after normalization: case-folded, accents removed (`ı` folded to `i`),

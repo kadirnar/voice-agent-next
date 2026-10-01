@@ -398,7 +398,7 @@ class FasterWhisperSTT(STT):
             segments = list(segments)  # lazy generator: decoding happens while iterating
         except Exception as exc:
             raise _map_error(exc, "transcription") from exc
-        verdict = self.guard.filter(segments, vad_confidence=vad_confidence)
+        verdict = self.guard.filter(segments, vad_confidence=vad_confidence, interim=interim)
         if verdict.dropped:
             logger.debug(
                 "faster-whisper: dropped %s (%s)",

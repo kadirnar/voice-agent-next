@@ -408,9 +408,21 @@ class HallucinationGuard:
         return None
 
     def filter(
-        self, segments: Sequence[Any], *, vad_confidence: float | None = None
+        self,
+        segments: Sequence[Any],
+        *,
+        vad_confidence: float | None = None,
+        interim: bool = False,
     ) -> GuardVerdict:
-        """Split ``segments`` into kept and dropped ones."""
+        """Split ``segments`` into kept and dropped ones.
+
+        ``interim`` is ``True`` for an interim decode of an utterance still in progress
+        (``interim_results``) and ``False`` for its final decode or a batch one. The
+        built-in rules judge both alike; a guard that acts on the transcript itself (a
+        wake word or keyword gate, as a subclass or a wrapper set as ``stt.guard``) can
+        wait for the final decode instead of refusing a partial one. Such a guard must
+        accept this keyword.
+        """
         kept: list[Any] = []
         dropped: list[tuple[str, str]] = []
         for segment in segments:

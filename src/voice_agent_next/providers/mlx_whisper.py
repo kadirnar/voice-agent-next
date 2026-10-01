@@ -290,7 +290,7 @@ class MLXWhisperSTT(STT):
         except Exception as exc:
             raise _mlx.map_error(exc, _PROVIDER, "transcription") from exc
         segments = list(result.get("segments") or [])
-        verdict = self.guard.filter(segments, vad_confidence=vad_confidence)
+        verdict = self.guard.filter(segments, vad_confidence=vad_confidence, interim=interim)
         if verdict.dropped:
             logger.debug(
                 "mlx-whisper: dropped %s (%s)",

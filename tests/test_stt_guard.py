@@ -174,6 +174,14 @@ def test_dict_segments_like_mlx_whisper() -> None:
     ]
 
 
+def test_filter_takes_the_interim_flag_and_judges_both_alike() -> None:
+    segments = [seg(" Hello there."), seg(" Thanks for watching!"), seg(" ...")]
+    final = GUARD.filter(segments)
+    assert final == GUARD.filter(segments, interim=False)
+    assert GUARD.filter(segments, vad_confidence=0.9, interim=True) == final
+    assert [s.text for s in final.kept] == [" Hello there."]
+
+
 def test_patterns_are_configurable() -> None:
     guard = HallucinationGuard(patterns=(r"untertitel von .*",))
     assert guard.reason(seg(" Untertitel von Max Mustermann")) == "known artifact"
