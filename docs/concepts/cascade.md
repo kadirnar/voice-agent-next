@@ -29,6 +29,14 @@ session = AgentSession(
 The same in a config file: `stt:`, `llm:`, `tts:`, `vad:`, `turn_detector:` and a
 `cascade:` section with `CascadeOptions` fields.
 
+Component instances may outlive a session, e.g. an application that keeps its models
+loaded and builds a new `AgentSession(stt=..., llm=..., tts=...)` for every call. Closing
+a session unsubscribes it from its engine's `"metrics"` and, when the session built the
+cascade itself, the cascade from its components (`CascadeEngine.detach_components()`):
+the closed session and cascade receive nothing more and are not kept alive by the
+components. A `CascadeEngine` passed to several sessions keeps its components; each
+session only removes its own listener.
+
 ## A user turn, step by step
 
 1. **Listening.** Audio streams continuously into the STT stream and the VAD. VAD start →

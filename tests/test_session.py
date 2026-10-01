@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import itertools
 import time
 from collections.abc import Callable
@@ -24,8 +25,9 @@ from voice_agent_next import (
 )
 from voice_agent_next.audio.frame import AudioFormat
 from voice_agent_next.chat import AudioContent
+from voice_agent_next.engines.cascade import CascadeEngine
 from voice_agent_next.errors import ConfigurationError
-from voice_agent_next.metrics import TurnMetrics
+from voice_agent_next.metrics import LLMMetrics, TurnMetrics
 from voice_agent_next.providers.energy import EnergyVAD
 from voice_agent_next.providers.mock import (
     MockEngine,
@@ -338,6 +340,61 @@ async def test_generate_reply_and_say_api() -> None:
 
 
 # ---------------------------------------------------------------------- cascade only
+
+
+async def _one_turn(session: AgentSession, rec: Recorder) -> None:
+    transport = LoopbackTransport()
+    await session.start(Agent("x"), transport)
+    await speak(transport)
+    await wait_for(lambda: bool(rec.turn_metrics()))
+
+
+async def test_a_closed_session_stops_listening_to_its_engine_and_components() -> None:
+    stt, llm, tts, vad = MockSTT(), MockLLM(), MockTTS(), EnergyVAD()
+    session = mock_cascade(stt=stt, llm=llm, tts=tts, vad=vad)
+    engine = session.engine
+    rec = Recorder(session)
+    await _one_turn(session, rec)
+    assert all(c.has_listeners("metrics") for c in (stt, llm, tts, engine))
+    await session.aclose()
+    # the components outlive the session: they must not keep its cascade (and it) alive
+    assert not any(c.has_listeners("metrics") for c in (stt, llm, tts, vad, engine))
+    assert any(isinstance(m, LLMMetrics) for m in rec.of("metrics"))  # reported before
+
+
+async def test_reused_components_report_to_the_next_session_only() -> None:
+    components: dict[str, Any] = {"stt": MockSTT(), "llm": MockLLM(), "tts": MockTTS()}
+    first = mock_cascade(**components)
+    first_rec = Recorder(first)
+    await _one_turn(first, first_rec)
+    await first.aclose()
+    reported = len(first_rec.of("metrics"))
+    usage = copy.copy(first.usage)
+
+    second = mock_cascade(**components)
+    rec = Recorder(second)
+    await _one_turn(second, rec)
+    await second.aclose()
+    llm_ids = [m.request_id for m in rec.of("metrics") if isinstance(m, LLMMetrics)]
+    assert llm_ids and len(llm_ids) == len(set(llm_ids))  # each metric once
+    assert len(first_rec.of("metrics")) == reported  # nothing reaches the closed session
+    assert first.usage == usage
+
+
+async def test_closing_one_of_two_sessions_on_a_shared_engine() -> None:
+    llm = MockLLM()
+    engine = CascadeEngine(
+        stt=MockSTT(), llm=llm, tts=MockTTS(), vad=EnergyVAD(),
+        options=CascadeOptions(min_endpointing_delay=0.0),
+    )  # fmt: skip
+    closed, open_ = AgentSession(engine), AgentSession(engine)
+    closed_rec, rec = Recorder(closed), Recorder(open_)
+    await closed.aclose()
+    assert llm.has_listeners("metrics")  # not the session's engine to detach
+    await _one_turn(open_, rec)
+    await open_.aclose()
+    assert not closed_rec.of("metrics") and rec.of("metrics")
+    assert engine.has_listeners("metrics") is False
 
 
 async def test_cascade_turn_detector_delays_commit_until_user_is_done() -> None:

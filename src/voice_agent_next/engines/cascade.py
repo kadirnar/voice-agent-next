@@ -491,6 +491,13 @@ class CascadeEngine(S2SEngine):
     def _forward_metrics(self, m: Metrics) -> None:
         self.emit("metrics", m)
 
+    def detach_components(self) -> None:
+        """Stop forwarding the components' metrics. For components that outlive this
+        engine (reused by the next one): otherwise each of their metrics is forwarded
+        once per engine ever built on them, and they keep those engines alive."""
+        for comp in self.components:
+            comp.off("metrics", self._forward_metrics)
+
     async def connect(self, options: EngineOptions) -> EngineConnection:
         return CascadeConnection(self, options)
 

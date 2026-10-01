@@ -402,6 +402,8 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
                 ``SessionOptions.trace``.
         """
         super().__init__()
+        self._owns_engine = not isinstance(engine, S2SEngine)
+        """The session built its engine (a cascade from components: detached on close)."""
         if engine is not None:
             if any(c is not None for c in (stt, llm, tts, turn_detector)):
                 raise ConfigurationError("pass either engine=... or cascade components, not both")
@@ -644,6 +646,8 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
             steps.append(("on_exit", functools.partial(self._agent.on_exit, self)))
             if self._taps:
                 steps.append(("taps", lambda: self._notify("session_closing", self, reason, now())))
+        # last: the connection's final metrics (STT/TTS of the last turn) still arrive
+        steps.append(("metrics listeners", self._detach_engine))
         for what, step in steps:
             try:
                 result = step()
@@ -651,6 +655,16 @@ class AgentSession(EventEmitter, Generic[UserdataT]):
                     await result
             except Exception:
                 logger.exception("session close: %s failed", what)
+
+    def _detach_engine(self) -> None:
+        """A closed session stops listening to its engine (which may serve other sessions)
+        and, when it built the cascade itself, the cascade to its components (which the
+        application may reuse)."""
+        from ..engines.cascade import CascadeEngine
+
+        self.engine.off("metrics", self._on_metrics)
+        if self._owns_engine and isinstance(self.engine, CascadeEngine):
+            self.engine.detach_components()
 
     def _on_loop_done(self, task: asyncio.Task[Any]) -> None:
         """A session loop failed: report it as fatal and close the session."""
