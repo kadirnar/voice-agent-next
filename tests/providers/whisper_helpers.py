@@ -6,11 +6,14 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
 from voice_agent_next import AudioFrame, VADOptions
+from voice_agent_next.stt_guard import GuardVerdict, HallucinationGuard
 from voice_agent_next.vad import VAD
 
 
@@ -49,6 +52,24 @@ class LevelVAD(VAD):
                 pass
 
         return Inference()
+
+
+@dataclass(frozen=True)
+class RecordingGuard(HallucinationGuard):
+    """The default guard, recording the ``interim`` flag of every decode it judges (what a
+    wake word or keyword gate acts on)."""
+
+    interims: list[bool] = field(default_factory=list)
+
+    def filter(
+        self,
+        segments: Sequence[Any],
+        *,
+        vad_confidence: float | None = None,
+        interim: bool = False,
+    ) -> GuardVerdict:
+        self.interims.append(interim)
+        return super().filter(segments, vad_confidence=vad_confidence, interim=interim)
 
 
 async def stream_paced(

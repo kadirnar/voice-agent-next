@@ -43,7 +43,7 @@ from voice_agent_next.stt import StreamAdapter, STTEventType
 from voice_agent_next.utils.download import DownloadError, download
 from voice_agent_next.vad import VAD
 
-from .whisper_helpers import LevelVAD, push_settled, stream_paced
+from .whisper_helpers import LevelVAD, RecordingGuard, push_settled, stream_paced
 
 # ------------------------------------------------------------------------ fakes
 
@@ -857,6 +857,24 @@ async def test_guard_uses_the_vad_confidence_in_the_adapter(backend: FakeBackend
         kinds = [ev.type for _, ev in events]  # the VAD's segment is still reported
         assert kinds.count(STTEventType.END_OF_SPEECH) == 1
         await adapter.aclose()
+
+
+async def test_the_guard_knows_interim_decodes_from_the_final(backend: FakeBackend) -> None:
+    backend.segments = growing_text
+    guard = RecordingGuard()
+    stt, adapter = whisper_adapter(
+        backend, interim_results=True, interim_interval=0.2, hallucination_guard=guard
+    )
+    assert stt.guard is guard
+    stream = adapter.stream()
+    events = await stream_paced(
+        stream, AudioFrame.concat([speech(1.6), AudioFrame.silence(0.3, 16_000)])
+    )
+    assert [ev.type for _, ev in events].count(STTEventType.INTERIM_TRANSCRIPT) >= 2
+    assert guard.interims == [True] * len(interim_calls(backend)) + [False]
+    await stt.transcribe(speech())  # a batch decode is final too
+    assert guard.interims[-1] is False
+    await adapter.aclose()
 
 
 def test_guard_configuration(backend: FakeBackend) -> None:

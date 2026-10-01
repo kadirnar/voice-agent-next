@@ -32,7 +32,7 @@ from voice_agent_next.stt import StreamAdapter, STTEvent, STTEventType
 from voice_agent_next.stt_guard import HallucinationGuard
 
 from .mlx_fakes import MLXFakes, hf
-from .whisper_helpers import LevelVAD, push_settled, stream_paced
+from .whisper_helpers import LevelVAD, RecordingGuard, push_settled, stream_paced
 
 
 def chunks(frame: AudioFrame, step: float = 0.02) -> list[AudioFrame]:
@@ -425,6 +425,22 @@ async def test_whisper_guard_uses_the_vad_confidence(mlx_fakes: MLXFakes) -> Non
         assert [ev.type for _, ev in events].count(STTEventType.END_OF_SPEECH) == 1
         await adapter.aclose()
     assert mlx_fakes.threads == {"mlx-test_0"}
+
+
+async def test_whisper_guard_knows_interim_decodes_from_the_final(mlx_fakes: MLXFakes) -> None:
+    mlx_fakes.whisper_segments = growing
+    guard = RecordingGuard()
+    stt = MLXWhisperSTT(
+        model="tiny", interim_results=True, interim_interval=0.2, hallucination_guard=guard
+    )
+    adapter = StreamAdapter(stt, LevelVAD())
+    stream = adapter.stream()
+    events = await stream_paced(
+        stream, AudioFrame.concat([speech(1.6), AudioFrame.silence(0.3, 16_000)])
+    )
+    assert [ev.type for _, ev in events].count(STTEventType.INTERIM_TRANSCRIPT) >= 2
+    assert guard.interims == [True] * len(interim_calls(mlx_fakes)) + [False]
+    await adapter.aclose()
 
 
 async def test_whisper_interim_transcripts(mlx_fakes: MLXFakes) -> None:
